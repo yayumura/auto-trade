@@ -1,5 +1,6 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from google import genai
 import feedparser
 import urllib.parse
@@ -9,236 +10,235 @@ import io
 import time
 import os
 import re
-import logging
+import warnings
 
-# --- 1. 環境設定：文字コードとノイズを完全に制御 ---
+warnings.filterwarnings('ignore')
+
+# --- 1. 環境設定（文字コード・パスの絶対指定） ---
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# --- 2. ファイルパスの絶対指定（実行場所のズレを防止） ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
 PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
-ASSET_LOG_FILE = os.path.join(BASE_DIR, 'daily_assets.csv')
-AI_LOG_FILE = os.path.join(BASE_DIR, 'ai_decision_log.txt')
 
-# --- 3. AI・トレード設定 ---
-GEMINI_API_KEY = "キーをここに入力"  # 【重要】実際のAPIキーを必ずここに入れてください
+# --- 2. AI・トレード設定 ---
+GEMINI_API_KEY = "ここにAPIキーを入力"  # 【重要】APIキーを入力してください
+
+# APIキー未設定のチェック
+if GEMINI_API_KEY == "ここにAPIキーを入力":
+    print("⚠️ エラー: GEMINI_API_KEY が設定されていません。コード内の設定箇所にAPIキーを入力してください。")
+    sys.exit()
+
 client = genai.Client(api_key=GEMINI_API_KEY)
-# 【重要】404エラー対策：最新仕様のモデル名
-MODEL_ID = "models/gemini-1.5-flash"
+MODEL_ID = "gemini-2.5-flash"  # 最新・高速モデル
 
+# シミュレーション用の初期資金設定
 INITIAL_CASH = 1000000
-TAX_RATE = 0.20315
-HARD_STOP_LOSS = 0.93  # -7%で強制損切
 
 def get_recent_news(code, name):
-    """Googleニュースから最新情報を抽出"""
+    """プロBOT機能: ニュースAI・テーマ株判定のための情報収集"""
     clean_name = re.sub(r'\s+', ' ', name).strip()
     query = urllib.parse.quote(f"{code} {clean_name}")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
     try:
         feed = feedparser.parse(rss_url)
-        titles = [entry.title for entry in feed.entries[:3]]
+        titles = [entry.title for entry in feed.entries[:5]]  # 直近5件
         return " | ".join(titles) if titles else "関連ニュースなし"
-    except: return "ニュース取得エラー"
+    except: 
+        return "ニュース取得エラー"
 
-def ai_judge_exit(name, code, current_profit_ratio, news_text):
-    """AIに出口判断を仰ぎ、日本語ログを確実に保存"""
+def calculate_technicals(df):
+    """① テクニカル拡張 & ④ ボラティリティ計算"""
+    if len(df) < 50:
+        return None
+    
+    # RSI (14期間)
+    delta = df['Close'].diff()
+    up = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    down = -1 * delta.clip(upper=0).ewm(span=14, adjust=False).mean()
+    df['RSI'] = 100 - (100 / (1 + up / down))
+    
+    # MACD
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # ボリンジャーバンド & スクイーズ判定用
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['STD20'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
+    df['BB_Lower'] = df['SMA20'] - (df['STD20'] * 2)
+    df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA20'] # ボラ収縮検知用
+    
+    # ATR (アベレージ・トゥルー・レンジ)
+    tr1 = df['High'] - df['Low']
+    tr2 = abs(df['High'] - df['Close'].shift())
+    tr3 = abs(df['Low'] - df['Close'].shift())
+    df['TR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+    
+    # VWAP (日中平均約定価格 - 15分足ベースの近似)
+    df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
+    df['VWAP'] = (df['Typical_Price'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+
+    return df
+
+def scan_initial_breakout(df):
+    """② 資金流入検知 & ③ トレンド検知の統合ロジック"""
+    latest = df.iloc[-1]
+    
+    # 【資金流入検知】出来高急増 & 出来高加速度
+    vol_mean_5 = df['Volume'].iloc[-6:-1].mean()
+    vol_surge = latest['Volume'] > (vol_mean_5 * 3.0)  # 過去5期間の3倍の出来高
+    
+    # 【トレンド検知】ブレイクアウト (15分足を日足相当期間で計算)
+    lookback_5d = min(100, len(df)-1)
+    break_5d = latest['Close'] > df['High'].iloc[-(lookback_5d+1):-1].max()
+    
+    # 【ボラティリティ】スクイーズ(収縮)からのブレイク検知
+    squeeze_condition = df['BB_Width'].iloc[-10:-1].mean() < 0.05 # バンド幅が狭い状態
+    volatility_expansion = latest['BB_Width'] > df['BB_Width'].iloc[-2] # 急拡大
+    
+    # 「出来高急増」かつ「スクイーズからのブレイク or 高値更新」を初動と判定
+    is_hot = vol_surge and (break_5d or (squeeze_condition and volatility_expansion))
+    
+    tech_data = {
+        "RSI": latest['RSI'],
+        "MACD": latest['MACD'],
+        "Signal": latest['Signal'],
+        "VolSurge": vol_surge,
+        "SqueezeBreak": squeeze_condition and volatility_expansion,
+        "Breakout": break_5d
+    }
+    
+    return is_hot, tech_data
+
+def ai_scoring(code, name, tech, news_text):
+    """⑤ AIスコア & ⑥ プロBOT拡張 (テーマ・決算・SNSトレンド判定)"""
     prompt = f"""
-    Command: Decide to SELL or HOLD for the following stock.
-    Stock: {name}({code})
-    Current Profit: {current_profit_ratio:+.1%}
-    Latest News: {news_text}
-    Instructions:
-    1. Reply 'SELL' or 'HOLD' at the first line.
-    2. Provide a short reason in Japanese at the next line.
+    あなたは機関投資家レベルの株価予測AIです。以下の情報から、銘柄の「直近の急騰確率(スコア)」を 1〜100 の数値で評価してください。
+    
+    【銘柄】 {name} ({code})
+    
+    【テクニカル指標 (初動検知ツールより)】
+    RSI: {tech['RSI']:.1f}
+    MACD/シグナル: {tech['MACD']:.2f} / {tech['Signal']:.2f}
+    資金流入(出来高急増): {'発生中' if tech['VolSurge'] else 'なし'}
+    ボラティリティ・ブレイク: {'発生中' if tech['SqueezeBreak'] else 'なし'}
+    直近高値ブレイク: {'発生中' if tech['Breakout'] else 'なし'}
+    
+    【最新ニュース・テーマ株判定】
+    {news_text}
+    
+    【判定基準】
+    - 「AI、半導体、防衛、量子、宇宙、バイオ」などの強力なテーマ資金流入があるか？
+    - 決算のサプライズイベントや、SNSで話題になりやすい材料が含まれているか？
+    - テクニカルな初動シグナルとファンダメンタルズが合致しているか？
+    
+    【出力ルール】
+    1行目: スコア（例: 88）
+    2行目: 判定理由（簡潔に100文字以内の日本語で）
     """
     try:
-        # 404対策済みのAPI呼び出し
         response = client.models.generate_content(model=MODEL_ID, contents=prompt)
-        res_text = response.text.strip()
-        
-        # ログへの書き込み（asciiエラー対策のencoding='utf-8'）
-        with open(AI_LOG_FILE, "a", encoding="utf-8", errors="replace") as f:
-            f.write(f"--- {datetime.now()} ---\n{name}({code}): {res_text}\n\n")
-            f.flush()
-            
-        decision = res_text.upper()
-        # 画面表示用に1行目以降の理由部分を取得
-        reason = res_text.split('\n')[-1][:40] if '\n' in res_text else res_text[:40]
-        return "SELL" in decision, reason
+        lines = response.text.strip().split('\n')
+        score = int(re.sub(r'\D', '', lines[0]))
+        reason = lines[1] if len(lines) > 1 else "詳細理由なし"
+        return score, reason
     except Exception as e:
-        return False, f"AI通信エラー: {str(e)[:15]}"
+        return 0, f"AI評価エラー"
 
-def execute_sell(df, idx, sell_price, reason_text):
-    """売却処理：CSVを更新し、利益を確定"""
-    buy_price = float(df.at[idx, '買値'])
-    # 簡易シミュレーションとして1銘柄1株分を計算
-    gross_p = sell_price - buy_price
-    tax = max(0, gross_p * TAX_RATE) if gross_p > 0 else 0
-    net_p = gross_p - tax
+def main():
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 高速スキャン開始")
     
-    df.at[idx, '状態'] = '売却済'
-    df.at[idx, '売値'] = sell_price
-    df.at[idx, '確定損益(税引後)'] = net_p
-    df.at[idx, '売却理由'] = reason_text
-    print(f"💰 【決済実行】{df.at[idx, '銘柄名']}: {reason_text} (損益: {net_p:,.0f}円)")
-
-def manage_portfolio_hybrid():
-    """保有銘柄のAI出口戦略チェック"""
-    if not os.path.exists(PORTFOLIO_FILE): return
-    
-    # 区切り文字自動判別読み込み（タブ区切り対策）
+    # data_j.csvから銘柄リストを取得
     try:
-        df = pd.read_csv(PORTFOLIO_FILE, sep=None, engine='python', encoding='utf-8-sig')
-    except:
-        df = pd.read_csv(PORTFOLIO_FILE, sep=None, engine='python', encoding='cp932')
-
-    df.columns = df.columns.str.strip()
-    df['状態'] = df['状態'].astype(str).str.strip()
-    df['コード'] = df['コード'].astype(str).str.strip()
-    active_mask = df['状態'].str.contains('保有', na=False)
-
-    if not active_mask.any():
-        print("📊 現在、保有銘柄はありません。")
+        df_symbols = pd.read_csv(DATA_FILE)
+        # 15分以内の実行を担保するため、プライム市場とスタンダードなど流動性の高い銘柄へ絞り込み
+        targets = df_symbols[df_symbols['市場・商品区分'].str.contains('プライム|スタンダード', na=False)]['コード'].astype(str).tolist()
+        targets = targets[:200]  # 検証用にサンプリング
+    except Exception as e:
+        print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
         return
 
-    print(f"\n--- AI出口戦略パトロール中 (対象: {active_mask.sum()}銘柄) ---")
-    for idx, row in df[active_mask].iterrows():
+    hot_candidates = []
+    tickers = [f"{code}.T" for code in targets]
+    
+    print(f"--- 15分足データ一括ダウンロード (対象: {len(tickers)}銘柄) ---")
+    
+    # 修正箇所: show_errors を削除
+    data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True)
+    
+    # 修正箇所: データが空の場合のクラッシュ回避（休場日など）
+    if data is None or data.empty:
+        print("💡 株価データを取得できませんでした。休場日、もしくは通信状況を確認してください。")
+        return
+
+    for code in targets:
+        ticker = f"{code}.T"
         try:
-            code_pure = str(row['コード']).split('.')[0]
-            ticker = yf.Ticker(f"{code_pure}.T")
-            hist = ticker.history(period="1d")
-            if hist.empty: continue
-            
-            curr_p = hist['Close'].iloc[-1]
-            buy_p = float(row['買値'])
-            ratio = curr_p / buy_p
-            
-            print(f"🔍 {row['銘柄名']} を分析中... (株価: {curr_p:,.0f}円 / 損益: {ratio-1:+.1%})")
-            
-            # 1. 絶対防衛ライン（強制損切）
-            if ratio <= HARD_STOP_LOSS:
-                execute_sell(df, idx, curr_p, "絶対損切ライン到達")
-                continue
-            
-            # 2. AIによる複合判断
-            news = get_recent_news(code_pure, row['銘柄名'])
-            should_sell, reason = ai_judge_exit(row['銘柄名'], code_pure, ratio-1, news)
-            
-            if should_sell:
-                execute_sell(df, idx, curr_p, reason)
+            # 修正箇所: yfinanceの取得結果構造のブレに強いデータ抽出方法に変更
+            if isinstance(data.columns, pd.MultiIndex):
+                if ticker not in data.columns.levels[0]: continue
+                df = data[ticker].dropna()
             else:
-                print(f"  [維持] {row['銘柄名']}: {reason}")
-        except Exception as e:
-            print(f"  [エラー] {row['銘柄名']}: {e}")
-    
-    df.to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
-
-def scan_and_buy_hybrid(master_df):
-    """新規銘柄のAIエントリー判定"""
-    all_codes = [f"{c}.T" for c in master_df['コード']]
-    target_codes = all_codes[:1000] 
-    print(f"\n--- AIエントリー判定スキャン中 ---")
-    
-    batch_size = 50
-    new_buys = []
-    for i in range(0, len(target_codes), batch_size):
-        batch = target_codes[i:i+batch_size]
-        try:
-            data = yf.download(batch, period="2d", interval="15m", progress=False)
-            if data.empty: continue
-            close, vol = data['Close'], data['Volume']
-            for code in batch:
-                if code not in close.columns: continue
-                p, v = close[code].dropna(), vol[code].dropna()
-                if len(p) < 5: continue
-                
-                # 急騰・出来高急増を検知
-                if (p.iloc[-1] / p.iloc[-2] > 1.005) and (v.iloc[-1] / v.iloc[-11:-1].mean() > 3.0):
-                    pure_code = str(code).replace(".T", "")
-                    info = master_df[master_df['コード'] == pure_code].iloc[0]
-                    news = get_recent_news(pure_code, info['銘柄名'])
-                    
-                    # AIスコアリング（期待値を1-10で評価）
-                    prompt = f"{info['銘柄名']}のニュース:{news}\n期待値を1-10で数字のみ回答。"
-                    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
-                    score_match = re.search(r'\d+', res.text)
-                    score = int(score_match.group()) if score_match else 5
-                    
-                    if score >= 8:
-                        print(f"🚀 AI GO! スコア{score}: {info['銘柄名']}")
-                        new_buys.append({
-                            '購入日': datetime.now().strftime('%Y/%m/%d'),
-                            'コード': pure_code, '銘柄名': info['銘柄名'], '業種': info['33業種区分'],
-                            '買値': round(p.iloc[-1], 1), '状態': '保有', '売値': 0, 
-                            '確定損益(税引後)': 0, '売却理由': ''
-                        })
-            time.sleep(1)
-        except: continue
-    
-    if new_buys:
-        df_new = pd.DataFrame(new_buys)
-        if os.path.exists(PORTFOLIO_FILE):
-            try:
-                df_old = pd.read_csv(PORTFOLIO_FILE, sep=None, engine='python', encoding='utf-8-sig')
-            except:
-                df_old = pd.read_csv(PORTFOLIO_FILE, sep=None, engine='python', encoding='cp932')
-            df_final = pd.concat([df_old, df_new], ignore_index=True)
-        else: df_final = df_new
-        df_final.to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
-
-def record_daily_assets():
-    """現在の総資産を計算して保存"""
-    current_cash = INITIAL_CASH
-    holding_value = 0
-    if os.path.exists(PORTFOLIO_FILE):
-        try:
-            df = pd.read_csv(PORTFOLIO_FILE, sep=None, engine='python', encoding='utf-8-sig')
-            # 数値列の強制変換
-            df['確定損益(税引後)'] = pd.to_numeric(df['確定損益(税引後)'], errors='coerce').fillna(0)
-            current_cash += df['確定損益(税引後)'].sum()
+                if len(targets) == 1 or ticker == data.columns.name:
+                    df = data.dropna()
+                else:
+                    continue
             
-            active = df[df['状態'].astype(str).str.contains('保有')]
-            for _, row in active.iterrows():
-                try:
-                    ticker = yf.Ticker(f"{row['コード']}.T")
-                    curr = ticker.history(period="1d")['Close'].iloc[-1]
-                    holding_value += curr
-                except: pass
-        except Exception as e:
-            print(f"📊 資産計算中にエラー: {e}")
-    
-    total = current_cash + holding_value
-    print(f"💰 総資産: {total:,.0f}円 (現金: {current_cash:,.0f} / 評価: {holding_value:,.0f})")
-    
-    # 資産推移ログを保存
-    new_log = pd.DataFrame([{'日時': datetime.now().strftime('%Y-%m-%d %H:%M'), '総資産': total}])
-    if os.path.exists(ASSET_LOG_FILE):
-        log_df = pd.read_csv(ASSET_LOG_FILE, encoding='utf-8-sig')
-        log_df = pd.concat([log_df, new_log], ignore_index=True)
-    else: log_df = new_log
-    log_df.to_csv(ASSET_LOG_FILE, index=False, encoding='utf-8-sig')
+            # データ件数が少ない場合はスキップ
+            if df.empty or len(df) < 50:
+                continue
 
-def load_master_data():
-    """銘柄マスター(data_j.csv)の読み込み"""
-    file_path = os.path.join(BASE_DIR, 'data_j.csv')
-    try:
-        try:
-            df = pd.read_csv(file_path, encoding='utf-8-sig')
-        except:
-            df = pd.read_csv(file_path, encoding='cp932')
-        df['コード'] = df['コード'].astype(str).str.strip()
-        return df[['コード', '銘柄名', '33業種区分']]
-    except:
-        print("⚠️ data_j.csv の読み込みに失敗しました。")
-        return pd.DataFrame()
+            df = calculate_technicals(df)
+            if df is None: continue
+            
+            # 初動シグナル検知
+            is_hot, tech_data = scan_initial_breakout(df)
+            
+            if is_hot:
+                name_row = df_symbols[df_symbols['コード'].astype(str) == code]
+                name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
+                print(f"🔥 初動検知: {code} {name} (出来高急増)")
+                
+                news = get_recent_news(code, name)
+                hot_candidates.append({
+                    "code": code,
+                    "name": name,
+                    "tech": tech_data,
+                    "news": news
+                })
+        except Exception as e:
+            # 個別銘柄のエラーは止まらずにスキップ
+            continue
+
+    if not hot_candidates:
+        print("💡 現在の15分足で急騰初動シグナルを満たす銘柄はありません。")
+        return
+
+    print(f"\n--- 🤖 AIスコアリング & ランキング (候補: {len(hot_candidates)}銘柄) ---")
+    scored_list = []
+    for item in hot_candidates:
+        score, reason = ai_scoring(item['code'], item['name'], item['tech'], item['news'])
+        item['ai_score'] = score
+        item['ai_reason'] = reason
+        scored_list.append(item)
+        print(f"[{item['code']} {item['name']}] AIスコア: {score}点 | 理由: {reason}")
+        time.sleep(2) # APIのレートリミット対策
+
+    # スコアで降順ソート
+    scored_list = sorted(scored_list, key=lambda x: x['ai_score'], reverse=True)
+    
+    best = scored_list[0]
+    if best['ai_score'] >= 80:
+        print(f"\n🏆 【シミュレーション買付発動】最強銘柄確定: {best['code']} {best['name']}")
+        print(f"判定理由: {best['ai_reason']}")
+        # ※ ここにポートフォリオ(virtual_portfolio.csv)への書込処理を追加することで自動売買化
+    else:
+        print("\n💡 エントリー基準(AIスコア80以上)を満たす強力なテーマ株はありませんでした。ホールド(見送り)します。")
 
 if __name__ == "__main__":
-    master = load_master_data()
-    if not master.empty:
-        manage_portfolio_hybrid()  # 1. 保有株のAI出口戦略
-        scan_and_buy_hybrid(master) # 2. 新規銘柄のAI買い判定
-        record_daily_assets()      # 3. 資産の自動記録
-    print("\n=== AIハイブリッド運用・統合完全版 完了 ===")
+    main()
