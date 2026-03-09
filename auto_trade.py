@@ -53,7 +53,7 @@ else:
 # シミュレーション用設定
 INITIAL_CASH = 1000000  
 MAX_POSITIONS = 3       
-INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限を50万円に設定
+INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限（50万円）
 STOP_LOSS_PCT = -0.03   
 
 TRAIL_ACTIVATION_PCT = 0.02  
@@ -252,7 +252,6 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
     
     for attempt in range(max_retries):
         try:
-            # 1. まずGeminiで試す
             response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             lines = response.text.strip().split('\n')
             score = int(re.sub(r'\D', '', lines[0]))
@@ -292,17 +291,13 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (Gemini & Groq ハイブリッド版)")
     
-    # 【新規追加】営業時間フィルター (平日 9:00〜11:30 / 12:30〜15:30)
+    # 営業時間フィルター (平日 9:00〜11:30 / 12:30〜15:30)
     now = datetime.now()
-    
-    # 土曜日(5)・日曜日(6)はスキップ
     if now.weekday() >= 5:
         print("💤 本日は休場日（土日）のため、スキャンをスキップして終了します。")
         return
         
     current_time = now.time()
-    
-    # 東証の取引時間
     morning_open = datetime.strptime("09:00", "%H:%M").time()
     morning_close = datetime.strptime("11:30", "%H:%M").time()
     afternoon_open = datetime.strptime("12:30", "%H:%M").time()
@@ -313,7 +308,6 @@ def main():
     if not is_open:
         print("💤 現在は東証の取引時間外のため、スキャンをスキップして終了します。")
         return
-    # ----------------------------------------------------
 
     account = load_account()
     portfolio = load_portfolio()
@@ -394,7 +388,8 @@ def main():
         scored_list.append(item)
         print(f"[{idx}/{len(hot_candidates)}] {item['code']} {item['name']} | 急増: {item['tech']['VolSurgeRatio']:.1f}倍 | スコア: {score}点 | 理由: {reason}")
         
-        time.sleep(20)
+        # API制限回避のための待機
+        time.sleep(20) 
 
     scored_list = sorted(scored_list, key=lambda x: x['ai_score'], reverse=True)
     best = scored_list[0]
@@ -403,10 +398,11 @@ def main():
         buy_price = best['tech']['CurrentPrice']
         budget = min(INVEST_PER_TRADE, account['cash'])
         
-        if buy_price * 100 > budget:
-            print(f"\n💡 最低購入金額({buy_price * 100:,.0f}円)が現在の投資可能額({budget:,.0f}円)を上回っているため見送ります。")
+        # 【変更】1株単位（ミニ株）で買えるだけ買うロジックに変更
+        if buy_price > budget:
+            print(f"\n💡 株価({buy_price:,.1f}円)が現在の投資可能額({budget:,.0f}円)を上回っているため見送ります。")
         else:
-            shares_to_buy = max(100, int(budget // (buy_price * 100)) * 100)
+            shares_to_buy = max(1, int(budget // buy_price))
             cost = buy_price * shares_to_buy
             
             print(f"\n🏆 【シミュレーション買付発動】最強銘柄確定: {best['code']} {best['name']}")
