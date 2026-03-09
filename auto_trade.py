@@ -1,23 +1,30 @@
+# --- 0. 環境設定（【重要】他のインポートより先にUTF-8を強制する） ---
+import os
+import sys
+import io
+
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONUTF8"] = "1"  
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# --- ここから通常のインポート ---
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from google import genai
+from groq import Groq  
 import feedparser
 import urllib.parse
 from datetime import datetime
-import sys
-import io
 import time
-import os
 import re
 import warnings
 import json
+from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
-
-# --- 1. 環境設定（文字コード・パスの絶対指定） ---
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
@@ -26,26 +33,32 @@ HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
 ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
 
 # --- 2. AI・トレード設定 ---
-GEMINI_API_KEY = "ここにAPIキーを入力"  # 【重要】APIキーを入力してください
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
-if GEMINI_API_KEY == "ここにAPIキーを入力":
-    print("⚠️ エラー: GEMINI_API_KEY が設定されていません。コード内の設定箇所にAPIキーを入力してください。")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+if not GEMINI_API_KEY:
+    print("⚠️ エラー: GEMINI_API_KEY が設定されていません。.envファイルを確認してください。")
     sys.exit()
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = "gemini-2.5-flash"
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-2.5-flash"
+
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+else:
+    groq_client = None
 
 # シミュレーション用設定
 INITIAL_CASH = 1000000  
 MAX_POSITIONS = 3       
-INVEST_PER_TRADE = 300000 
+INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限を50万円に設定
 STOP_LOSS_PCT = -0.03   
 
-# トレーリングストップ設定
 TRAIL_ACTIVATION_PCT = 0.02  
 TRAILING_STOP_PCT = 0.02     
 
-# AI審査の上限数（1時間ごとの実行なら50銘柄まで増やしても1日の無料枠1500回に収まります）
 MAX_AI_CANDIDATES = 50
 
 # --- 3. 地合いフィルター ---
@@ -148,6 +161,13 @@ def manage_positions(portfolio, account):
     return remaining_portfolio, account
 
 # --- 5. データ取得・AI判定関数 ---
+def clean_text_for_ai(text):
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'[^\x20-\x7E\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', '', text)
+    return text.strip()
+
 def get_recent_news(code, name):
     clean_name = re.sub(r'\s+', ' ', name).strip()
     query = urllib.parse.quote(f"{code} {clean_name}")
@@ -155,7 +175,7 @@ def get_recent_news(code, name):
     try:
         feed = feedparser.parse(rss_url)
         titles = [entry.title for entry in feed.entries[:5]]
-        return " | ".join(titles) if titles else "関連ニュースなし"
+        return " | ".join(titles) if titles else "ニュースなし"
     except: return "ニュース取得エラー"
 
 def calculate_technicals(df):
@@ -212,40 +232,67 @@ def scan_initial_breakout(df):
     }
     return is_hot, tech_data
 
-def ai_scoring(code, name, tech, news_text, max_retries=3):
+def ai_scoring(code, name, tech, news_text, max_retries=2):
+    safe_name = clean_text_for_ai(name)
+    safe_news = clean_text_for_ai(news_text)
+
     prompt = f"""
     あなたは機関投資家レベルの株価予測AIです。以下の情報から、銘柄の「直近の急騰確率(スコア)」を 1〜100 の数値で評価してください。
-    【銘柄】 {name} ({code})
+    【銘柄】 {safe_name} ({code})
     【テクニカル指標】
     出来高急増倍率: {tech['VolSurgeRatio']:.1f}倍 (資金流入の強さ)
     RSI: {tech['RSI']:.1f}
     MACD/シグナル: {tech['MACD']:.2f} / {tech['Signal']:.2f}
     ボラ・ブレイク: {'発生中' if tech['SqueezeBreak'] else 'なし'}
-    【最新ニュース】 {news_text}
+    【最新ニュース】 {safe_news}
     【出力ルール】
     1行目: スコア（例: 88）
     2行目: 判定理由（100文字以内の日本語）
     """
+    
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(model=MODEL_ID, contents=prompt)
+            # 1. まずGeminiで試す
+            response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             lines = response.text.strip().split('\n')
             score = int(re.sub(r'\D', '', lines[0]))
             reason = lines[1] if len(lines) > 1 else "詳細理由なし"
-            return score, reason
+            return score, f"【Gemini】{reason}"
+        
         except Exception as e:
             err_msg = str(e).lower()
             if "429" in err_msg or "quota" in err_msg or "rate limit" in err_msg:
-                if attempt < max_retries - 1:
-                    print(f"  ⚠️ API制限(429)を検知。20秒待機して再試行します... ({attempt+1}/{max_retries})")
-                    time.sleep(20)
-                    continue
-            return 0, f"AI評価エラー: {str(e)[:50]}"
-    return 0, "AI評価エラー: 再試行上限到達"
+                if groq_client:
+                    print(f"  ⚠️ Gemini API制限(429)を検知。Groq(Llama 3.3)へ代替処理を行います...")
+                    try:
+                        g_response = groq_client.chat.completions.create(
+                            model="llama-3.3-70b-versatile", 
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.2
+                        )
+                        lines = g_response.choices[0].message.content.strip().split('\n')
+                        score = int(re.sub(r'\D', '', lines[0]))
+                        reason = lines[1] if len(lines) > 1 else "詳細理由なし"
+                        return score, f"【Groq】{reason}"
+                    except Exception as ge:
+                        # 【修正】代替AIのエラー全文を出力（改行をスペースに置換）
+                        full_error = str(ge).replace('\n', ' ')
+                        return 0, f"代替AIエラー: {full_error}"
+                else:
+                    if attempt < max_retries - 1:
+                        print(f"  ⚠️ Gemini API制限を検知。代替AIが未設定のため60秒待機します... ({attempt+1}/{max_retries})")
+                        time.sleep(60)
+                        continue
+            
+            # 【修正】Gemini側のエラーも全文を出力
+            full_error = str(e).replace('\n', ' ')
+            return 0, f"AI評価エラー: {type(e).__name__} - {full_error}"
+            
+    return 0, "AI評価エラー: 制限による再試行上限到達"
 
 # --- 6. メイン処理 ---
 def main():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (Gemini & Groq ハイブリッド版)")
     
     account = load_account()
     portfolio = load_portfolio()
@@ -307,10 +354,9 @@ def main():
         print("💡 現在の15分足で急騰初動シグナルを満たす新規銘柄はありません。")
         return
 
-    # 出来高急増倍率でソートし、設定した上限数で絞り込む
     hot_candidates = sorted(hot_candidates, key=lambda x: x['tech']['VolSurgeRatio'], reverse=True)
     if len(hot_candidates) > MAX_AI_CANDIDATES:
-        print(f"\n⚠️ スクリーニング通過が {len(hot_candidates)}銘柄 と多いため、資金流入(出来高急増率) 上位{MAX_AI_CANDIDATES}銘柄 に絞ってAI審査を行います。")
+        print(f"\n⚠️ スクリーニング通過が {len(hot_candidates)}銘柄 と多いため、資金流入 上位{MAX_AI_CANDIDATES}銘柄 に絞ってAI審査を行います。")
         hot_candidates = hot_candidates[:MAX_AI_CANDIDATES]
     else:
         print(f"\n💡 スクリーニング通過: {len(hot_candidates)}銘柄")
@@ -327,8 +373,7 @@ def main():
         scored_list.append(item)
         print(f"[{idx}/{len(hot_candidates)}] {item['code']} {item['name']} | 急増: {item['tech']['VolSurgeRatio']:.1f}倍 | スコア: {score}点 | 理由: {reason}")
         
-        # API制限回避のための待機（1分あたり15リクエスト以内に抑える）
-        time.sleep(4.5)
+        time.sleep(5) 
 
     scored_list = sorted(scored_list, key=lambda x: x['ai_score'], reverse=True)
     best = scored_list[0]
