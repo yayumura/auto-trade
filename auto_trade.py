@@ -275,7 +275,6 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
                         reason = lines[1] if len(lines) > 1 else "詳細理由なし"
                         return score, f"【Groq】{reason}"
                     except Exception as ge:
-                        # 【修正】代替AIのエラー全文を出力（改行をスペースに置換）
                         full_error = str(ge).replace('\n', ' ')
                         return 0, f"代替AIエラー: {full_error}"
                 else:
@@ -284,7 +283,6 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
                         time.sleep(60)
                         continue
             
-            # 【修正】Gemini側のエラーも全文を出力
             full_error = str(e).replace('\n', ' ')
             return 0, f"AI評価エラー: {type(e).__name__} - {full_error}"
             
@@ -294,6 +292,29 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (Gemini & Groq ハイブリッド版)")
     
+    # 【新規追加】営業時間フィルター (平日 9:00〜11:30 / 12:30〜15:30)
+    now = datetime.now()
+    
+    # 土曜日(5)・日曜日(6)はスキップ
+    if now.weekday() >= 5:
+        print("💤 本日は休場日（土日）のため、スキャンをスキップして終了します。")
+        return
+        
+    current_time = now.time()
+    
+    # 東証の取引時間
+    morning_open = datetime.strptime("09:00", "%H:%M").time()
+    morning_close = datetime.strptime("11:30", "%H:%M").time()
+    afternoon_open = datetime.strptime("12:30", "%H:%M").time()
+    afternoon_close = datetime.strptime("15:30", "%H:%M").time()
+    
+    is_open = (morning_open <= current_time <= morning_close) or (afternoon_open <= current_time <= afternoon_close)
+    
+    if not is_open:
+        print("💤 現在は東証の取引時間外のため、スキャンをスキップして終了します。")
+        return
+    # ----------------------------------------------------
+
     account = load_account()
     portfolio = load_portfolio()
     print(f"🏦 現在の口座残高: {account['cash']:,.0f}円")
@@ -373,7 +394,7 @@ def main():
         scored_list.append(item)
         print(f"[{idx}/{len(hot_candidates)}] {item['code']} {item['name']} | 急増: {item['tech']['VolSurgeRatio']:.1f}倍 | スコア: {score}点 | 理由: {reason}")
         
-        time.sleep(5) 
+        time.sleep(20)
 
     scored_list = sorted(scored_list, key=lambda x: x['ai_score'], reverse=True)
     best = scored_list[0]
