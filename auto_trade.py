@@ -22,7 +22,7 @@ import time
 import re
 import warnings
 import json
-import requests  # 【追加】Discord通知用
+import requests
 from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
@@ -38,7 +38,7 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL") # 【追加】Discord用URL
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
 if not GEMINI_API_KEY:
     print("⚠️ エラー: GEMINI_API_KEY が設定されていません。.envファイルを確認してください。")
@@ -52,12 +52,17 @@ if GROQ_API_KEY:
 else:
     groq_client = None
 
+# 🔧 【追加】デバッグモード設定
+# True にすると、休場日や取引時間外でも強制的にプログラムが実行されます。
+# 本番で自動運用する際は False に戻してください。
+DEBUG_MODE = True
+
 # シミュレーション用設定
 INITIAL_CASH = 1000000  
 MAX_POSITIONS = 3       
 INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限（50万円）
 
-# 【最強ロジック】ATR（ボラティリティ）ベースの動的ストップ設定
+# ATR（ボラティリティ）ベースの動的ストップ設定
 ATR_STOP_LOSS_MULTIPLIER = 2.0  # 買値からATRの2倍下がったら損切り
 ATR_TRAIL_ACTIVATION = 1.5      # 買値からATRの1.5倍上がったらトレール利確準備
 ATR_TRAIL_STOP_MULTIPLIER = 1.5 # 最高値からATRの1.5倍下がったら利確実行
@@ -67,7 +72,6 @@ MAX_AI_CANDIDATES = 50
 
 # --- 通知機能 ---
 def send_discord_notify(message):
-    """【新規】Discordへ通知を送信する関数"""
     if not DISCORD_WEBHOOK_URL:
         return
     try:
@@ -149,13 +153,11 @@ def manage_positions(portfolio, account):
             highest_price = max(float(p.get('highest_price', buy_price)), current_price)
             p['highest_price'] = highest_price
             
-            # 【最強ロジック】保有銘柄の最新のATR（ボラティリティ）を計算
             tr1 = df['High'] - df['Low']
             tr2 = abs(df['High'] - df['Close'].shift())
             tr3 = abs(df['Low'] - df['Close'].shift())
             atr = float(pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean().iloc[-1])
             
-            # ATRが計算できない場合は現在値の2%を仮のATRとする
             if pd.isna(atr) or atr == 0: 
                 atr = current_price * 0.02
             
@@ -164,7 +166,6 @@ def manage_positions(portfolio, account):
 
             sell_reason = None
             
-            # 【最強ロジック】ATRベースの動的トレーリングストップ＆損切り判定
             if current_price <= buy_price - (atr * ATR_STOP_LOSS_MULTIPLIER):
                 sell_reason = "ボラティリティ損切 (ATR Stop)"
             elif highest_price >= buy_price + (atr * ATR_TRAIL_ACTIVATION):
@@ -175,7 +176,6 @@ def manage_positions(portfolio, account):
                 profit_amount = (current_price - buy_price) * p['shares']
                 account['cash'] += current_price * p['shares'] 
                 
-                # 【追加】決済をコンソール表示し、Discordへも通知
                 msg = f"💰 【決済】{code} {p['name']} を {sell_reason} しました！ 確定損益: {profit_amount:+.0f}円"
                 print(msg)
                 send_discord_notify(msg)
@@ -239,7 +239,6 @@ def scan_initial_breakout(df):
     vol_mean_5 = df['Volume'].iloc[-6:-1].mean()
     if vol_mean_5 == 0: vol_mean_5 = 1 
     
-    # 【最強ロジック】低位株（100円未満）と流動性不足（15分平均売買代金1000万円未満）を足切り
     avg_trade_value = vol_mean_5 * df['Close'].iloc[-6:-1].mean()
     if latest['Close'] < 100 or avg_trade_value < 10000000:
         return False, None
@@ -273,7 +272,6 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
     safe_name = clean_text_for_ai(name)
     safe_news = clean_text_for_ai(news_text)
 
-    # 【最強ロジック】プロンプトの審査基準をより厳格に強化
     prompt = f"""
     あなたは凄腕のクオンツ・ファンドマネージャーです。以下の情報から、銘柄の「今後数日間の大化け確率(スコア)」を 1〜100 の数値で厳格に評価してください。
     
@@ -337,23 +335,26 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (最強ロジック+通知版)")
     
-    # 営業時間フィルター (平日 9:00〜11:30 / 12:30〜15:30)
-    now = datetime.now()
-    if now.weekday() >= 5:
-        print("💤 本日は休場日（土日）のため、スキャンをスキップして終了します。")
-        return
+    # 営業時間フィルター (デバッグモード時は無視)
+    if not DEBUG_MODE:
+        now = datetime.now()
+        if now.weekday() >= 5:
+            print("💤 本日は休場日（土日）のため、スキャンをスキップして終了します。")
+            return
+            
+        current_time = now.time()
+        morning_open = datetime.strptime("09:00", "%H:%M").time()
+        morning_close = datetime.strptime("11:30", "%H:%M").time()
+        afternoon_open = datetime.strptime("12:30", "%H:%M").time()
+        afternoon_close = datetime.strptime("15:30", "%H:%M").time()
         
-    current_time = now.time()
-    morning_open = datetime.strptime("09:00", "%H:%M").time()
-    morning_close = datetime.strptime("11:30", "%H:%M").time()
-    afternoon_open = datetime.strptime("12:30", "%H:%M").time()
-    afternoon_close = datetime.strptime("15:30", "%H:%M").time()
-    
-    is_open = (morning_open <= current_time <= morning_close) or (afternoon_open <= current_time <= afternoon_close)
-    
-    if not is_open:
-        print("💤 現在は東証の取引時間外のため、スキャンをスキップして終了します。")
-        return
+        is_open = (morning_open <= current_time <= morning_close) or (afternoon_open <= current_time <= afternoon_close)
+        
+        if not is_open:
+            print("💤 現在は東証の取引時間外のため、スキャンをスキップして終了します。")
+            return
+    else:
+        print("🔧 デバッグモード有効: 営業時間フィルターを無視して強制実行します。")
 
     account = load_account()
     portfolio = load_portfolio()
@@ -434,7 +435,6 @@ def main():
         scored_list.append(item)
         print(f"[{idx}/{len(hot_candidates)}] {item['code']} {item['name']} | 急増: {item['tech']['VolSurgeRatio']:.1f}倍 | スコア: {score}点 | 理由: {reason}")
         
-        # API制限回避のための待機
         time.sleep(20) 
 
     scored_list = sorted(scored_list, key=lambda x: x['ai_score'], reverse=True)
@@ -444,7 +444,6 @@ def main():
         buy_price = best['tech']['CurrentPrice']
         budget = min(INVEST_PER_TRADE, account['cash'])
         
-        # 1株単位（ミニ株）で買えるだけ買うロジック
         if buy_price > budget:
             print(f"\n💡 株価({buy_price:,.1f}円)が現在の投資可能額({budget:,.0f}円)を上回っているため見送ります。")
         else:
@@ -455,7 +454,6 @@ def main():
             print(f"判定理由: {best['ai_reason']}")
             print(f"🛒 買付価格: {buy_price:.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円")
             
-            # 【追加】Discordへ新規買付の通知
             notify_msg = f"🏆 **【新規買付】{best['code']} {best['name']}**\n🛒 買値: {buy_price:.1f}円 × {shares_to_buy}株 (概算: {cost:,.0f}円)\n📝 理由: {best['ai_reason']}"
             send_discord_notify(notify_msg)
             
