@@ -54,11 +54,13 @@ else:
 INITIAL_CASH = 1000000  
 MAX_POSITIONS = 3       
 INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限（50万円）
-STOP_LOSS_PCT = -0.03   
 
-TRAIL_ACTIVATION_PCT = 0.02  
-TRAILING_STOP_PCT = 0.02     
+# 【最強ロジック】ATR（ボラティリティ）ベースの動的ストップ設定
+ATR_STOP_LOSS_MULTIPLIER = 2.0  # 買値からATRの2倍下がったら損切り
+ATR_TRAIL_ACTIVATION = 1.5      # 買値からATRの1.5倍上がったらトレール利確準備
+ATR_TRAIL_STOP_MULTIPLIER = 1.5 # 最高値からATRの1.5倍下がったら利確実行
 
+# AI審査の上限数
 MAX_AI_CANDIDATES = 50
 
 # --- 3. 地合いフィルター ---
@@ -108,7 +110,7 @@ def manage_positions(portfolio, account):
 
     print(f"\n--- 💼 保有銘柄の監視 ({len(portfolio)}銘柄) ---")
     tickers = [f"{p['code']}.T" for p in portfolio]
-    data = yf.download(tickers, period="1d", interval="15m", group_by='ticker', threads=True)
+    data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True)
     if data is None or data.empty: return portfolio, account
 
     remaining_portfolio = []
@@ -126,25 +128,36 @@ def manage_positions(portfolio, account):
                 if len(portfolio) == 1 or ticker == data.columns.name: df = data.dropna()
                 else: remaining_portfolio.append(p); continue
             
-            if df.empty: remaining_portfolio.append(p); continue
+            if df.empty or len(df) < 14: 
+                remaining_portfolio.append(p)
+                continue
 
             current_price = float(df['Close'].iloc[-1])
             buy_price = float(p['buy_price'])
             highest_price = max(float(p.get('highest_price', buy_price)), current_price)
             p['highest_price'] = highest_price
             
-            profit_pct = (current_price - buy_price) / buy_price
-            highest_profit_pct = (highest_price - buy_price) / buy_price
+            # 【最強ロジック】保有銘柄の最新のATR（ボラティリティ）を計算
+            tr1 = df['High'] - df['Low']
+            tr2 = abs(df['High'] - df['Close'].shift())
+            tr3 = abs(df['Low'] - df['Close'].shift())
+            atr = float(pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean().iloc[-1])
             
+            # ATRが計算できない場合は現在値の2%を仮のATRとする
+            if pd.isna(atr) or atr == 0: 
+                atr = current_price * 0.02
+            
+            profit_pct = (current_price - buy_price) / buy_price
             print(f"[{code} {p['name']}] 買値: {buy_price:.1f} -> 現在値: {current_price:.1f} (最高値: {highest_price:.1f} | 損益: {profit_pct*100:+.2f}%)")
 
             sell_reason = None
-            if highest_profit_pct >= TRAIL_ACTIVATION_PCT:
-                if current_price <= highest_price * (1.0 - TRAILING_STOP_PCT):
-                    sell_reason = "トレール利確"
             
-            if sell_reason is None and profit_pct <= STOP_LOSS_PCT:
-                sell_reason = "損切"
+            # 【最強ロジック】ATRベースの動的トレーリングストップ＆損切り判定
+            if current_price <= buy_price - (atr * ATR_STOP_LOSS_MULTIPLIER):
+                sell_reason = "ボラティリティ損切 (ATR Stop)"
+            elif highest_price >= buy_price + (atr * ATR_TRAIL_ACTIVATION):
+                if current_price <= highest_price - (atr * ATR_TRAIL_STOP_MULTIPLIER):
+                    sell_reason = "トレール利確 (ATR Trailing)"
 
             if sell_reason:
                 profit_amount = (current_price - buy_price) * p['shares']
@@ -156,7 +169,9 @@ def manage_positions(portfolio, account):
                     "shares": p['shares'], "profit_amount": profit_amount, "profit_pct": profit_pct, "reason": sell_reason
                 })
             else: remaining_portfolio.append(p)
-        except Exception: remaining_portfolio.append(p)
+        except Exception as e: 
+            print(f"⚠️ {code} の監視エラー: {e}")
+            remaining_portfolio.append(p)
 
     return remaining_portfolio, account
 
@@ -207,6 +222,11 @@ def scan_initial_breakout(df):
     vol_mean_5 = df['Volume'].iloc[-6:-1].mean()
     if vol_mean_5 == 0: vol_mean_5 = 1 
     
+    # 【最強ロジック】低位株（100円未満）と流動性不足（15分平均売買代金1000万円未満）を足切り
+    avg_trade_value = vol_mean_5 * df['Close'].iloc[-6:-1].mean()
+    if latest['Close'] < 100 or avg_trade_value < 10000000:
+        return False, None
+    
     vol_surge_ratio = latest['Volume'] / vol_mean_5
     vol_surge = vol_surge_ratio > 3.0
     
@@ -236,18 +256,27 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
     safe_name = clean_text_for_ai(name)
     safe_news = clean_text_for_ai(news_text)
 
+    # 【最強ロジック】プロンプトの審査基準をより厳格に強化
     prompt = f"""
-    あなたは機関投資家レベルの株価予測AIです。以下の情報から、銘柄の「直近の急騰確率(スコア)」を 1〜100 の数値で評価してください。
+    あなたは凄腕のクオンツ・ファンドマネージャーです。以下の情報から、銘柄の「今後数日間の大化け確率(スコア)」を 1〜100 の数値で厳格に評価してください。
+    
     【銘柄】 {safe_name} ({code})
     【テクニカル指標】
-    出来高急増倍率: {tech['VolSurgeRatio']:.1f}倍 (資金流入の強さ)
+    出来高急増倍率: {tech['VolSurgeRatio']:.1f}倍 (直近の大口資金流入の強さ)
     RSI: {tech['RSI']:.1f}
     MACD/シグナル: {tech['MACD']:.2f} / {tech['Signal']:.2f}
     ボラ・ブレイク: {'発生中' if tech['SqueezeBreak'] else 'なし'}
+    
     【最新ニュース】 {safe_news}
+    
+    【評価基準（以下の視点で辛口に評価してください）】
+    1. 資金流入の信憑性：出来高急増を裏付ける強力なニュース（好決算、テーマ性、提携など）があるか？
+    2. テーマの持続性：一過性のイナゴタワーではなく、数日間トレンドが続く材料か？
+    3. ニュースがないのに急増している場合は、仕手株のダマシの可能性があるため減点。
+    
     【出力ルール】
     1行目: スコア（例: 88）
-    2行目: 判定理由（100文字以内の日本語）
+    2行目: 判定理由（100文字以内の日本語で、テクニカルと材料を紐づけて説明）
     """
     
     for attempt in range(max_retries):
@@ -289,7 +318,7 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
 
 # --- 6. メイン処理 ---
 def main():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (Gemini & Groq ハイブリッド版)")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (最強ロジック反映版)")
     
     # 営業時間フィルター (平日 9:00〜11:30 / 12:30〜15:30)
     now = datetime.now()
@@ -398,7 +427,7 @@ def main():
         buy_price = best['tech']['CurrentPrice']
         budget = min(INVEST_PER_TRADE, account['cash'])
         
-        # 【変更】1株単位（ミニ株）で買えるだけ買うロジックに変更
+        # 1株単位（ミニ株）で買えるだけ買うロジック
         if buy_price > budget:
             print(f"\n💡 株価({buy_price:,.1f}円)が現在の投資可能額({budget:,.0f}円)を上回っているため見送ります。")
         else:
