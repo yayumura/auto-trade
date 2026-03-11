@@ -32,6 +32,7 @@ DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
 PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
 HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
 ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
+EXECUTION_LOG_FILE = os.path.join(BASE_DIR, 'execution_log.csv') 
 
 # --- 2. AI・トレード設定 ---
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -52,20 +53,21 @@ if GROQ_API_KEY:
 else:
     groq_client = None
 
-# 🔧 【追加】デバッグモード設定
-# True にすると、休場日や取引時間外でも強制的にプログラムが実行されます。
-# 本番で自動運用する際は False に戻してください。
+# 🔧 デバッグモード設定
 DEBUG_MODE = True
 
 # シミュレーション用設定
 INITIAL_CASH = 1000000  
 MAX_POSITIONS = 3       
-INVEST_PER_TRADE = 500000 # 1銘柄あたりの投資上限（50万円）
+INVEST_PER_TRADE = 500000 
+
+# 【追加】税率設定（特定口座 源泉徴収あり: 20.315%）
+TAX_RATE = 0.20315
 
 # ATR（ボラティリティ）ベースの動的ストップ設定
-ATR_STOP_LOSS_MULTIPLIER = 2.0  # 買値からATRの2倍下がったら損切り
-ATR_TRAIL_ACTIVATION = 1.5      # 買値からATRの1.5倍上がったらトレール利確準備
-ATR_TRAIL_STOP_MULTIPLIER = 1.5 # 最高値からATRの1.5倍下がったら利確実行
+ATR_STOP_LOSS_MULTIPLIER = 2.0  
+ATR_TRAIL_ACTIVATION = 1.5      
+ATR_TRAIL_STOP_MULTIPLIER = 1.5 
 
 # AI審査の上限数
 MAX_AI_CANDIDATES = 50
@@ -122,12 +124,13 @@ def log_trade(trade_record):
     df.to_csv(HISTORY_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
 
 def manage_positions(portfolio, account):
-    if not portfolio: return portfolio, account
+    actions = []
+    if not portfolio: return portfolio, account, actions
 
     print(f"\n--- 💼 保有銘柄の監視 ({len(portfolio)}銘柄) ---")
     tickers = [f"{p['code']}.T" for p in portfolio]
     data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True)
-    if data is None or data.empty: return portfolio, account
+    if data is None or data.empty: return portfolio, account, actions
 
     remaining_portfolio = []
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -152,6 +155,7 @@ def manage_positions(portfolio, account):
             buy_price = float(p['buy_price'])
             highest_price = max(float(p.get('highest_price', buy_price)), current_price)
             p['highest_price'] = highest_price
+            p['current_price'] = current_price
             
             tr1 = df['High'] - df['Low']
             tr2 = abs(df['High'] - df['Close'].shift())
@@ -173,24 +177,40 @@ def manage_positions(portfolio, account):
                     sell_reason = "トレール利確 (ATR Trailing)"
 
             if sell_reason:
-                profit_amount = (current_price - buy_price) * p['shares']
-                account['cash'] += current_price * p['shares'] 
+                # 【変更】税金計算のロジックを追加
+                gross_profit = (current_price - buy_price) * p['shares']
+                tax_amount = 0
                 
-                msg = f"💰 【決済】{code} {p['name']} を {sell_reason} しました！ 確定損益: {profit_amount:+.0f}円"
+                # 利益が出ている場合のみ税金を計算（切り捨て）
+                if gross_profit > 0:
+                    tax_amount = int(gross_profit * TAX_RATE)
+                
+                net_profit = gross_profit - tax_amount # 税引き後利益
+                
+                # 口座には「売却代金 - 税金」が戻る
+                sale_proceeds = (current_price * p['shares']) - tax_amount
+                account['cash'] += sale_proceeds
+                
+                msg = f"💰 【決済】{code} {p['name']} を {sell_reason} しました！\n"
+                msg += f"   税引前損益: {gross_profit:+.0f}円 | 税金: -{tax_amount:,.0f}円 | 確定純利益: {net_profit:+.0f}円"
                 print(msg)
                 send_discord_notify(msg)
                 
+                actions.append(f"売却: {code} {p['name']} ({sell_reason}) 純利益: {net_profit:+.0f}円 (税金: {tax_amount:,.0f}円)")
+                
+                # ログにも税金と純利益を記録
                 log_trade({
                     "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
                     "buy_price": buy_price, "sell_price": current_price, "highest_price_reached": highest_price,
-                    "shares": p['shares'], "profit_amount": profit_amount, "profit_pct": profit_pct, "reason": sell_reason
+                    "shares": p['shares'], "gross_profit": gross_profit, "tax_amount": tax_amount, 
+                    "net_profit": net_profit, "profit_pct": profit_pct, "reason": sell_reason
                 })
             else: remaining_portfolio.append(p)
         except Exception as e: 
             print(f"⚠️ {code} の監視エラー: {e}")
             remaining_portfolio.append(p)
 
-    return remaining_portfolio, account
+    return remaining_portfolio, account, actions
 
 # --- 5. データ取得・AI判定関数 ---
 def clean_text_for_ai(text):
@@ -331,11 +351,60 @@ def ai_scoring(code, name, tech, news_text, max_retries=2):
             
     return 0, "AI評価エラー: 制限による再試行上限到達"
 
+def print_execution_summary(actions, portfolio, account):
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    stock_value = 0
+    for p in portfolio:
+        cp = float(p.get('current_price', p['buy_price']))
+        stock_value += cp * int(p['shares'])
+        
+    total_assets = account['cash'] + stock_value
+    
+    print("\n" + "="*45)
+    print(" 📊 実行結果サマリー")
+    print("="*45)
+    
+    print("\n【今回の実行アクション】")
+    action_str = " | ".join(actions) if actions else "アクションなし"
+    if actions:
+        for act in actions:
+            print(f" ✔ {act}")
+    else:
+        print(" - アクションなし (保有継続 / 新規見送り)")
+        
+    print("\n【現在の保有株式】")
+    if portfolio:
+        for p in portfolio:
+            cp = float(p.get('current_price', p['buy_price']))
+            val = cp * int(p['shares'])
+            profit_pct = (cp - float(p['buy_price'])) / float(p['buy_price']) * 100
+            print(f" 🔹 {p['code']} {p['name']}")
+            print(f"    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
+    else:
+        print(" - 保有銘柄なし")
+        
+    print("\n【口座ステータス】")
+    print(f" 💰 現金残高:   {account['cash']:>10,.0f}円")
+    print(f" 📈 株式評価額: {stock_value:>10,.0f}円")
+    print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
+    print("="*45 + "\n")
+    
+    write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
+    df_log = pd.DataFrame([{
+        "time": current_time,
+        "actions": action_str,
+        "portfolio_count": len(portfolio),
+        "stock_value_yen": stock_value,
+        "cash_yen": account['cash'],
+        "total_assets_yen": total_assets
+    }])
+    df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+
 # --- 6. メイン処理 ---
 def main():
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 東証最強BOT 起動 (最強ロジック+通知版)")
     
-    # 営業時間フィルター (デバッグモード時は無視)
     if not DEBUG_MODE:
         now = datetime.now()
         if now.weekday() >= 5:
@@ -358,19 +427,25 @@ def main():
 
     account = load_account()
     portfolio = load_portfolio()
-    print(f"🏦 現在の口座残高: {account['cash']:,.0f}円")
+    actions_taken = [] 
+    
+    print(f"🏦 現在の現金残高: {account['cash']:,.0f}円")
 
-    portfolio, account = manage_positions(portfolio, account)
+    portfolio, account, sell_actions = manage_positions(portfolio, account)
+    actions_taken.extend(sell_actions) 
+    
     save_portfolio(portfolio)
     save_account(account)
 
     if len(portfolio) >= MAX_POSITIONS:
         print(f"\n💡 現在最大ポジション数（{MAX_POSITIONS}銘柄）を保有中のため、新規スキャンをスキップします。")
+        print_execution_summary(actions_taken, portfolio, account)
         return
 
     is_market_good = check_market_trend()
     if not is_market_good:
         print("\n📉 地合いフィルター発動: 日経平均が短期下落トレンドのため、リスク回避として新規エントリーを見送ります。")
+        print_execution_summary(actions_taken, portfolio, account)
         return
 
     try:
@@ -378,6 +453,7 @@ def main():
         targets = df_symbols['コード'].astype(str).tolist()
     except Exception as e:
         print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
+        print_execution_summary(actions_taken, portfolio, account)
         return
 
     holdings = [str(p['code']) for p in portfolio]
@@ -388,7 +464,9 @@ def main():
     
     print(f"\n--- 15分足データ一括ダウンロード (新規対象: {len(tickers)}銘柄) ---")
     data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True)
-    if data is None or data.empty: return
+    if data is None or data.empty: 
+        print_execution_summary(actions_taken, portfolio, account)
+        return
 
     for code in targets:
         ticker = f"{code}.T"
@@ -414,6 +492,7 @@ def main():
 
     if not hot_candidates:
         print("💡 現在の15分足で急騰初動シグナルを満たす新規銘柄はありません。")
+        print_execution_summary(actions_taken, portfolio, account)
         return
 
     hot_candidates = sorted(hot_candidates, key=lambda x: x['tech']['VolSurgeRatio'], reverse=True)
@@ -457,15 +536,19 @@ def main():
             notify_msg = f"🏆 **【新規買付】{best['code']} {best['name']}**\n🛒 買値: {buy_price:.1f}円 × {shares_to_buy}株 (概算: {cost:,.0f}円)\n📝 理由: {best['ai_reason']}"
             send_discord_notify(notify_msg)
             
+            actions_taken.append(f"買付: {best['code']} {best['name']} {shares_to_buy}株 (概算: {cost:,.0f}円)")
+            
             account['cash'] -= cost
             portfolio.append({
                 "code": best['code'], "name": best['name'], "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "buy_price": buy_price, "highest_price": buy_price, "shares": shares_to_buy
+                "buy_price": buy_price, "highest_price": buy_price, "current_price": buy_price, "shares": shares_to_buy
             })
             save_portfolio(portfolio)
             save_account(account)
     else:
         print("\n💡 エントリー基準(AIスコア80以上)を満たす銘柄はありませんでした。見送ります。")
+
+    print_execution_summary(actions_taken, portfolio, account)
 
 if __name__ == "__main__":
     main()
