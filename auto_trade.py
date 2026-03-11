@@ -2,12 +2,40 @@
 import os
 import sys
 import io
+from datetime import datetime
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"  
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+# --- 【新規】コンソール出力を日ごとのログファイルにも同時保存する設定 ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True) # logsフォルダがなければ作成
+
+current_date = datetime.now().strftime('%Y-%m-%d')
+LOG_FILE = os.path.join(LOG_DIR, f"console_{current_date}.log")
+
+class TeeLogger:
+    """標準出力とファイルの両方に書き込むためのクラス"""
+    def __init__(self, stream, filepath):
+        self.stream = stream
+        self.file = open(filepath, 'a', encoding='utf-8')
+
+    def write(self, message):
+        self.stream.write(message)
+        self.file.write(message)
+        self.file.flush()
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+# print() やエラー出力がコンソールとファイル両方に飛ぶようにオーバーライド
+sys.stdout = TeeLogger(sys.stdout, LOG_FILE)
+sys.stderr = TeeLogger(sys.stderr, LOG_FILE)
 
 # --- ここから通常のインポート ---
 import yfinance as yf
@@ -17,7 +45,6 @@ from google import genai
 from groq import Groq  
 import feedparser
 import urllib.parse
-from datetime import datetime
 import time
 import re
 import warnings
@@ -27,7 +54,6 @@ from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
 PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
 HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
@@ -54,8 +80,6 @@ else:
     groq_client = None
 
 # 🔧 デバッグモード設定
-# True にすると、休場日や取引時間外でも強制的にプログラムが実行されます。
-# 本番で自動運用する際は False に戻してください。
 DEBUG_MODE = True
 
 # シミュレーション用設定
@@ -66,7 +90,7 @@ INVEST_PER_TRADE = 500000
 # 税率設定（特定口座 源泉徴収あり: 20.315%）
 TAX_RATE = 0.20315
 
-# 【変更】ATR（ボラティリティ）ベースの動的ストップ設定（大化け株対応の鈍感設定）
+# ATR（ボラティリティ）ベースの動的ストップ設定（大化け株対応の鈍感設定）
 ATR_STOP_LOSS_MULTIPLIER = 3.0  # 買値からATRの3倍下がったら損切り（ノイズ許容）
 ATR_TRAIL_ACTIVATION = 4.0      # 買値からATRの4倍上がったらトレール利確準備（しっかり利益が乗るまで待つ）
 ATR_TRAIL_STOP_MULTIPLIER = 2.0 # 最高値からATRの2倍下がったら利確実行（押し目を許容して波に乗る）
@@ -179,17 +203,14 @@ def manage_positions(portfolio, account):
                     sell_reason = "トレール利確 (ATR Trailing)"
 
             if sell_reason:
-                # 税金計算ロジック
                 gross_profit = (current_price - buy_price) * p['shares']
                 tax_amount = 0
                 
-                # 利益が出ている場合のみ税金を計算（切り捨て）
                 if gross_profit > 0:
                     tax_amount = int(gross_profit * TAX_RATE)
                 
-                net_profit = gross_profit - tax_amount # 税引き後利益
+                net_profit = gross_profit - tax_amount 
                 
-                # 口座には「売却代金 - 税金」が戻る
                 sale_proceeds = (current_price * p['shares']) - tax_amount
                 account['cash'] += sale_proceeds
                 
