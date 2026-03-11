@@ -54,6 +54,8 @@ else:
     groq_client = None
 
 # 🔧 デバッグモード設定
+# True にすると、休場日や取引時間外でも強制的にプログラムが実行されます。
+# 本番で自動運用する際は False に戻してください。
 DEBUG_MODE = True
 
 # シミュレーション用設定
@@ -61,13 +63,13 @@ INITIAL_CASH = 1000000
 MAX_POSITIONS = 3       
 INVEST_PER_TRADE = 500000 
 
-# 【追加】税率設定（特定口座 源泉徴収あり: 20.315%）
+# 税率設定（特定口座 源泉徴収あり: 20.315%）
 TAX_RATE = 0.20315
 
-# ATR（ボラティリティ）ベースの動的ストップ設定
-ATR_STOP_LOSS_MULTIPLIER = 2.0  
-ATR_TRAIL_ACTIVATION = 1.5      
-ATR_TRAIL_STOP_MULTIPLIER = 1.5 
+# 【変更】ATR（ボラティリティ）ベースの動的ストップ設定（大化け株対応の鈍感設定）
+ATR_STOP_LOSS_MULTIPLIER = 3.0  # 買値からATRの3倍下がったら損切り（ノイズ許容）
+ATR_TRAIL_ACTIVATION = 4.0      # 買値からATRの4倍上がったらトレール利確準備（しっかり利益が乗るまで待つ）
+ATR_TRAIL_STOP_MULTIPLIER = 2.0 # 最高値からATRの2倍下がったら利確実行（押し目を許容して波に乗る）
 
 # AI審査の上限数
 MAX_AI_CANDIDATES = 50
@@ -177,7 +179,7 @@ def manage_positions(portfolio, account):
                     sell_reason = "トレール利確 (ATR Trailing)"
 
             if sell_reason:
-                # 【変更】税金計算のロジックを追加
+                # 税金計算ロジック
                 gross_profit = (current_price - buy_price) * p['shares']
                 tax_amount = 0
                 
@@ -198,7 +200,6 @@ def manage_positions(portfolio, account):
                 
                 actions.append(f"売却: {code} {p['name']} ({sell_reason}) 純利益: {net_profit:+.0f}円 (税金: {tax_amount:,.0f}円)")
                 
-                # ログにも税金と純利益を記録
                 log_trade({
                     "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
                     "buy_price": buy_price, "sell_price": current_price, "highest_price_reached": highest_price,
