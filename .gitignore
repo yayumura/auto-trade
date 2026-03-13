@@ -1,0 +1,26 @@
+# 環境変数（APIキー等の機密情報）
+.env
+
+# 自動生成ファイル（トレードBOTの出力）
+account.json
+virtual_portfolio.csv
+trade_history.csv
+execution_log.csv
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
