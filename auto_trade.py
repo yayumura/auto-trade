@@ -215,7 +215,7 @@ def manage_positions(portfolio, account):
     remaining_portfolio = []
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     now_time = datetime.now().time()
-    is_closing_time = now_time >= datetime.strptime("14:30", "%H:%M").time() # 大引け前の強制決済時間
+    is_closing_time = now_time >= datetime.strptime("15:00", "%H:%M").time() # 大引け前の強制決済時間（TSE 15:30クローズの30分前）
 
     for p in portfolio:
         code = str(p['code'])
@@ -514,7 +514,7 @@ def main():
         
         c_time = now.time()
         morning_open, morning_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
-        afternoon_open, afternoon_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:00", "%H:%M").time()
+        afternoon_open, afternoon_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time() # 2024年11月TSE延長対応
         
         if not ((morning_open <= c_time <= morning_close) or (afternoon_open <= c_time <= afternoon_close)):
             return
@@ -558,6 +558,7 @@ def main():
 
     if now_time >= datetime.strptime("14:30", "%H:%M").time():
         print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
+        # 14:30〜15:00は保有ポジションの決済監視のみ（manage_positionsで15:00タイムストップが発動）
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
