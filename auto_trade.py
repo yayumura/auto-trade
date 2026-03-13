@@ -529,6 +529,7 @@ def main():
     
     if regime == "BEAR":
         print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
+        send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。")
         portfolio, account, sell_actions = manage_positions(portfolio, account) # 手仕舞いのみ行う
         actions_taken.extend(sell_actions)
         save_portfolio(portfolio)
@@ -544,6 +545,7 @@ def main():
 
     if len(portfolio) >= MAX_POSITIONS:
         print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
+        send_discord_notify(f"💡 【見送り】最大ポジション（{MAX_POSITIONS}銘柄）保有中のため新規スキャンをスキップしました。")
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
@@ -553,11 +555,13 @@ def main():
     # 朝9:00～9:30は前日からの持ち越し注文が交錯し、テクニカル指標が完全に無視されるランダムウォーク状態となるためエントリーを禁止します。
     if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
         print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
+        send_discord_notify("💡 【見送り】寄り付き直後（9:30前）のためエントリー待機中。保有監視のみ実行しました。")
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
     if now_time >= datetime.strptime("14:30", "%H:%M").time():
         print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
+        send_discord_notify("💡 【見送り】大引け前（14:30以降）のため新規買付を終了。保有ポジションの決済監視のみ実行しました。")
         # 14:30〜15:00は保有ポジションの決済監視のみ（manage_positionsで15:00タイムストップが発動）
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
@@ -596,6 +600,7 @@ def main():
 
     if not data_dfs:
         print("⚠️ データの取得に完全に失敗しました。")
+        send_discord_notify("⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
@@ -608,6 +613,7 @@ def main():
     
     if not top_candidates:
         print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
+        send_discord_notify(f"💡 【見送り】レジーム: {regime} | スクリーニングの結果、優位性のある銘柄が見つかりませんでした。")
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
@@ -638,6 +644,7 @@ def main():
         # 【超重要・最終防衛ライン】データ取得エラーやNaN（非数）によるシステム崩壊を物理的に遮断
         if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0:
             print(f"\n💡 異常な価格データ({best_target['price']})を検知したため、安全装置が作動し買付を強制キャンセルしました。")
+            send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格データに異常を検知（{best_target['price']}）。買付を強制キャンセルしました。")
             print_execution_summary(actions_taken, portfolio, account, regime)
             return
             
@@ -665,6 +672,7 @@ def main():
             # 現金残高が事実上マイナスになる絶対的な計算ミスを防ぐフェイルセーフ
             if account['cash'] - cost < 0:
                  print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
+                 send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
             else:
                 print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
                 print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
@@ -685,11 +693,16 @@ def main():
                 save_account(account)
         else:
             if shares_to_buy < 100:
-                print(f"\n💡 リスク管理制限: 現在のボラティリティ(ATR:{atr:.1f})が激しすぎるため、最低単元(100株)買うだけでも1トレードあたりの許容リスク({risk_amount:,.0f}円)を突破してしまいます。安全のため買付をキャンセルしました。")
+                msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — ボラティリティ過大(ATR:{atr:.1f})のためリスク管理制限で買付キャンセル。"
+                print(f"\n{msg}")
+                send_discord_notify(msg)
             else:
-                print(f"\n💡 現金不足のため ({cost:,.0f}円必要 / 残高{account['cash']:,.0f}円)、買付を見送ります。")
+                msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 現金不足 ({cost:,.0f}円必要 / 残高{account['cash']:,.0f}円)。"
+                print(f"\n{msg}")
+                send_discord_notify(msg)
     else:
         print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
+        send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
         
     print_execution_summary(actions_taken, portfolio, account, regime)
 
