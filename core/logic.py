@@ -17,13 +17,19 @@ def detect_market_regime():
         if nk.empty or len(nk) < 20:
             return "RANGE"
         
+        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化してfloat()エラーを防止
+        if isinstance(nk.columns, pd.MultiIndex):
+            nk.columns = nk.columns.droplevel('Ticker')
+        
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
         close = nk[price_col].dropna()
         sma20 = float(close.rolling(window=20).mean().iloc[-1])
         current = float(close.iloc[-1])
         
         returns = close.pct_change().dropna()
-        volatility = returns.std() * np.sqrt(252) # 年率換算ボラ
+        volatility = float(returns.std()) * np.sqrt(252) # 年率換算ボラ
+        
+        print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
         
         if current < sma20 * 0.95 or volatility > 0.30:
             return "BEAR" 

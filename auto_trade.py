@@ -178,6 +178,10 @@ def detect_market_regime():
         if nk.empty or len(nk) < 20:
             return "RANGE"
         
+        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化してfloat()エラーを防止
+        if isinstance(nk.columns, pd.MultiIndex):
+            nk.columns = nk.columns.droplevel('Ticker')
+        
         # 配当落ちによる疑似暴落エラーを防ぐためAdj Closeを使う
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
         close = nk[price_col].dropna()
@@ -186,7 +190,9 @@ def detect_market_regime():
         
         # ボラティリティ（VIX代替）
         returns = close.pct_change().dropna()
-        volatility = returns.std() * np.sqrt(252) # 年率換算ボラ
+        volatility = float(returns.std()) * np.sqrt(252) # 年率換算ボラ
+        
+        print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
         
         if current < sma20 * 0.95 or volatility > 0.30:
             return "BEAR" # パニック相場（システムエラーや下落時は買わない）
@@ -569,8 +575,17 @@ def main():
     # --- 3. システムによる数学的スクリーニング（高速） ---
     try:
         df_symbols = pd.read_csv(DATA_FILE)
+        # 【改善】ETF/ETN、REIT、PRO Market、外国株式、出資証券を除外し、内国株式のみに絞る
+        # （4400→約3770銘柄に削減し、yfinanceの 'possibly delisted' エラーも解消）
+        target_markets = [
+            'プライム（内国株式）',
+            'スタンダード（内国株式）',
+            'グロース（内国株式）',
+        ]
+        df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(target_markets)]
         # 既に保有している銘柄は除外
-        targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in [str(p['code']) for p in portfolio]]
+        held_codes = [str(p['code']) for p in portfolio]
+        targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
     except Exception as e:
         print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
         return
@@ -707,4 +722,4 @@ def main():
     print_execution_summary(actions_taken, portfolio, account, regime)
 
 if __name__ == "__main__":
-    main()
+    main()
