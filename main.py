@@ -3,7 +3,7 @@ import time
 import yfinance as yf
 from datetime import datetime
 
-from core.config import DEBUG_MODE, MAX_POSITIONS, DATA_FILE, MAX_RISK_PER_TRADE, ATR_STOP_LOSS, TRADE_MODE
+from core.config import DEBUG_MODE, MAX_POSITIONS, DATA_FILE, MAX_RISK_PER_TRADE, ATR_STOP_LOSS, TRADE_MODE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT
 from core.log_setup import setup_logging, send_discord_notify
 from core.sim_broker import SimulationBroker
 from core.kabucom_broker import KabucomBroker
@@ -105,7 +105,14 @@ def main():
     # --- 4. スクリーニング ---
     try:
         df_symbols = pd.read_csv(DATA_FILE)
-        targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in [str(p['code']) for p in portfolio]]
+        
+        # 【修正】ETF・REIT等を除外：完全一致ではなく「内国株式」という文字が含まれるものだけを残す（部分一致）
+        if '市場・商品区分' in df_symbols.columns:
+            df_symbols = df_symbols[df_symbols['市場・商品区分'].str.contains('内国株式', na=False)]
+            
+        # 既に保有している銘柄は除外
+        held_codes = [str(p['code']) for p in portfolio]
+        targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
     except Exception as e:
         print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
         return
@@ -167,6 +174,8 @@ def main():
         else:
             print(f"  -> 🚨 リジェクト検知: {reason} (次の候補へ移行)")
 
+
+
     # --- 6. エントリー ---
     if best_target:
         if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0:
@@ -186,8 +195,17 @@ def main():
         risk_per_share = atr * ATR_STOP_LOSS
         
         ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+        
+        # 【修正】1銘柄あたりの最大投資額キャップ（ハイブリッド方式）
+        # 「総資金の30%」と「最低保証額（20万円）」の大きい方をキャップとして採用
+        max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+        max_shares_by_allocation = int(max_investment_amount // buy_price)
+
+        # 実際の現金余力とすり合わせ
         max_shares_by_cash = int(account['cash'] // buy_price)
-        raw_shares = min(ideal_shares, max_shares_by_cash)
+        
+        # 理想の株数、上限キャップ、現金残高のうち、最も少ない（安全な）株数を採用する
+        raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
         
         shares_to_buy = (raw_shares // 100) * 100
         cost = buy_price * shares_to_buy

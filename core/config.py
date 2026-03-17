@@ -28,6 +28,8 @@ DEBUG_MODE = False        # 本番運用時は必ずFalse
 INITIAL_CASH = 1000000    # 初回シミュレーション用資金
 MAX_POSITIONS = 4         # リスク分散上限
 MAX_RISK_PER_TRADE = 0.02 # 1トレードあたりの許容リスク（総資金の2%）
+MAX_ALLOCATION_PCT = 0.30 # 1銘柄あたりの最大投資比率（30%）
+MIN_ALLOCATION_AMOUNT = 200000 # 少額資金時の最低投資保証額（20万円）
 TAX_RATE = 0.20315        # 約20.3%
 
 # --- Target Exits ---
