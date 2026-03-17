@@ -20,15 +20,9 @@ def detect_market_regime():
         if nk.empty or len(nk) < 20:
             return "RANGE"
         
-        # 【追加】市場休業日（祝日）の判定
-        # 最新のデータが「今日」のものでない場合は休場とみなす
-        latest_date = nk.index[-1].date()
-        today_date = datetime.now(JST).date()
-        if latest_date < today_date:
-            print(f"  🏖️ 市場は休場です (最新データ: {latest_date})")
-            return "HOLIDAY"
+        # 【修正】朝イチの誤作動を防ぐため、安易な日付比較によるHOLIDAY判定を削除しました
         
-        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化
+        # yfinance v0.2.31以降はMultiIndex列を返すため、フラット化
         if isinstance(nk.columns, pd.MultiIndex):
             nk.columns = nk.columns.droplevel('Ticker')
         
@@ -190,7 +184,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                             remaining_portfolio.append(p)
                             continue
                             
-                        # 【修正追加】リアル取引でも約定完了したらローカル残高を回復させる
+                        # リアル取引でも約定完了したらローカル残高を回復させる
                         sale_proceeds = (current_price * p['shares']) - tax_amount
                         account['cash'] += sale_proceeds
                         
