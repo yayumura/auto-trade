@@ -181,16 +181,6 @@ def _main_exec():
         send_discord_notify(msg)
         return
 
-    # --- [Phase 14] In-flight Order Guard (未約定注文チェック) ---
-    if not is_sim:
-        print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
-        active_orders = broker.get_active_orders()
-        if active_orders:
-            msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで待機または終了してください。"
-            print(msg)
-            send_discord_notify(msg)
-            return
-    
     # --- [Phase 11] Resource Watcher ---
     try:
         import psutil
@@ -229,8 +219,32 @@ def _main_exec():
 
         print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')})")
 
-        account = load_account()
-        portfolio = load_portfolio()
+        # --- 【追加】In-flight Guard をループ内に移動（二重発注の完全防止） ---
+        if not is_sim:
+            try:
+                active_orders = broker.get_active_orders()
+                if active_orders:
+                    msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注事故を防ぐため、約定または取消されるまでスキャンを待機します。"
+                    print(msg)
+                    send_discord_notify(msg)
+                    print(f"\n💤 次のスキャン（15分後）まで待機します...")
+                    time.sleep(900)
+                    continue
+            except Exception as e:
+                print(f"⚠️ 注文状態の確認エラー: {e}")
+
+        # --- 【修正】Brokerパターン完全適用（APIから最新の口座・ポジションを取得） ---
+        try:
+            account = broker.get_account_balance() if hasattr(broker, 'get_account_balance') else load_account()
+            portfolio = broker.get_positions() if hasattr(broker, 'get_positions') else load_portfolio()
+        except Exception as e:
+            msg = f"⚠️ 【API通信エラー】口座情報またはポジションの取得に失敗しました: {e}"
+            print(msg)
+            send_discord_notify(msg)
+            print(f"\n💤 一時的な通信障害のため、次のスキャン（15分後）まで待機します...")
+            time.sleep(900)
+            continue
+
         actions_taken = []
         trade_logs = [] 
 
@@ -431,7 +445,6 @@ def _main_exec():
                      print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
                      send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
                 else:
-                    # 【重要追加】リアルAPI（カブコム）の場合は実際に買い注文を発注する
                     order_id = "SIM-ORDER"
                     if not is_sim:
                         # auカブコムAPIへ成行買い注文を送信 (side="2" は買い)
@@ -456,7 +469,6 @@ def _main_exec():
                         save_portfolio(portfolio)
                         save_account(account)
                     else:
-                        # 【重要追加】APIエラーで注文拒否された場合は買付処理をキャンセルする
                         msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
                         print(msg)
                         send_discord_notify(msg)
