@@ -182,13 +182,18 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                             print(f"⚠️ {code} の売却注文が証券会社APIで拒否・失敗しました。")
                             remaining_portfolio.append(p)
                             continue
+                        
                         # 決済時は確実に約定を確認 (Phase 11)
-                        if not is_simulation:
-                            details = broker.wait_for_execution(order_id)
-                            if not details or details.get('State') != 6:
-                                print(f"⚠️ {code} の約定が確認できませんでした。手動確認が必要です。")
-                                remaining_portfolio.append(p)
-                                continue
+                        details = broker.wait_for_execution(order_id)
+                        if not details or details.get('State') != 6:
+                            print(f"⚠️ {code} の約定が確認できませんでした。手動確認が必要です。")
+                            remaining_portfolio.append(p)
+                            continue
+                            
+                        # 【修正追加】リアル取引でも約定完了したらローカル残高を回復させる
+                        sale_proceeds = (current_price * p['shares']) - tax_amount
+                        account['cash'] += sale_proceeds
+                        
                     else:
                         print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
                         remaining_portfolio.append(p)
