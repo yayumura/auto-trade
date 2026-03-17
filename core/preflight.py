@@ -1,4 +1,7 @@
 import time
+import os
+import sys
+import requests
 from datetime import datetime, timedelta
 from core.config import (
     KABUCOM_API_PASSWORD, GEMINI_API_KEY, 

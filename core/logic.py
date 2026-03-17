@@ -35,6 +35,10 @@ def detect_market_regime():
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
         close = nk[price_col].dropna()
         sma20 = float(close.rolling(window=20).mean().iloc[-1])
+        
+        current = float(close.iloc[-1])
+        volatility = float(close.pct_change().dropna().std()) * np.sqrt(252)
+        
         print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
         
         # --- [Phase 13] データの鮮度チェック ---
@@ -269,8 +273,9 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
 
             # 2. スパイク・ガード: 直近15分で異常な価格変化(5%以上)がないか
             if len(df) >= 2:
-                prev_close = df[price_col].iloc[-2]
-                current_change = abs(latest[price_col] - prev_close) / prev_close
+                p_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+                prev_close = df[p_col].iloc[-2]
+                current_change = abs(latest[p_col] - prev_close) / prev_close
                 if current_change > 0.05:
                     print(f"⚠️ [Spike Guard] {code} の急激な価格変化({current_change*100:.1f}%)を検知。リスク回避のため除外します。")
                     continue

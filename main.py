@@ -64,35 +64,8 @@ def _main_exec():
         print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
         return
     
-    # --- [Phase 14] In-flight Order Guard ---
-    from core.kabucom_broker import KabucomBroker
-    broker = KabucomBroker(is_production=IS_PRODUCTION)
-    print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
-    active_orders = broker.get_active_orders()
-    if active_orders:
-        msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで停止します。"
-        print(msg)
-        send_discord_notify(msg)
-        return
-
     setup_logging()
-    print(f"\n[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (Brokerパターン稼働中)")
     
-    # --- 0. タイムフィルター (Phase 14: サーバー時刻同期) ---
-    server_now = broker.get_server_time()
-    if not DEBUG_MODE:
-        if server_now.weekday() >= 5: 
-            print("💤 本日は市場休業日（土日）です。")
-            return
-        
-        c_time = server_now.time()
-        m_open, m_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
-        a_open, a_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time()
-        
-        if not ((m_open <= c_time <= m_close) or (a_open <= c_time <= a_close)):
-            print(f"💤 取引時間外です (サーバー時刻: {c_time.strftime('%H:%M:%S')})。")
-            return
-
     # --- 1. Brokerの初期化と口座情報取得 ---
     try:
         if TRADE_MODE == "KABUCOM_LIVE":
@@ -115,6 +88,33 @@ def _main_exec():
         print(msg)
         send_discord_notify(msg)
         return
+
+    # --- [Phase 14] In-flight Order Guard ---
+    if not is_sim:
+        print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
+        active_orders = broker.get_active_orders()
+        if active_orders:
+            msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで停止します。"
+            print(msg)
+            send_discord_notify(msg)
+            return
+
+    print(f"\n[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (Brokerパターン稼働中)")
+    
+    # --- 0. タイムフィルター (Phase 14: サーバー時刻同期) ---
+    server_now = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.now(JST)
+    if not DEBUG_MODE:
+        if server_now.weekday() >= 5: 
+            print("💤 本日は市場休業日（土日）です。")
+            return
+        
+        c_time = server_now.time()
+        m_open, m_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
+        a_open, a_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time()
+        
+        if not ((m_open <= c_time <= m_close) or (a_open <= c_time <= a_close)):
+            print(f"💤 取引時間外です (サーバー時刻: {c_time.strftime('%H:%M:%S')})。")
+            return
 
     actions_taken = []
     

@@ -18,7 +18,7 @@ from core.config import (
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE, 
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
-    DEBUG_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
+    DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
     ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST
 )
@@ -159,16 +159,40 @@ def _main_exec():
         print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
         return
     
-    # --- [Phase 14] In-flight Order Guard (未約定注文チェック) ---
-    broker = KabucomBroker(is_production=IS_PRODUCTION)
-    print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
-    active_orders = broker.get_active_orders()
-    if active_orders:
-        msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで待機または終了してください。"
+    setup_logging()
+    
+    # --- 1. Brokerの初期化 ---
+    from core.sim_broker import SimulationBroker
+    from core.kabucom_broker import KabucomBroker
+    
+    try:
+        if TRADE_MODE == "KABUCOM_LIVE":
+            print("⚡ 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
+            broker = KabucomBroker(is_production=True)
+            is_sim = False
+        elif TRADE_MODE == "KABUCOM_TEST":
+            print("🧪 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
+            broker = KabucomBroker(is_production=False)
+            is_sim = False
+        else:
+            print("🎮 【シミュレーションモード】ローカルCSVベースで実行します")
+            broker = SimulationBroker()
+            is_sim = True
+    except Exception as e:
+        msg = f"❌ 【致命的エラー】証券会社APIの初期化に失敗しました: {e}"
         print(msg)
         send_discord_notify(msg)
-        # 成行注文メインなので通常は即座に無くなるはずだが、安全のため停止する
         return
+
+    # --- [Phase 14] In-flight Order Guard (未約定注文チェック) ---
+    if not is_sim:
+        print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
+        active_orders = broker.get_active_orders()
+        if active_orders:
+            msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで待機または終了してください。"
+            print(msg)
+            send_discord_notify(msg)
+            return
     
     # --- [Phase 11] Resource Watcher ---
     try:
@@ -185,7 +209,7 @@ def _main_exec():
 
     while True:
         # --- [Phase 14] Server Time Sync ---
-        server_datetime = broker.get_server_time()
+        server_datetime = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.now(JST)
         now_time = server_datetime.time()
 
         # 15:30（大引け）を過ぎたら本日の運用を終了
@@ -217,24 +241,22 @@ def _main_exec():
         trade_logs = [] 
 
         # --- 1. 相場環境（レジーム）判定 ---
-    try:
-        regime = detect_market_regime()
-    except Exception as e:
-        msg = f"❌ 【致命的エラー】レジーム判定（日経平均取得）に失敗しました: {e}"
-        print(msg)
-        send_discord_notify(msg)
-        return
+        try:
+            regime = detect_market_regime()
+        except Exception as e:
+            msg = f"❌ 【致命的エラー】レジーム判定（日経平均取得）に失敗しました: {e}"
+            print(msg)
+            send_discord_notify(msg)
+            return
 
-    print(f"📊 現在のレジーム: 【{regime}】")
-    
-    if regime == "HOLIDAY":
-        print("🏖️ 本日は市場休業日です。処理を終了します。")
-        return
+        print(f"📊 現在のレジーム: 【{regime}】")
+        
+        if regime == "HOLIDAY":
+            print("🏖️ 本日は市場休業日です。処理を終了します。")
+            return
 
-    # --- 2. 保有ポジション管理 ---
-    # manage_positions関数にbroker引数とis_simulation引数を追加。
-    # このファイルは主にシミュレーション用途のため、is_simulation=True をデフォルトとする。
-    portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=None, regime=regime, is_simulation=True)
+        # --- 2. 保有ポジション管理 ---
+        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=broker, regime=regime, is_simulation=is_sim)
     actions_taken.extend(sell_actions)
     for log in trade_logs_from_manage:
         log_trade(log)
