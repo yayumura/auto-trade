@@ -49,4 +49,11 @@ class BaseBroker(ABC):
         毎回の実行サマリー（資産推移）を記録します。
         """
         pass
+
+    @abstractmethod
+    def execute_market_order(self, code: str, shares: int, side: str) -> str:
+        """
+        現物の成行注文を発注し、注文ID（またはシミュレーションID）を返します。
+        """
+        pass
         

@@ -1,4 +1,3 @@
-# --- 0. 環境設定 ---
 import os
 import sys
 import io
@@ -6,116 +5,66 @@ from datetime import datetime
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from google import genai
-from groq import Groq  
-import feedparser
-import urllib.parse
 import time
 import re
 import warnings
 import json
-import requests
-from dotenv import load_dotenv
+import signal
+from core.log_setup import setup_logging, send_discord_notify
+from core.preflight import pre_flight_check
 
-os.environ["PYTHONIOENCODING"] = "utf-8"
-os.environ["PYTHONUTF8"] = "1"  
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-warnings.filterwarnings('ignore')
+# --- ファイルパス・設定・APIキー設定 (core.configより一括取得) ---
+from core.config import (
+    DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE, 
+    EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
+    GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
+    DEBUG_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
+    MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
+    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST
+)
+from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
 
-# --- ログ出力の二重化設定 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-current_date = datetime.now().strftime('%Y-%m-%d')
-LOG_FILE = os.path.join(LOG_DIR, f"console_{current_date}.log")
+# --- インスタンスロック機構 ---
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
 
-class TeeLogger:
-    def __init__(self, stream, filepath):
-        self.stream = stream
-        self.file = open(filepath, 'a', encoding='utf-8')
+def acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            import psutil
+            if psutil.pid_exists(old_pid):
+                print(f"⚠️ エラー: 他のシミュレーションインスタンス(PID: {old_pid})が既に実行中です。")
+                return False
+        except:
+            pass
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    return True
 
-    def write(self, message):
-        self.stream.write(message)
-        self.file.write(message)
-        self.file.flush()
+def release_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
 
-    def flush(self):
-        self.stream.flush()
-        self.file.flush()
-
-sys.stdout = TeeLogger(sys.stdout, LOG_FILE)
-sys.stderr = TeeLogger(sys.stderr, LOG_FILE)
-
-# --- ファイルパス設定 (既存維持) ---
-DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
-PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
-HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
-ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
-EXECUTION_LOG_FILE = os.path.join(BASE_DIR, 'execution_log.csv') 
-
-# --- 2. AI・トレード設定 ---
-load_dotenv(os.path.join(BASE_DIR, '.env'))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-
-if not GEMINI_API_KEY:
-    print("⚠️ エラー: GEMINI_API_KEY が設定されていません。")
-    sys.exit()
-
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-GEMINI_MODEL = "gemini-2.5-flash"
-
-if GROQ_API_KEY:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-else:
-    groq_client = None
-
-# --- 設定値 (資金管理) ---
-DEBUG_MODE = False # 🔴 本番運用時は必ずFalse（営業時間外の無駄なAPI呼び出しと誤作動を防止）
-INITIAL_CASH = 1000000  
-MAX_POSITIONS = 4         # リスク分散のため4銘柄
-MAX_RISK_PER_TRADE = 0.02 # 1トレードあたりの許容損失額(総資金の2%)
-TAX_RATE = 0.20315        # 税率（約20.3%）
-
-# --- 利確・損切設定 (ATRベースの動的ストップ) ---
-ATR_STOP_LOSS = 2.0       # エントリー時の損切ライン(ATRの2倍)
-ATR_TRAIL = 1.5           # トレールストップ(最高値からATRの1.5倍下落で利確)
-
-def send_discord_notify(message):
-    if not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
-    except Exception as e:
-        print(f"⚠️ Discord通知エラー: {e}")
 
 # --- 既存CSVとJSONの読み書き処理 (完全に維持) ---
 def load_account():
-    if os.path.exists(ACCOUNT_FILE) and os.path.getsize(ACCOUNT_FILE) > 0:
-        try:
-            with open(ACCOUNT_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            pass
-    return {"cash": INITIAL_CASH}
+    account = safe_read_json(ACCOUNT_FILE)
+    return account if account is not None else {"cash": INITIAL_CASH}
 
 def save_account(account_data):
-    with open(ACCOUNT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(account_data, f, indent=4)
+    atomic_write_json(ACCOUNT_FILE, account_data)
 
 def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE) and os.path.getsize(PORTFOLIO_FILE) > 0:
-        try:
-            return pd.read_csv(PORTFOLIO_FILE).to_dict('records')
-        except pd.errors.EmptyDataError:
-            return []
-    return []
+    df = safe_read_csv(PORTFOLIO_FILE)
+    return df.to_dict('records') if not df.empty else []
 
 def save_portfolio(portfolio):
     df = pd.DataFrame(portfolio)
-    df.to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
+    atomic_write_csv(PORTFOLIO_FILE, df)
 
 def log_trade(trade_record):
     write_header = not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0
@@ -123,7 +72,7 @@ def log_trade(trade_record):
     df.to_csv(HISTORY_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
 
 def print_execution_summary(actions, portfolio, account, regime="不明"):
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    current_time = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
     stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
     total_assets = account['cash'] + stock_value
     
@@ -168,101 +117,127 @@ def print_execution_summary(actions, portfolio, account, regime="不明"):
     df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
 
 
-# --- 【中核1】レジーム（地合い）認識 ---
-# Moved to core.logic.detect_market_regime
+from core.logic import (
+    detect_market_regime, manage_positions, select_best_candidates, 
+    load_invalid_tickers, save_invalid_tickers
+)
+from core.ai_filter import ai_qualitative_filter, get_recent_news
 
-# --- 【中核2】保有ポジションの高度な管理 ---
-# Moved to core.logic.manage_positions
-
-# --- 【中核3】マルチファクター・スキャン（完全数学的） ---
-# calculate_technicals_for_scan moved to core.logic
-# select_best_candidates moved to core.logic
-
-# --- 【中核4】AI定性フィルター (API節約・高速化) ---
-def clean_text_for_ai(text):
-    if not isinstance(text, str): return ""
-    text = re.sub(r'[\r\n\t]+', ' ', text)
-    return re.sub(r'[^\x20-\x7E\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', '', text).strip()
-
-def get_recent_news(code, name):
-    clean_name = re.sub(r'\s+', ' ', name).strip()
-    query = urllib.parse.quote(f"{code} {clean_name}")
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
+# --- シグナルハンドラ (Phase 12: Graceful Shutdown) ---
+def handle_shutdown(signum, frame):
+    print(f"\n🛑 シグナル({signum})を受信しました。安全にシャットダウンを開始します...")
     try:
-        feed = feedparser.parse(rss_url)
-        titles = [entry.title for entry in feed.entries[:5]]
-        return " | ".join(titles) if titles else "ニュースなし"
-    except:
-        return ""
-
-def ai_qualitative_filter(code, name, news_text):
-    safe_name = clean_text_for_ai(name)
-    safe_news = clean_text_for_ai(news_text)
-
-    # 数学的に優秀な銘柄に対して、「致命的な悪材料がないか」だけを判定させる
-    prompt = f"""
-    対象銘柄: {safe_name} ({code})
-    最新ニュース: {safe_news}
-
-    あなたは機関投資家のコンプライアンス・リスク管理者です。
-    この銘柄のニュースの中に、直近で「下方修正」「粉飾決算」「不祥事・スキャンダル」「第三者割当増資(希薄化)」「上場廃止懸念」などの【致命的・突発的な悪材料】が含まれているか判定してください。
-
-    【出力ルール】
-    1行目: YES または NO (悪材料があればYES、特になければNO)
-    2行目: 理由(短く)
-    """
-
-    try:
-        response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        text = response.text.strip().upper()
-        if text.startswith("YES") or "YES" in text.split('\n')[0]:
-            return False, text.replace('\n', ' ') # 悪材料あり（リジェクト）
-        return True, "問題なし" # 悪材料なし（承認）
-    except Exception as e:
-        err_msg = str(e).lower()
-        if groq_client and ("429" in err_msg or "quota" in err_msg):
-            try:
-                g_response = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], temperature=0.1
-                )
-                text = g_response.choices[0].message.content.strip().upper()
-                if "YES" in text.split('\n')[0]: return False, "Groq:悪材料検知"
-                return True, "Groq:問題なし"
-            except:
-                pass
-        return True, "AI判定エラー（一時承認）"
+        send_discord_notify("🛑 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
+    except: pass
+    release_lock()
+    sys.exit(0)
 
 # --- メインループ ---
 def main():
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動")
+    if not acquire_lock():
+        sys.exit(1)
+        
+    # シグナルの登録
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
-    # タイムフィルター
-    if not DEBUG_MODE:
-        now = datetime.now()
-        if now.weekday() >= 5: return
+    try:
+        _main_exec()
+    except Exception as e:
+        msg = f"💥 【致命的システムエラー】シミュレーションループ内で予期せぬ例外が発生しました:\n{e}"
+        print(msg)
+        try:
+            send_discord_notify(msg)
+        except:
+            pass
+        time.sleep(10) # API制限回避とログ氾濫防止のためのクールダウン (Phase 13)
+    finally:
+        release_lock()
 
-        c_time = now.time()
-        morning_open, morning_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
-        afternoon_open, afternoon_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time() # 2024年11月TSE延長対応
+def _main_exec():
+    if not pre_flight_check():
+        print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
+        return
+    
+    # --- [Phase 14] In-flight Order Guard (未約定注文チェック) ---
+    broker = KabucomBroker(is_production=IS_PRODUCTION)
+    print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
+    active_orders = broker.get_active_orders()
+    if active_orders:
+        msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで待機または終了してください。"
+        print(msg)
+        send_discord_notify(msg)
+        # 成行注文メインなので通常は即座に無くなるはずだが、安全のため停止する
+        return
+    
+    # --- [Phase 11] Resource Watcher ---
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        print(f"📊 [System Health] Memory Usage: {mem_info.rss / 1024 / 1024:.1f} MB | CPU: {psutil.cpu_percent()}%")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️ リソース監視中にエラー: {e}")
 
-        if not ((morning_open <= c_time <= morning_close) or (afternoon_open <= c_time <= afternoon_close)):
-            return
+    print(f"\n🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (自律ループ型監視中)")
 
-    account = load_account()
-    portfolio = load_portfolio()
-    actions_taken = []
-    trade_logs = [] # manage_positionsから返されるログを格納するリスト
+    while True:
+        # --- [Phase 14] Server Time Sync ---
+        server_datetime = broker.get_server_time()
+        now_time = server_datetime.time()
 
-    # --- 1. 相場環境（レジーム）判定 ---
-    regime = detect_market_regime()
+        # 15:30（大引け）を過ぎたら本日の運用を終了
+        if now_time >= datetime.strptime("15:30", "%H:%M").time() and not DEBUG_MODE:
+            print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
+            send_discord_notify("🏁 【業務終了】15:30（大引け）を過ぎたため、自動運用を終了しました。")
+            break
+
+        # タイムフィルター（取引時間外の待機）
+        if not DEBUG_MODE:
+            if server_datetime.weekday() >= 5: 
+                print("💤 本日は市場休業日（土日）です。")
+                break
+            
+            m_open, m_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
+            a_open, a_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time()
+            
+            if not ((m_open <= now_time <= m_close) or (a_open <= now_time <= a_close)):
+                print(f"💤 取引時間外です（現在サーバー時刻: {now_time.strftime('%H:%M:%S')}）。10分待機します...")
+                time.sleep(600)
+                continue
+
+        # --- 以下、定期実行される中身 ---
+        print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')})")
+
+        account = load_account()
+        portfolio = load_portfolio()
+        actions_taken = []
+        trade_logs = [] 
+
+        # --- 1. 相場環境（レジーム）判定 ---
+    try:
+        regime = detect_market_regime()
+    except Exception as e:
+        msg = f"❌ 【致命的エラー】レジーム判定（日経平均取得）に失敗しました: {e}"
+        print(msg)
+        send_discord_notify(msg)
+        return
+
     print(f"📊 現在のレジーム: 【{regime}】")
+    
+    if regime == "HOLIDAY":
+        print("🏖️ 本日は市場休業日です。処理を終了します。")
+        return
 
     # --- 2. 保有ポジション管理 ---
     # manage_positions関数にbroker引数とis_simulation引数を追加。
     # このファイルは主にシミュレーション用途のため、is_simulation=True をデフォルトとする。
     portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=None, regime=regime, is_simulation=True)
     actions_taken.extend(sell_actions)
-    trade_logs.extend(trade_logs_from_manage)
+    for log in trade_logs_from_manage:
+        log_trade(log)
     save_portfolio(portfolio)
     save_account(account)
 
@@ -278,7 +253,7 @@ def main():
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
 
-    now_time = datetime.now().time()
+    now_time = datetime.now(JST).time()
 
     # 【重要追加】東京市場の「魔の寄り付き30分」を回避
     # 朝9:00～9:30は前日からの持ち越し注文が交錯し、テクニカル指標が完全に無視されるランダムウォーク状態となるためエントリーを禁止します。
@@ -353,6 +328,33 @@ def main():
 
     # 全チャンクを結合
     data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
+    
+    # --- [Phase 11] NaN Guard (価格異常チェック) ---
+    if data_df.isnull().values.any():
+        print("⚠️ 取得データに欠損値(NaN)が含まれています。不正確な計算を避けるためスキャンを中断します。")
+        # 列ごとの欠損率をチェックして報告
+        null_counts = data_df.isnull().sum()
+        bad_cols = null_counts[null_counts > 0].index.tolist()
+        print(f"   欠損箇所: {bad_cols[:5]}.. (計 {len(bad_cols)} 列)")
+        print_execution_summary(actions_taken, portfolio, account, regime)
+        return
+    
+    # --- 鮮度チェック (Phase 8: Stale Data Guard) ---
+    try:
+        last_update = data_df.index[-1]
+        if last_update.tzinfo is None:
+            last_update = JST.localize(last_update)
+        
+        age = datetime.now(JST) - last_update
+        if age.total_seconds() > 3600: # 1時間を超える遅延は異常とみなす
+             msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。安全のため買付を見送ります。"
+             print(msg)
+             send_discord_notify(msg)
+             print_execution_summary(actions_taken, portfolio, account, regime)
+             return
+    except Exception as e:
+        print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
+
     print("✅ データ取得完了。評価アルゴリズムを実行します...")
     
     # 数学的に評価されたトップ候補（最大3件）を瞬時に取得
@@ -407,9 +409,17 @@ def main():
         risk_per_share = atr * ATR_STOP_LOSS
         
         ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+        
+        # 【修正】1銘柄あたりの最大投資額キャップ（ハイブリッド方式：main.pyと同期）
+        # 「総資金の30%」と「最低保証額（20万円）」の大きい方をキャップとして採用
+        max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+        max_shares_by_allocation = int(max_investment_amount // buy_price)
+
         # 実際の現金余力とすり合わせ
         max_shares_by_cash = int(account['cash'] // buy_price)
-        raw_shares = min(ideal_shares, max_shares_by_cash)
+        
+        # 理想の株数、上限キャップ、現金残高のうち、最も少ない（安全な）株数を採用する
+        raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
         
         # 【重要追加】日本株の単元株（100株単位）への強制丸め込み
         shares_to_buy = (raw_shares // 100) * 100
@@ -432,9 +442,9 @@ def main():
                 account['cash'] -= cost
                 portfolio.append({
                     "code": best_target['code'], "name": best_target['name'], 
-                    "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                    "buy_price": buy_price, "highest_price": buy_price, 
-                    "current_price": buy_price, "shares": shares_to_buy
+                    "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
+                    "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1), 
+                    "current_price": round(buy_price, 1), "shares": shares_to_buy
                 })
                 save_portfolio(portfolio)
                 save_account(account)
@@ -451,7 +461,11 @@ def main():
         print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
         send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
         
-    print_execution_summary(actions_taken, portfolio, account, regime)
+        print_execution_summary(actions_taken, portfolio, account, regime)
+        
+        # 15分待機 (Phase 14)
+        print(f"\n💤 次のスキャン（15分後）まで待機します...")
+        time.sleep(900)
 
 if __name__ == "__main__":
     main()

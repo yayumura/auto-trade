@@ -6,6 +6,7 @@ import time
 from core.broker import BaseBroker
 from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE
 from core.log_setup import send_discord_notify
+from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv
 
 class KabucomBroker(BaseBroker):
     """
@@ -34,7 +35,7 @@ class KabucomBroker(BaseBroker):
         data = {'APIPassword': self.password}
         
         try:
-            res = requests.post(url, headers=headers, json=data, timeout=5)
+            res = requests.post(url, headers=headers, json=data, timeout=10)
             if res.status_code == 200:
                 self.token = res.json().get('Token')
                 print(f"✅ auカブコムAPI 認証成功 (Port:{self.port})")
@@ -44,73 +45,148 @@ class KabucomBroker(BaseBroker):
             env_name = "本番" if self.is_production else "検証用"
             print(f"⚠️ kabuステーション({env_name})に接続できません。アプリが起動し、APIが有効化されているか確認してください。({e})")
 
-    def _get_headers(self):
-        if not self.token:
+    def _get_headers(self, force_refresh=False):
+        if not self.token or force_refresh:
             self._authenticate()
         return {
             'Content-Type': 'application/json',
             'X-API-KEY': self.token
         }
 
+    def get_server_time(self) -> datetime:
+        """ 取引所（証券会社側）の現在時刻を取得する """
+        if not self.token: return datetime.now()
+        url = f"{self.base_url}/symbol/7203@1" # トヨタの時価情報から時刻を拝借
+        try:
+            res = requests.get(url, headers=self._get_headers(), timeout=5)
+            if res.status_code == 200:
+                # サーバーの現在時刻はレスポンスの 'TradingDate' ではなく、本来はAPIのリファレンスから
+                # 明示的な「サーバー時刻」エンドポイントを叩くべきだが、多くのAPIではレスポンスヘッダや
+                # 時価情報の更新時刻が基準となる。ここでは簡易的にトヨタの時価時刻を基準とする。
+                # 実際の KabuステーションAPI には /common/servertime のようなものがないため、
+                # トヨタの時価データの 'CurrentPriceTime' 等を使用するのが一般的。
+                time_str = res.json().get('CurrentPriceTime', "")
+                if time_str:
+                    # 時刻のみ(HH:mm:ss)の場合は当日の日付を付加
+                    from core.config import JST
+                    today = datetime.now(JST).date()
+                    full_time_str = f"{today} {time_str}"
+                    return datetime.strptime(full_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
+            return datetime.now()
+        except:
+            return datetime.now()
+
+    def get_active_orders(self) -> list:
+        """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
+        if not self.token: return []
+        url = f"{self.base_url}/orders"
+        try:
+            res = requests.get(url, headers=self._get_headers(), timeout=10)
+            if res.status_code == 200:
+                orders = res.json()
+                # State 3:受付, 4:受付済, 5:執行中 のものを抽出
+                active = [o for o in orders if o.get('State') in [3, 4, 5]]
+                return active
+            return []
+        except:
+            return []
+
     def get_account_balance(self) -> dict:
         """ 現金残高（買付余力）の取得 """
         if not self.token: return {"cash": 0}
         
         url = f"{self.base_url}/wallet/cash"
-        try:
-            res = requests.get(url, headers=self._get_headers(), timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                # 買付余力 (StockAccountWallet) を現金残高とする
-                cash = data.get('StockAccountWallet', 0)
-                return {"cash": float(cash)}
-            else:
-                print(f"⚠️ 余力取得エラー: {res.text}")
+        for retry in [False, True]: # 401時のリトライ用
+            try:
+                res = requests.get(url, headers=self._get_headers(force_refresh=retry), timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    cash = data.get('StockAccountWallet', 0)
+                    return {"cash": float(cash)}
+                elif res.status_code == 401 and not retry:
+                    continue
+                else:
+                    print(f"⚠️ 余力取得エラー: {res.text}")
+                    return {"cash": 0}
+            except Exception as e:
+                print(f"⚠️ 余力取得通信エラー: {e}")
                 return {"cash": 0}
-        except Exception as e:
-            print(f"⚠️ 余力取得通信エラー: {e}")
-            return {"cash": 0}
+        return {"cash": 0}
 
     def get_positions(self) -> list:
         """ 
         現在保有中の現物ポジション一覧を取得し、シミュレーションBOTと同じ辞書リスト形式に変換する。
-        （※kabuステーション側で買値（AverageCost）等も管理されている）
+        さらに、既存のファイルから highest_price 等の継続データを復元する。
         """
-        if not self.token: return []
+        if not self.token: 
+            raise ConnectionError("認証トークンがないためポジションを取得できません")
         
+        # 1. APIから最新のポジションを取得
         url = f"{self.base_url}/positions?product=0" # 0: 現物
-        positions = []
-        try:
-            res = requests.get(url, headers=self._get_headers(), timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                for p in data:
-                    if p['LeavesQty'] == 0: continue # 売却済残存データ等をパージ
-                    # kabuステーションのレスポンスをBOT共通フォーマットにマッピング
-                    code_sym = p['Symbol']
-                    positions.append({
-                        "code": code_sym,
-                        "name": p['SymbolName'],
-                        "shares": p['LeavesQty'],         # 保有数量
-                        "buy_price": p['Price'],          # 平均取得単価
-                        "current_price": p['CurrentPrice'],
-                        "highest_price": p['CurrentPrice'], # 取引時間中に現在値=最高値として扱う(暫定)
-                        "buy_time": "Real API Position"
-                    })
-                return positions
-            else:
-                print(f"⚠️ ポジション取得エラー: {res.text}")
-                return []
-        except Exception as e:
-            print(f"⚠️ ポジション取得通信エラー: {e}")
-            return []
+        api_positions = None
+        for retry in [False, True]:
+            try:
+                res = requests.get(url, headers=self._get_headers(force_refresh=retry), timeout=10)
+                if res.status_code == 200:
+                    api_positions = res.json()
+                    break
+                elif res.status_code == 401 and not retry:
+                    continue
+                else:
+                    raise Exception(f"API Error: {res.status_code} {res.text}")
+            except Exception as e:
+                if retry: raise e # リトライ後も失敗なら上位へ投げる
+                continue
 
-    def execute_market_order(self, code: str, shares: int, side: str) -> bool:
+        # 2. ローカルデータマージ (中身は以前と同じ)
+        from core.config import PORTFOLIO_FILE
+        local_data = {}
+        df_local = safe_read_csv(PORTFOLIO_FILE)
+        if not df_local.empty:
+            for _, row in df_local.iterrows():
+                local_data[str(row['code'])] = row.to_dict()
+
+        final_positions = []
+        for p in api_positions:
+            if p['LeavesQty'] == 0: continue
+            code_sym = str(p['Symbol'])
+            current_price = float(p['CurrentPrice'])
+            
+            if code_sym in local_data:
+                hist = local_data[code_sym]
+                local_buy_price = float(hist.get('buy_price', 0))
+                api_buy_price = float(p['Price'])
+                
+                # --- [Phase 10] 株式分割・併合の自動検知同期 ---
+                # APIの取得単価とローカルの取得単価に5%以上の乖離がある場合、分割等があったとみなす
+                if local_buy_price > 0 and abs(1 - (api_buy_price / local_buy_price)) > 0.05:
+                    adj_ratio = api_buy_price / local_buy_price
+                    print(f"🔄 [Split Sync] {code_sym} の価格乖離({local_buy_price} -> {api_buy_price})を検知。記録を係数 {adj_ratio:.4f} で調整します。")
+                    highest_price = float(hist.get('highest_price', current_price)) * adj_ratio
+                else:
+                    highest_price = float(hist.get('highest_price', current_price))
+                
+                highest_price = max(highest_price, current_price)
+                buy_time = hist.get('buy_time', "Real API Position")
+            else:
+                highest_price = current_price
+                buy_time = "Real API Position"
+
+            final_positions.append({
+                "code": code_sym, "name": p['SymbolName'], "shares": int(p['LeavesQty']),
+                "buy_price": float(p['Price']), "current_price": current_price,
+                "highest_price": round(highest_price, 1),
+                "buy_time": buy_time
+            })
+        return final_positions
+
+    def execute_market_order(self, code: str, shares: int, side: str) -> str:
         """
         現物の成行注文（買い/売り）を発注する純粋APIラッパー。
+        成功時は OrderId を返し、失敗時は None を返すようにシグネチャを変更。
         side: "1" (売), "2" (買)
         """
-        if not self.token: return False
+        if not self.token: return None
         
         url = f"{self.base_url}/sendorder"
         data = {
@@ -120,7 +196,7 @@ class KabucomBroker(BaseBroker):
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
             "CashMargin": 1,    # 1: 新規（現物買）or 返済（現物売）
-            "MarginTradeType": 1, # 1: 制度信用（現物の場合はダミー）
+            "MarginTradeType": 1, 
             "DelivType": 2,     # 2: お預り金（現物買の場合必須）
             "AccountType": 4,   # 4: 特定口座
             "Qty": shares,
@@ -130,7 +206,7 @@ class KabucomBroker(BaseBroker):
         }
         
         try:
-            res = requests.post(url, headers=self._get_headers(), json=data, timeout=5)
+            res = requests.post(url, headers=self._get_headers(), json=data, timeout=10)
             if res.status_code == 200:
                 order_res = res.json()
                 if order_res.get('Result') == 0:
@@ -138,16 +214,50 @@ class KabucomBroker(BaseBroker):
                     env = "【本番】" if self.is_production else "【検証API】"
                     act = "買い" if side == "2" else "売り"
                     print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act}")
-                    return True
+                    return order_id
                 else:
                     print(f"⚠️ 注文拒否: {order_res}")
-                    return False
+                    return None
             else:
                 print(f"⚠️ 注文HTTPエラー: {res.status_code} {res.text}")
-                return False
+                return None
         except Exception as e:
             print(f"⚠️ 注文通信エラー: {e}")
-            return False
+            return None
+
+    def get_order_details(self, order_id: str) -> dict:
+        """ 注文詳細（ステータス・約定単価等）を取得する """
+        if not self.token or not order_id: return None
+        url = f"{self.base_url}/orders?id={order_id}"
+        try:
+            res = requests.get(url, headers=self._get_headers(), timeout=10)
+            if res.status_code == 200:
+                orders = res.json()
+                if orders and len(orders) > 0:
+                    return orders[0]
+            return None
+        except Exception:
+            return None
+
+    def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
+        """ 注文が約定（または失敗）するまで待機する """
+        print(f"⏳ 注文 ID: {order_id} の約定を待機中...")
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            details = self.get_order_details(order_id)
+            if details:
+                state = details.get('State')
+                # 5: 執行中, 3: 受付(現物), 4: 受付済
+                # 6: 全部約定, 7: 一部約定, 8: 取消済, 9: 失効, 10: 出来ず
+                if state == 6:
+                    print(f"✨ 注文 ID: {order_id} 全部約定しました。")
+                    return details
+                elif state in [8, 9, 10]:
+                    print(f"❌ 注文 ID: {order_id} は約定しませんでした (State: {state})。")
+                    return details
+            time.sleep(2)
+        print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。")
+        return None
 
     # ---------------------------------------------------------
     # インターフェース互換性のためのファイル保存・ログ機能
@@ -155,17 +265,14 @@ class KabucomBroker(BaseBroker):
     # ---------------------------------------------------------
     def save_positions(self, portfolio: list):
         """ リアルAPIでは自動でポジションが残るが、ダッシュボード互換性のためにファイルにも書き出す """
-        import pandas as pd
         from core.config import PORTFOLIO_FILE
         df = pd.DataFrame(portfolio)
-        df.to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
+        atomic_write_csv(PORTFOLIO_FILE, df)
 
     def save_account(self, account: dict):
         """ 同上 """
-        import json
         from core.config import ACCOUNT_FILE
-        with open(ACCOUNT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(account, f, indent=4)
+        atomic_write_json(ACCOUNT_FILE, account)
 
     def log_trade(self, trade_record: dict):
         """ 決済履歴をCSVに追記する（ダッシュボード用） """
@@ -189,6 +296,18 @@ class KabucomBroker(BaseBroker):
             for act in actions: print(f" ✔ {act}")
         else:
             print(" - アクションなし (保有維持 / 新規見送り)")
+            
+        print("\n【現在の保有株式 (API同期値)】")
+        portfolio = summary_record.get('portfolio', [])
+        if portfolio:
+            for p in portfolio:
+                cp = float(p.get('current_price', p['buy_price']))
+                bp = float(p['buy_price'])
+                val = cp * int(p['shares'])
+                profit_pct = (cp - bp) / bp * 100
+                print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
+        else:
+            print(" - 保有なし")
             
         print("\n【口座ステータス (API取得値)】")
         print(f" 💰 現金残高:   {summary_record['cash_yen']:>10,.0f}円")

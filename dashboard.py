@@ -9,37 +9,21 @@ import json
 import pandas as pd
 from flask import Flask, jsonify
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
-PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
-HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
-EXECUTION_LOG_FILE = os.path.join(BASE_DIR, 'execution_log.csv')
+from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE
+from core.file_io import safe_read_json, safe_read_csv
 
 app = Flask(__name__)
 
 
 # ── API Endpoints ──────────────────────────────────────────────
 def _read_csv_safe(path):
-    if os.path.exists(path) and os.path.getsize(path) > 0:
-        try:
-            return pd.read_csv(path, encoding='utf-8-sig', on_bad_lines='skip')
-        except Exception:
-            try:
-                return pd.read_csv(path, encoding='utf-8', on_bad_lines='skip')
-            except Exception:
-                pass
-    return pd.DataFrame()
+    return safe_read_csv(path)
 
 
 @app.route('/api/account')
 def api_account():
-    if os.path.exists(ACCOUNT_FILE) and os.path.getsize(ACCOUNT_FILE) > 0:
-        try:
-            with open(ACCOUNT_FILE, 'r', encoding='utf-8') as f:
-                return jsonify(json.load(f))
-        except Exception:
-            pass
-    return jsonify({"cash": 0})
+    account = safe_read_json(ACCOUNT_FILE)
+    return jsonify(account if account is not None else {"cash": 0})
 
 
 @app.route('/api/portfolio')

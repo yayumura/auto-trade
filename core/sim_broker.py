@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 from core.broker import BaseBroker
 from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE, INITIAL_CASH
+from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
 
 class SimulationBroker(BaseBroker):
     """
@@ -12,29 +13,24 @@ class SimulationBroker(BaseBroker):
     """
     
     def get_account_balance(self) -> dict:
-        if os.path.exists(ACCOUNT_FILE) and os.path.getsize(ACCOUNT_FILE) > 0:
-            try:
-                with open(ACCOUNT_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                pass
-        return {"cash": INITIAL_CASH}
+        account = safe_read_json(ACCOUNT_FILE)
+        return account if account is not None else {"cash": INITIAL_CASH}
 
     def save_account(self, account_data: dict):
-        with open(ACCOUNT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(account_data, f, indent=4)
+        atomic_write_json(ACCOUNT_FILE, account_data)
 
     def get_positions(self) -> list:
-        if os.path.exists(PORTFOLIO_FILE) and os.path.getsize(PORTFOLIO_FILE) > 0:
-            try:
-                return pd.read_csv(PORTFOLIO_FILE).to_dict('records')
-            except pd.errors.EmptyDataError:
-                return []
-        return []
+        df = safe_read_csv(PORTFOLIO_FILE)
+        return df.to_dict('records') if not df.empty else []
 
     def save_positions(self, portfolio: list):
         df = pd.DataFrame(portfolio)
-        df.to_csv(PORTFOLIO_FILE, index=False, encoding='utf-8-sig')
+        atomic_write_csv(PORTFOLIO_FILE, df)
+
+    def execute_market_order(self, code: str, shares: int, side: str) -> str:
+        """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
+        import time
+        return f"SIM-{int(time.time())}"
 
     def log_trade(self, trade_record: dict):
         write_header = not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0

@@ -1,58 +1,149 @@
+import os
+import sys
 import pandas as pd
 import time
 import yfinance as yf
 from datetime import datetime
+from core.preflight import pre_flight_check
 
-from core.config import DEBUG_MODE, MAX_POSITIONS, DATA_FILE, MAX_RISK_PER_TRADE, ATR_STOP_LOSS, TRADE_MODE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT
+from core.config import (
+    DEBUG_MODE, MAX_POSITIONS, DATA_FILE, MAX_RISK_PER_TRADE, ATR_STOP_LOSS, 
+    TRADE_MODE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT, JST
+)
 from core.log_setup import setup_logging, send_discord_notify
 from core.config import (
     INITIAL_CASH, MAX_POSITIONS, DATA_FILE, 
     PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE, EXECUTION_LOG_FILE,
-    TARGET_MARKETS
+    EXCLUSION_CACHE_FILE, TARGET_MARKETS
 )
 from core.sim_broker import SimulationBroker
 from core.kabucom_broker import KabucomBroker
 from core.logic import detect_market_regime, manage_positions, select_best_candidates, load_invalid_tickers, save_invalid_tickers
+import sys
 from core.ai_filter import ai_qualitative_filter, get_recent_news
+from core.file_io import safe_read_json, safe_read_csv
+
+# --- インスタンスロック機構 ---
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
+
+def acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            # プロセスがまだ存在するか確認（Windows/Unix両対応の簡易チェック）
+            import psutil
+            if psutil.pid_exists(old_pid):
+                print(f"⚠️ エラー: 他のBOTインスタンス(PID: {old_pid})が既に実行中です。")
+                return False
+        except:
+            pass
+    
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    return True
+
+def release_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
 
 def main():
-    setup_logging()
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (Brokerパターン稼働中)")
+    if not acquire_lock():
+        sys.exit(1)
     
-    # --- 0. タイムフィルター ---
+    try:
+        _main_exec()
+    finally:
+        release_lock()
+
+def _main_exec():
+    if not pre_flight_check():
+        print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
+        return
+    
+    # --- [Phase 14] In-flight Order Guard ---
+    from core.kabucom_broker import KabucomBroker
+    broker = KabucomBroker(is_production=IS_PRODUCTION)
+    print("🛡️ [In-flight Guard] 未約定の注文がないか確認中...")
+    active_orders = broker.get_active_orders()
+    if active_orders:
+        msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注防止のため、手動で解消されるまで停止します。"
+        print(msg)
+        send_discord_notify(msg)
+        return
+
+    setup_logging()
+    print(f"\n[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (Brokerパターン稼働中)")
+    
+    # --- 0. タイムフィルター (Phase 14: サーバー時刻同期) ---
+    server_now = broker.get_server_time()
     if not DEBUG_MODE:
-        now = datetime.now()
-        if now.weekday() >= 5: return
+        if server_now.weekday() >= 5: 
+            print("💤 本日は市場休業日（土日）です。")
+            return
         
-        c_time = now.time()
+        c_time = server_now.time()
         m_open, m_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
         a_open, a_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time()
         
         if not ((m_open <= c_time <= m_close) or (a_open <= c_time <= a_close)):
+            print(f"💤 取引時間外です (サーバー時刻: {c_time.strftime('%H:%M:%S')})。")
             return
 
     # --- 1. Brokerの初期化と口座情報取得 ---
-    if TRADE_MODE == "KABUCOM_LIVE":
-        print("⚡ 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
-        broker = KabucomBroker(is_production=True)
-        is_sim = False
-    elif TRADE_MODE == "KABUCOM_TEST":
-        print("🧪 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
-        broker = KabucomBroker(is_production=False)
-        is_sim = False
-    else:
-        print("🎮 【シミュレーションモード】ローカルCSVベースで実行します")
-        broker = SimulationBroker()
-        is_sim = True
-        
-    account = broker.get_account_balance()
-    portfolio = broker.get_positions()
+    try:
+        if TRADE_MODE == "KABUCOM_LIVE":
+            print("⚡ 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
+            broker = KabucomBroker(is_production=True)
+            is_sim = False
+        elif TRADE_MODE == "KABUCOM_TEST":
+            print("🧪 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
+            broker = KabucomBroker(is_production=False)
+            is_sim = False
+        else:
+            print("🎮 【シミュレーションモード】ローカルCSVベースで実行します")
+            broker = SimulationBroker()
+            is_sim = True
+            
+        account = broker.get_account_balance()
+        portfolio = broker.get_positions()
+    except Exception as e:
+        msg = f"❌ 【致命的エラー】証券会社APIまたはポジション取得に失敗しました: {e}"
+        print(msg)
+        send_discord_notify(msg)
+        return
+
     actions_taken = []
     
+    # --- サマリー記録用ヘルパー ---
+    def record_summary(actions, market_regime="不明"):
+        stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+        broker.log_execution_summary({
+            "time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+            "actions": actions, "portfolio": portfolio, "regime": market_regime,
+            "cash_yen": account['cash'], "stock_value_yen": stock_value,
+            "total_assets_yen": account['cash'] + stock_value
+        })
+    
     # --- 2. 相場環境（レジーム）判定 ---
-    regime = detect_market_regime()
+    try:
+        regime = detect_market_regime()
+    except Exception as e:
+        msg = f"❌ 【致命的エラー】レジーム判定（日経平均取得）に失敗しました: {e}"
+        print(msg)
+        send_discord_notify(msg)
+        return
+
     print(f"📊 現在のレジーム: 【{regime}】")
     
+    if regime == "HOLIDAY":
+        print("🏖️ 本日は市場休業日です。処理を終了します。")
+        # record_summary は不要（データが動いていないため）
+        return
+
     if regime == "BEAR":
         print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
         send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。")
@@ -61,14 +152,7 @@ def main():
         broker.save_positions(portfolio)
         broker.save_account(account)
         for log in trade_logs: broker.log_trade(log)
-        
-        stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-        broker.log_execution_summary({
-            "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "actions": actions_taken, "portfolio": portfolio, "regime": regime,
-            "cash_yen": account['cash'], "stock_value_yen": stock_value,
-            "total_assets_yen": account['cash'] + stock_value
-        })
+        record_summary(actions_taken, regime)
         return
 
     # --- 3. ポジション管理（利確・損切・タイムストップ） ---
@@ -78,38 +162,32 @@ def main():
     broker.save_account(account)
     for log in trade_logs: broker.log_trade(log)
 
-    # --- サマリー記録用ヘルパー ---
-    def record_summary(actions):
-        stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-        broker.log_execution_summary({
-            "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "actions": actions, "portfolio": portfolio, "regime": regime,
-            "cash_yen": account['cash'], "stock_value_yen": stock_value,
-            "total_assets_yen": account['cash'] + stock_value
-        })
 
     if len(portfolio) >= MAX_POSITIONS:
         print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
         send_discord_notify(f"💡 【見送り】最大ポジション（{MAX_POSITIONS}銘柄）保有中のため新規スキャンをスキップしました。")
-        record_summary(actions_taken)
+        record_summary(actions_taken, regime)
         return
 
-    now_time = datetime.now().time()
+    now_time = datetime.now(JST).time()
     if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
         print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
         send_discord_notify("💡 【見送り】寄り付き直後（9:30前）のためエントリー待機中。保有監視のみ実行しました。")
-        record_summary(actions_taken)
+        record_summary(actions_taken, regime)
         return
 
     if now_time >= datetime.strptime("14:30", "%H:%M").time():
         print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
         send_discord_notify("💡 【見送り】大引け前（14:30以降）のため新規買付を終了。保有ポジションの決済監視のみ実行しました。")
-        record_summary(actions_taken)
+        record_summary(actions_taken, regime)
         return
 
     # --- 4. スクリーニング ---
     try:
-        df_symbols = pd.read_csv(DATA_FILE)
+        df_symbols = safe_read_csv(DATA_FILE)
+        if df_symbols.empty:
+            print("⚠️ 銘柄リストが空です。")
+            return
         
         # 【修正】ETF・REIT等を除外：完全一致ではなく「内国株式」という文字が含まれるものだけを残す（部分一致）
         if '市場・商品区分' in df_symbols.columns:
@@ -156,10 +234,28 @@ def main():
         msg = "⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。"
         print(msg)
         send_discord_notify(msg)
-        record_summary(actions_taken)
+        record_summary(actions_taken, regime)
         return
 
     data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
+    
+    # --- 鮮度チェック (Phase 8: Stale Data Guard) ---
+    try:
+        last_update = data_df.index[-1]
+        # tz-awareでない場合はJSTとして扱う(yfinanceの仕様に依存)
+        if last_update.tzinfo is None:
+            last_update = JST.localize(last_update)
+        
+        age = datetime.now(JST) - last_update
+        if age.total_seconds() > 3600: # 1時間を超える遅延は異常とみなす
+             msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。市場急変への対応が不能なため、安全のため買付を見送ります。"
+             print(msg)
+             send_discord_notify(msg)
+             record_summary(actions_taken, regime)
+             return
+    except Exception as e:
+        print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
+
     print("✅ データ取得完了。評価アルゴリズムを実行します...")
     
     top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
@@ -168,7 +264,7 @@ def main():
         msg = f"💡 【見送り】レジーム: {regime} | スクリーニングの結果、優位性のある銘柄が見つかりませんでした。"
         print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
         send_discord_notify(msg)
-        record_summary(actions_taken)
+        record_summary(actions_taken, regime)
         return
 
     # --- 5. AI定性フィルター ---
@@ -200,7 +296,7 @@ def main():
             msg = f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格データに異常を検知（{best_target['price']}）。買付を強制キャンセルしました。"
             print(msg)
             send_discord_notify(msg)
-            record_summary(actions_taken)
+            record_summary(actions_taken, regime)
             return
             
         # シミュレーション用スリッページ
@@ -235,11 +331,11 @@ def main():
                  send_discord_notify(msg)
             else:
                 # リアルAPI（Kabucom）の場合は実際に買い注文を発注
-                buy_success = True
+                order_id = "SIM-ORDER"
                 if not is_sim:
-                    buy_success = broker.execute_market_order(best_target['code'], shares_to_buy, side="2") # 2: 買い
+                    order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2") # 2: 買い
                 
-                if buy_success:
+                if order_id:
                     print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
                     print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
                     
@@ -250,12 +346,16 @@ def main():
                     
                     if is_sim: 
                         account['cash'] -= cost
+                    else:
+                        # リアル取引時もダッシュボード等の表示遅延を防ぐため、推定残高を即座に更新する
+                        account['cash'] -= cost
+                        print(f"💰 推定買付余力を更新しました: {account['cash']:,.0f}円")
                         
                     portfolio.append({
                         "code": best_target['code'], "name": best_target['name'], 
-                        "buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
-                        "buy_price": buy_price, "highest_price": buy_price, 
-                        "current_price": buy_price, "shares": shares_to_buy
+                        "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
+                        "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1), 
+                        "current_price": round(buy_price, 1), "shares": shares_to_buy
                     })
                     broker.save_positions(portfolio)
                     broker.save_account(account)
@@ -277,7 +377,16 @@ def main():
         print(msg)
         send_discord_notify(msg)
         
-    record_summary(actions_taken)
+    record_summary(actions_taken, regime)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        msg = f"💥 【致命的システムエラー】予期せぬ例外によりBOTが停止しました:\n{e}"
+        print(msg)
+        try:
+            send_discord_notify(msg)
+        except:
+            pass
+        sys.exit(1)

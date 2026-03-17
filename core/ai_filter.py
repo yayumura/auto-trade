@@ -52,20 +52,37 @@ def ai_qualitative_filter(code, name, news_text):
     
     try:
         response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        text = response.text.strip().upper()
-        if text.startswith("YES") or "YES" in text.split('\n')[0]:
-            return False, text.replace('\n', ' ') 
+        text = response.text.upper()
+        # 最初の2行程度をチェックして、YESが含まれているか判定する（解説が先行する場合に対応）
+        lines = [line.strip() for line in text.split('\n') if line.strip()][:2]
+        
+        has_yes = False
+        full_reason = text.replace('\n', ' ')
+        
+        for line in lines:
+            if line.startswith("YES") or re.search(r'\bYES\b', line):
+                has_yes = True
+                break
+        
+        if has_yes:
+            return False, full_reason
         return True, "問題なし"
     except Exception as e:
         err_msg = str(e).lower()
-        if groq_client and ("429" in err_msg or "quota" in err_msg):
+        # クォータ制限などの一時的なエラーの場合のみGroqへ逃げる
+        if groq_client and ("429" in err_msg or "quota" in err_msg or "limit" in err_msg):
             try:
                 g_response = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}], temperature=0.1
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt}]
                 )
-                text = g_response.choices[0].message.content.strip().upper()
-                if "YES" in text.split('\n')[0]: return False, "Groq:悪材料検知"
-                return True, "Groq:問題なし"
-            except:
-                pass
-        return True, "AI判定エラー（一時承認）"
+                text = g_response.choices[0].message.content.upper()
+                lines = [line.strip() for line in text.split('\n') if line.strip()][:2]
+                has_yes = any("YES" in line for line in lines)
+                if has_yes: return False, f"Groq判定: 悪材料検知 ({text[:50]}...)"
+                return True, "Groq判定: 問題なし"
+            except Exception as ge:
+                print(f"⚠️ Groqフェイルオーバーも失敗: {ge}")
+        
+        # APIが完全に死んでいる、あるいは不明なエラーの場合は、機会損失を防ぐため「一時承認」
+        return True, f"AI判定エラー回避(一時承認): {e}"

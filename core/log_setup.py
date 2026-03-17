@@ -41,3 +41,23 @@ def send_discord_notify(message):
         requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
     except Exception as e:
         print(f"⚠️ Discord通知エラー: {e}")
+
+def clean_old_logs(days=30):
+    """古いログファイルを自動的に削除し、ディスク容量を保護します。"""
+    try:
+        now = datetime.now()
+        count = 0
+        for filename in os.listdir(LOG_DIR):
+            if filename.startswith("console_") and filename.endswith(".log"):
+                filepath = os.path.join(LOG_DIR, filename)
+                file_time = datetime.fromtimestamp(os.path.getmtime(filepath))
+                if (now - file_time).days > days:
+                    os.remove(filepath)
+                    count += 1
+        if count > 0:
+            print(f"🧹 [Housekeeping] {count}個の古いログファイルを削除しました。")
+    except Exception as e:
+        print(f"⚠️ ログクリーンアップ失敗: {e}")
+
+# 初期化時に実行
+clean_old_logs()

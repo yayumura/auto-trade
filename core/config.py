@@ -1,28 +1,50 @@
 import os
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+# --- Timezone ---
+JST = timezone(timedelta(hours=9))
 
 # --- Base Directories ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
 
-# --- File Paths ---
-DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv')
-PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
-HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
-ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
-EXECUTION_LOG_FILE = os.path.join(BASE_DIR, 'execution_log.csv') 
-EXCLUSION_CACHE_FILE = os.path.join(BASE_DIR, 'invalid_tickers.json')
-
-# --- API Keys ---
+# --- Mode-Specific Data Directories ---
+# TRADE_MODE: "SIMULATION" or "KABUCOM_TEST" or "KABUCOM_LIVE"
 load_dotenv(os.path.join(BASE_DIR, '.env'))
+TRADE_MODE = os.environ.get("TRADE_MODE", "SIMULATION")
+
+# モードごとに保存先フォルダを分ける
+mode_dir_map = {
+    "SIMULATION": "simulation",
+    "KABUCOM_TEST": "kabucom_test",
+    "KABUCOM_LIVE": "kabucom_live"
+}
+MODE_SUBDIR = mode_dir_map.get(TRADE_MODE, "simulation")
+DATA_ROOT = os.path.join(BASE_DIR, 'data', MODE_SUBDIR)
+os.makedirs(DATA_ROOT, exist_ok=True)
+
+# ログディレクトリもモード別に分ける
+LOG_DIR = os.path.join(DATA_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+
+# --- File Paths (Mode Specific) ---
+DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv') # これは全モード共通
+ACCOUNT_FILE = os.path.join(DATA_ROOT, 'account.json')
+PORTFOLIO_FILE = os.path.join(DATA_ROOT, 'virtual_portfolio.csv')
+HISTORY_FILE = os.path.join(DATA_ROOT, 'trade_history.csv')
+EXECUTION_LOG_FILE = os.path.join(DATA_ROOT, 'execution_log.csv') 
+EXCLUSION_CACHE_FILE = os.path.join(DATA_ROOT, 'invalid_tickers.json')
+
+# --- API Keys & Webhooks ---
+KABUCOM_API_PASSWORD = os.environ.get("KABUCOM_API_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-GEMINI_MODEL = "gemini-2.5-flash"
 
-KABUCOM_API_PASSWORD = os.environ.get("KABUCOM_API_PASSWORD")
-# TRADE_MODE: "SIMULATION" or "KABUCOM_TEST" or "KABUCOM_LIVE"
-TRADE_MODE = os.environ.get("TRADE_MODE", "SIMULATION")
+# --- Models ---
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 # --- Strategy Parameters ---
 DEBUG_MODE = False        # 本番運用時は必ずFalse

@@ -5,8 +5,9 @@ from datetime import datetime
 
 import json
 import os
-from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE
+from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST
 from core.log_setup import send_discord_notify
+from core.file_io import atomic_write_json, safe_read_json
 
 # --- 【中核1】レジーム（地合い）認識 ---
 def detect_market_regime():
@@ -19,20 +20,31 @@ def detect_market_regime():
         if nk.empty or len(nk) < 20:
             return "RANGE"
         
-        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化してfloat()エラーを防止
+        # 【追加】市場休業日（祝日）の判定
+        # 最新のデータが「今日」のものでない場合は休場とみなす
+        latest_date = nk.index[-1].date()
+        today_date = datetime.now(JST).date()
+        if latest_date < today_date:
+            print(f"  🏖️ 市場は休場です (最新データ: {latest_date})")
+            return "HOLIDAY"
+        
+        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化
         if isinstance(nk.columns, pd.MultiIndex):
             nk.columns = nk.columns.droplevel('Ticker')
         
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
         close = nk[price_col].dropna()
         sma20 = float(close.rolling(window=20).mean().iloc[-1])
-        current = float(close.iloc[-1])
-        
-        returns = close.pct_change().dropna()
-        volatility = float(returns.std()) * np.sqrt(252) # 年率換算ボラ
-        
         print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
         
+        # --- [Phase 13] データの鮮度チェック ---
+        last_date = close.index[-1].date()
+        today = datetime.now(JST).date()
+        # 平日（月ー金）かつ市場が開いている時間帯で、データが昨日以前なら警告
+        now_time = datetime.now(JST).time()
+        if today.weekday() < 5 and now_time > datetime.strptime("09:15", "%H:%M").time() and last_date < today:
+             print(f"⚠️ [Data Stale] 指数データが古すぎます(最終更新: {last_date})。レジーム判定が不正確な可能性があります。")
+
         if current < sma20 * 0.95 or volatility > 0.30:
             return "BEAR" 
         elif current > sma20:
@@ -41,22 +53,15 @@ def detect_market_regime():
             return "RANGE"
     except Exception as e:
         print(f"⚠️ レジーム判定エラー: {e}")
-        return "RANGE"
+        raise ConnectionError(f"日経平均データの取得に失敗しました: {e}")
 
 # --- 【補助】無効銘柄キャッシュ管理 ---
 def load_invalid_tickers():
-    if os.path.exists(EXCLUSION_CACHE_FILE):
-        try:
-            with open(EXCLUSION_CACHE_FILE, 'r', encoding='utf-8') as f:
-                return set(json.load(f))
-        except:
-            return set()
-    return set()
+    return set(safe_read_json(EXCLUSION_CACHE_FILE, default=[]))
 
 def save_invalid_tickers(invalid_set):
     try:
-        with open(EXCLUSION_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(invalid_set), f, ensure_ascii=False, indent=2)
+        atomic_write_json(EXCLUSION_CACHE_FILE, list(invalid_set))
     except Exception as e:
         print(f"⚠️ キャッシュ保存エラー: {e}")
 
@@ -80,9 +85,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
         return portfolio, account, actions, trade_logs
 
     remaining_portfolio = []
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    now_time = datetime.now().time()
-    is_closing_time = now_time >= datetime.strptime("15:00", "%H:%M").time() 
+    current_time = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+    now_time = datetime.now(JST).time()
+    # 2024年11月の東証取引時間延長(15:30)に対応。15:25を大引け直前の手仕舞いラインとする。
+    is_closing_time = now_time >= datetime.strptime("15:25", "%H:%M").time() 
 
     for p in portfolio:
         code = str(p['code'])
@@ -105,13 +111,21 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 continue
 
             split_ratio = 1.0
-            if 'Adj Close' in df.columns and float(df['Close'].iloc[0]) > 0:
+            # リアルAPIモードの場合はAPI側ですでに調整済みのため、二重調整を避ける
+            if is_simulation and 'Adj Close' in df.columns and float(df['Close'].iloc[0]) > 0:
                 split_ratio = float(df['Adj Close'].iloc[0]) / float(df['Close'].iloc[0])
                 if split_ratio > 1.0: split_ratio = 1.0 
 
-            real_current_price = float(df['Close'].iloc[-1])
+            # --- [Phase 13] 価格入力の階層化 (Price Input Hierarchy) ---
+            # 証券会社API由来のリアルタイム価格(p['current_price'])がある場合は、yfinanceの遅延データより優先する
+            api_price = p.get('current_price')
+            if api_price is not None and api_price > 0:
+                current_price_raw = float(api_price)
+            else:
+                current_price_raw = float(df['Close'].iloc[-1])
+                
             # シミュレーション用スリッページ
-            current_price = real_current_price * 0.999 if is_simulation else real_current_price 
+            current_price = current_price_raw * 0.999 if is_simulation else current_price_raw 
             
             buy_price = float(p['buy_price']) * split_ratio
             highest_price_db = float(p.get('highest_price', p['buy_price'])) * split_ratio
@@ -128,7 +142,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             
             if is_closing_time:
-                sell_reason = "大引け決済 (Daytrade Time Stop)"
+                sell_reason = "大引け直前決済 (Daytrade Time Stop 15:25)"
             elif current_price <= buy_price - (atr * current_stop_loss_mult):
                 sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
             elif current_price <= highest_price_db - (atr * ATR_TRAIL) and highest_price_db > buy_price:
@@ -139,14 +153,14 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
-                p['highest_price'] = new_highest
-                highest_price = new_highest * split_ratio 
+                p['highest_price'] = round(new_highest, 1)
+                highest_price = p['highest_price'] * split_ratio 
             else:
                 highest_price = highest_price_db
 
             profit_pct = (current_price - buy_price) / buy_price
             split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
-            print(f"[{code} {p['name']}] 買:{buy_price:.1f} 現在:{current_price:.1f} (高:{highest_price:.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
+            print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
 
             if sell_reason:
                 gross_profit = (current_price - buy_price) * p['shares']
@@ -158,10 +172,21 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     sale_proceeds = (current_price * p['shares']) - tax_amount
                     account['cash'] += sale_proceeds
                 else:
-                    success = broker.execute_market_order(code, int(p['shares']), side="1") # 1: 売り
-                    if not success:
-                        print(f"⚠️ {code} の売却注文がカブコムAPIで拒否・失敗しました。")
-                        # 失敗した場合はポジションを維持
+                    if broker:
+                        order_id = broker.execute_market_order(code, int(p['shares']), side="1") # 1: 売り
+                        if not order_id:
+                            print(f"⚠️ {code} の売却注文が証券会社APIで拒否・失敗しました。")
+                            remaining_portfolio.append(p)
+                            continue
+                        # 決済時は確実に約定を確認 (Phase 11)
+                        if not is_simulation:
+                            details = broker.wait_for_execution(order_id)
+                            if not details or details.get('State') != 6:
+                                print(f"⚠️ {code} の約定が確認できませんでした。手動確認が必要です。")
+                                remaining_portfolio.append(p)
+                                continue
+                    else:
+                        print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
                         remaining_portfolio.append(p)
                         continue
                 
@@ -237,10 +262,20 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
             days_available = max(1, len(pd.Series(df.index.date).unique()))
             daily_avg_trade_value = (df['Volume'].sum() / days_available) * latest['Close']
             
+            # --- [Phase 12] 流動性・スパイクガード ---
+            # 1. 売買代金制限 (3億円以上)
             if latest['Close'] < 100 or daily_avg_trade_value < 300000000:
                 continue 
 
-            # 【追加】相対的ボラティリティ制限 (ATRが株価の15%を超えたら除外)
+            # 2. スパイク・ガード: 直近15分で異常な価格変化(5%以上)がないか
+            if len(df) >= 2:
+                prev_close = df[price_col].iloc[-2]
+                current_change = abs(latest[price_col] - prev_close) / prev_close
+                if current_change > 0.05:
+                    print(f"⚠️ [Spike Guard] {code} の急激な価格変化({current_change*100:.1f}%)を検知。リスク回避のため除外します。")
+                    continue
+
+            # 3. ボラティリティ制限 (ATRが株価の15%を超えたら除外)
             if latest['ATR'] > latest['Close'] * 0.15:
                 continue
 
