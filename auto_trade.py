@@ -412,7 +412,6 @@ def _main_exec():
             total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
             risk_amount = total_equity * MAX_RISK_PER_TRADE
             
-            # 【修正済】レジームに応じた正しい損切り幅を使ってリスクを計算する
             current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             risk_per_share = atr * current_sl_mult
             
@@ -432,23 +431,35 @@ def _main_exec():
                      print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
                      send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
                 else:
-                    print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                    print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
+                    # 【重要追加】リアルAPI（カブコム）の場合は実際に買い注文を発注する
+                    order_id = "SIM-ORDER"
+                    if not is_sim:
+                        # auカブコムAPIへ成行買い注文を送信 (side="2" は買い)
+                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
                     
-                    notify_msg = f"🏆 **【新規買付】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
-                    send_discord_notify(notify_msg)
-                    
-                    actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
-                    
-                    account['cash'] -= cost
-                    portfolio.append({
-                        "code": best_target['code'], "name": best_target['name'], 
-                        "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
-                        "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1), 
-                        "current_price": round(buy_price, 1), "shares": shares_to_buy
-                    })
-                    save_portfolio(portfolio)
-                    save_account(account)
+                    if order_id:
+                        print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
+                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
+                        
+                        notify_msg = f"🏆 **【新規買付】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
+                        send_discord_notify(notify_msg)
+                        
+                        actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
+                        
+                        account['cash'] -= cost
+                        portfolio.append({
+                            "code": best_target['code'], "name": best_target['name'], 
+                            "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
+                            "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1), 
+                            "current_price": round(buy_price, 1), "shares": shares_to_buy
+                        })
+                        save_portfolio(portfolio)
+                        save_account(account)
+                    else:
+                        # 【重要追加】APIエラーで注文拒否された場合は買付処理をキャンセルする
+                        msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
+                        print(msg)
+                        send_discord_notify(msg)
             else:
                 if shares_to_buy < 100:
                     msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — ボラティリティ過大(ATR:{atr:.1f})のためリスク管理制限で買付キャンセル。"

@@ -76,7 +76,6 @@ python dashboard.py
 ```text
 auto-trade/
 ├── auto_trade.py        # 【メイン】最新の自律ループ型エンジン。平日はこれを一度起動。
-├── main.py              # 旧来のワンショット型エンジン。タスクスケジューラ30分毎用。
 ├── dashboard.py         # ブラウザダッシュボード（Flask）
 ├── requirements.txt     # 依存ライブラリ一覧（バージョン固定済み）
 ├── .env                 # APIキー・証券口座設定（機密情報）
