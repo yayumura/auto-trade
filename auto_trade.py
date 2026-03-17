@@ -149,311 +149,34 @@ def print_execution_summary(actions, portfolio, account, regime="不明"):
     else:
         print(" - 保有なし")
         
+
     print("\n【口座ステータス】")
     print(f" 💰 現金残高:   {account['cash']:>10,.0f}円")
     print(f" 📈 株式評価額: {stock_value:>10,.0f}円")
     print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
     print("="*50 + "\n")
-    
+
     write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
     df_log = pd.DataFrame([{
-        "time": current_time, 
-        "actions": action_str, 
-        "portfolio_count": len(portfolio), 
-        "stock_value_yen": stock_value, 
-        "cash_yen": account['cash'], 
+        "time": current_time,
+        "actions": action_str,
+        "portfolio_count": len(portfolio),
+        "stock_value_yen": stock_value,
+        "cash_yen": account['cash'],
         "total_assets_yen": total_assets
     }])
     df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
 
 
 # --- 【中核1】レジーム（地合い）認識 ---
-def detect_market_regime():
-    """
-    日経平均の過去1ヶ月のデータから現在の相場環境（レジーム）を判定する。
-    戻り値: "BULL"(強気), "RANGE"(揉み合い), "BEAR"(弱気/パニック)
-    """
-    try:
-        nk = yf.download('^N225', period="1mo", interval="1d", threads=False)
-        if nk.empty or len(nk) < 20:
-            return "RANGE"
-        
-        # 【修正】yfinance v0.2.31以降はMultiIndex列を返すため、フラット化してfloat()エラーを防止
-        if isinstance(nk.columns, pd.MultiIndex):
-            nk.columns = nk.columns.droplevel('Ticker')
-        
-        # 配当落ちによる疑似暴落エラーを防ぐためAdj Closeを使う
-        price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
-        close = nk[price_col].dropna()
-        sma20 = float(close.rolling(window=20).mean().iloc[-1])
-        current = float(close.iloc[-1])
-        
-        # ボラティリティ（VIX代替）
-        returns = close.pct_change().dropna()
-        volatility = float(returns.std()) * np.sqrt(252) # 年率換算ボラ
-        
-        print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
-        
-        if current < sma20 * 0.95 or volatility > 0.30:
-            return "BEAR" # パニック相場（システムエラーや下落時は買わない）
-        elif current > sma20:
-            return "BULL" # 強気・上昇トレンド
-        else:
-            return "RANGE" # 平常・もみ合い
-    except Exception as e:
-        print(f"⚠️ レジーム判定エラー: {e}")
-        return "RANGE"
-
+# Moved to core.logic.detect_market_regime
 
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio, account):
-    actions = []
-    if not portfolio:
-        return portfolio, account, actions
-
-    print(f"\n--- 💼 保有監視 ({len(portfolio)}銘柄) ---")
-    tickers = [f"{p['code']}.T" for p in portfolio]
-    data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True)
-    
-    if data is None or data.empty:
-        return portfolio, account, actions
-
-    remaining_portfolio = []
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    now_time = datetime.now().time()
-    is_closing_time = now_time >= datetime.strptime("15:00", "%H:%M").time() # 大引け前の強制決済時間（TSE 15:30クローズの30分前）
-
-    for p in portfolio:
-        code = str(p['code'])
-        ticker = f"{code}.T"
-        try:
-            if isinstance(data.columns, pd.MultiIndex):
-                if ticker not in data.columns.levels[0]:
-                    remaining_portfolio.append(p)
-                    continue
-                df = data[ticker].dropna()
-            else:
-                if len(portfolio) == 1 or ticker == data.columns.name:
-                    df = data.dropna()
-                else:
-                    remaining_portfolio.append(p)
-                    continue
-            
-            if df.empty or len(df) < 14: 
-                remaining_portfolio.append(p)
-                continue
-
-            # 【超重要】実弾運用でのスプレッド（売買手数料・滑り）をシミュレーション（売却時は現在値の0.1%安く約定させられると想定）
-            # 【絶対防衛】株式分割や配当権利落ちによる「見かけ上の暴落」で誤った損切りが発動するのを防ぐため、
-            # CSVに保存されている過去の買値・高値を、今日の『分割調整比率』に合わせて動的に下方修正します。
-            split_ratio = 1.0
-            if 'Adj Close' in df.columns and float(df['Close'].iloc[0]) > 0:
-                # 取得期間(5日)の最初の足における「生の終値」と「調整後終値」の比率を計算し、分割係数を割り出す
-                # ※株式分割が起きると過去のAdj Closeが小さくなるため、(Adj Close / Close) は 1.0 以下になる
-                split_ratio = float(df['Adj Close'].iloc[0]) / float(df['Close'].iloc[0])
-                if split_ratio > 1.0: 
-                    split_ratio = 1.0 # 配当やエラー等で1.0を超えた場合は無視（分割とみなさない）
-
-            real_current_price = float(df['Close'].iloc[-1])
-            current_price = real_current_price * 0.999 
-            
-            # 取得した分割係数で、過去にCSVに記録した生の値段を「今の値段スケール」に補正する
-            buy_price = float(p['buy_price']) * split_ratio
-            highest_price_db = float(p.get('highest_price', p['buy_price'])) * split_ratio
-            
-            # 真のボラティリティ（ATR）算出
-            tr1 = df['High'] - df['Low']
-            tr2 = abs(df['High'] - df['Close'].shift())
-            tr3 = abs(df['Low'] - df['Close'].shift())
-            atr = float(pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean().iloc[-1])
-            if pd.isna(atr) or atr == 0:
-                atr = current_price * 0.02
-            
-            # 手仕舞い（エグジット）ロジック
-            sell_reason = None
-            
-            # 1. タイムストップ (資金効率化のため、大引け前で含み損なら切る、または強制決済期間なら切る)
-            if is_closing_time:
-                sell_reason = "大引け決済 (Daytrade Time Stop)"
-                
-            # 2. 絶対損切 (初期リスク)
-            elif current_price <= buy_price - (atr * ATR_STOP_LOSS):
-                sell_reason = "ボラティリティ損切 (Stop Loss)"
-                
-            # 3. トレールストップ (利益を伸ばす)
-            elif current_price <= highest_price_db - (atr * ATR_TRAIL) and highest_price_db > buy_price:
-                # 買値以上で利確になる場合のみトレール発動
-                if current_price > buy_price * 1.005: 
-                    sell_reason = f"トレール利確 (Trailing Stop from {highest_price_db:.1f})"
-                else:
-                    # 買値を割りそうなら建値撤退
-                    sell_reason = "建値撤退 (Break Even)"
-
-            if not sell_reason:
-                # 決済されない場合のみ最高値を更新して保持（補正前の生データスケールに戻してCSVに保存）
-                new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
-                p['highest_price'] = new_highest
-                highest_price = new_highest * split_ratio # 表示用は補正後
-            else:
-                highest_price = highest_price_db
-
-            profit_pct = (current_price - buy_price) / buy_price
-            
-            # ログ表示（分割補正がかかっている場合は注釈をつける）
-            split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
-            print(f"[{code} {p['name']}] 買:{buy_price:.1f} 現在:{current_price:.1f} (高:{highest_price:.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
-
-            if sell_reason:
-                gross_profit = (current_price - buy_price) * p['shares']
-                tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
-                net_profit = gross_profit - tax_amount 
-                sale_proceeds = (current_price * p['shares']) - tax_amount
-                account['cash'] += sale_proceeds
-                
-                msg = f"💰【決済】{code} {p['name']} ({sell_reason})\n   税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
-                print(msg)
-                send_discord_notify(msg)
-                actions.append(f"決済: {code} {p['name']} ({sell_reason}) {net_profit:+.0f}円")
-                log_trade({
-                    "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
-                    "buy_price": buy_price, "sell_price": current_price, "highest_price_reached": highest_price,
-                    "shares": p['shares'], "gross_profit": gross_profit, "tax_amount": tax_amount, 
-                    "net_profit": net_profit, "profit_pct": profit_pct, "reason": sell_reason
-                })
-            else:
-                remaining_portfolio.append(p)
-                
-        except Exception as e: 
-            print(f"⚠️ {code} 監視エラー: {e}")
-            remaining_portfolio.append(p)
-
-    return remaining_portfolio, account, actions
-
+# Moved to core.logic.manage_positions
 
 # --- 【中核3】マルチファクター・スキャン（完全数学的） ---
-def calculate_technicals_for_scan(df):
-    if len(df) < 50:
-        return None
-    # 【修正】出来高の移動平均: 以前のwindow=5は単なる「直近75分」となり、朝一番に昨日の閑散な大引け時点と比較して「毎朝偽の出来高急増シグナル」を出してしまう致命的トラップでした。
-    # 15分足の1日あたりの平均足を約20本とし、5日分の「100本」でローリング平均を出すことで、真の出来高ベースライン(RVOL)を確立します。
-    df['Avg_Vol_15m'] = df['Volume'].rolling(window=100, min_periods=20).mean().replace(0, 1) # 0割り回避
-    
-    # 偏差率とボリンジャー (分割調整後終値を使用)
-    if 'Adj Close' in df.columns:
-        price_col = 'Adj Close'
-    else:
-        price_col = 'Close'
-        
-    df['SMA20'] = df[price_col].rolling(window=20).mean()
-    df['STD20'] = df[price_col].rolling(window=20).std()
-    df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
-    df['BB_Lower'] = df['SMA20'] - (df['STD20'] * 2)
-    df['Deviation'] = (df[price_col] - df['SMA20']) / df['SMA20']
-    
-    # RSI (ゼロ除算でNaNが伝播しシステムが沈黙するバグを防止するため、絶対安全な計算式に修正)
-    delta = df[price_col].diff()
-    up = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    down = -1 * delta.clip(upper=0).ewm(span=14, adjust=False).mean()
-    # 従来式: 100 - (100 / (1 + up/down)) は down=0(ストップ高連発時)に崩壊するため下記へ統合
-    df['RSI'] = np.where((up + down) == 0, 50, 100 * up / (up + down))
-    
-    # ATR (真のボラティリティ)
-    tr1 = df['High'] - df['Low']
-    tr2 = abs(df['High'] - df['Close'].shift())
-    tr3 = abs(df['Low'] - df['Close'].shift())
-    df['ATR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(window=14).mean()
-    
-    # MACD
-    df['MACD'] = df[price_col].ewm(span=12, adjust=False).mean() - df[price_col].ewm(span=26, adjust=False).mean()
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    return df
-
-def select_best_candidates(data_df, targets, df_symbols, regime):
-    """ 地合い(レジーム)に応じた数学的スコアリングを行い、トップ候補を抽出 """
-    candidates = []
-    
-    for code in targets:
-        ticker = f"{code}.T"
-        try:
-            if isinstance(data_df.columns, pd.MultiIndex):
-                if ticker not in data_df.columns.levels[0]: continue
-                df = data_df[ticker].dropna()
-            else:
-                if len(targets) == 1 or ticker == data_df.columns.name: df = data_df.dropna()
-                else: continue
-            
-            df = calculate_technicals_for_scan(df)
-            if df is None: continue
-            
-            latest = df.iloc[-1]
-            
-            # --- 共通フィルター (流動性・スリッページ排除) ---
-            # 【重要追加】東証でスリッページ負けしないよう、直近5日の「1日あたりの平均売買代金」を3億円以上に制限
-            # （旧計算では15分足の代金を1日分と誤認する致命的バグがあったため修正）
-            days_available = max(1, len(pd.Series(df.index.date).unique()))
-            daily_avg_trade_value = (df['Volume'].sum() / days_available) * latest['Close']
-            if latest['Close'] < 100 or daily_avg_trade_value < 300000000:
-                continue # 流動性不足（3億円未満はスリッページで大損する）
-
-            score = 0
-            
-            # --- レジーム別アルゴリズム ---
-            if regime == "BULL":
-                # 【モメンタム戦略 (15分足)】
-                # 流入資金の強さ(出来高急増)
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                if vol_ratio < 2.5: continue
-                # MACDの買いシグナル
-                if latest['MACD'] < latest['Signal']: continue
-                # RSIが過熱しすぎていない(75以上はイナゴ避け)
-                if latest['RSI'] > 75: continue
-                # 最新足が当日の日計りVWAPを上回っている事（プロの必須条件、高値掴み防止）
-                # 【修正】直近5日間の全期間VWAPではなく、今日の取引時間のみにリセットされた当日VWAPを計算
-                today_date = df.index[-1].date()
-                today_df = df[df.index.date == today_date]
-                vwap_vol = today_df['Volume'].sum()
-                # 【完全化】よりプロ仕様の高精度VWAPへ変更（終値だけでなく機関投資家標準であるTypical Priceを使用）
-                typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
-                vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
-                if latest['Close'] < vwap: continue
-                
-                # スコア計算: (出来高倍率) + (RSIの傾き)
-                score = (vol_ratio * 10) + (latest['RSI'] - df['RSI'].iloc[-2])
-                
-            elif regime == "RANGE":
-                # 【ミーン・リバージョン(逆張り押し目)戦略】
-                # ボリンジャー下限での反発
-                if latest['Close'] > latest['SMA20']: continue # SMAより下であること
-                if latest['Close'] > latest['BB_Lower']: continue # -2σを割っている(またはタッチ)
-                # 売られすぎRSI
-                if latest['RSI'] > 35: continue
-                # 下落時の出来高急増(セリングクライマックス)
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                
-                # スコア計算: (乖離率の深さ) + (出来高)
-                deviation_depth = abs(latest['Deviation']) * 100
-                score = (deviation_depth * 10) + (vol_ratio * 5)
-            
-            else:
-                # BEAR(パニック相場)は見送り
-                continue
-
-            if score > 0:
-                name_row = df_symbols[df_symbols['コード'].astype(str) == code]
-                name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
-                candidates.append({
-                    "code": code, "name": name, 
-                    "score": score, 
-                    "price": latest['Close'], 
-                    "atr": latest['ATR']
-                })
-        except Exception:
-            continue
-            
-    # スコア順にソートして上位3銘柄のみ返す（無駄なAPI呼び出しを排除）
-    return sorted(candidates, key=lambda x: x['score'], reverse=True)[:3]
-
+# calculate_technicals_for_scan moved to core.logic
+# select_best_candidates moved to core.logic
 
 # --- 【中核4】AI定性フィルター (API節約・高速化) ---
 def clean_text_for_ai(text):
@@ -480,15 +203,15 @@ def ai_qualitative_filter(code, name, news_text):
     prompt = f"""
     対象銘柄: {safe_name} ({code})
     最新ニュース: {safe_news}
-    
+
     あなたは機関投資家のコンプライアンス・リスク管理者です。
     この銘柄のニュースの中に、直近で「下方修正」「粉飾決算」「不祥事・スキャンダル」「第三者割当増資(希薄化)」「上場廃止懸念」などの【致命的・突発的な悪材料】が含まれているか判定してください。
-    
+
     【出力ルール】
     1行目: YES または NO (悪材料があればYES、特になければNO)
     2行目: 理由(短く)
     """
-    
+
     try:
         response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
         text = response.text.strip().upper()
@@ -512,42 +235,42 @@ def ai_qualitative_filter(code, name, news_text):
 # --- メインループ ---
 def main():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 ヘッジファンド仕様・アルゴリズムBOT 起動")
-    
+
     # タイムフィルター
     if not DEBUG_MODE:
         now = datetime.now()
         if now.weekday() >= 5: return
-        
+
         c_time = now.time()
         morning_open, morning_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
         afternoon_open, afternoon_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time() # 2024年11月TSE延長対応
-        
+
         if not ((morning_open <= c_time <= morning_close) or (afternoon_open <= c_time <= afternoon_close)):
             return
 
     account = load_account()
     portfolio = load_portfolio()
-    actions_taken = [] 
-    
+    actions_taken = []
+    trade_logs = [] # manage_positionsから返されるログを格納するリスト
+
     # --- 1. 相場環境（レジーム）判定 ---
     regime = detect_market_regime()
     print(f"📊 現在のレジーム: 【{regime}】")
-    
+
+    # --- 2. 保有ポジション管理 ---
+    # manage_positions関数にbroker引数とis_simulation引数を追加。
+    # このファイルは主にシミュレーション用途のため、is_simulation=True をデフォルトとする。
+    portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=None, regime=regime, is_simulation=True)
+    actions_taken.extend(sell_actions)
+    trade_logs.extend(trade_logs_from_manage)
+    save_portfolio(portfolio)
+    save_account(account)
+
     if regime == "BEAR":
         print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
         send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。")
-        portfolio, account, sell_actions = manage_positions(portfolio, account) # 手仕舞いのみ行う
-        actions_taken.extend(sell_actions)
-        save_portfolio(portfolio)
-        save_account(account)
         print_execution_summary(actions_taken, portfolio, account, regime)
         return
-
-    # --- 2. ポジション管理（利確・損切・タイムストップ） ---
-    portfolio, account, sell_actions = manage_positions(portfolio, account)
-    actions_taken.extend(sell_actions) 
-    save_portfolio(portfolio)
-    save_account(account)
 
     if len(portfolio) >= MAX_POSITIONS:
         print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
@@ -556,7 +279,7 @@ def main():
         return
 
     now_time = datetime.now().time()
-    
+
     # 【重要追加】東京市場の「魔の寄り付き30分」を回避
     # 朝9:00～9:30は前日からの持ち越し注文が交錯し、テクニカル指標が完全に無視されるランダムウォーク状態となるためエントリーを禁止します。
     if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
@@ -577,12 +300,15 @@ def main():
         df_symbols = pd.read_csv(DATA_FILE)
         # 【改善】ETF/ETN、REIT、PRO Market、外国株式、出資証券を除外し、内国株式のみに絞る
         # （4400→約3770銘柄に削減し、yfinanceの 'possibly delisted' エラーも解消）
-        target_markets = [
-            'プライム（内国株式）',
-            'スタンダード（内国株式）',
-            'グロース（内国株式）',
-        ]
-        df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(target_markets)]
+        if '市場・商品区分' in df_symbols.columns:
+            df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
+            print(f"  🔍 市場フィルタリング適用後: {len(df_symbols)}銘柄 (ETF/REIT等を除外)")
+
+        # 【追加】無効銘柄キャッシュの読み込みと除外
+        invalid_tickers = load_invalid_tickers()
+        if invalid_tickers:
+            df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
+            print(f"  🔍 無効銘柄キャッシュ適用後: {len(df_symbols)}銘柄")
         # 既に保有している銘柄は除外
         held_codes = [str(p['code']) for p in portfolio]
         targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
@@ -592,12 +318,12 @@ def main():
 
     tickers = [f"{code}.T" for code in targets]
     print(f"\n--- 📈 数学的スクリーニング ({len(tickers)}銘柄) ---")
-    
+
     # 【重大修正】全銘柄(4000件超)の同時リクエストは、yfinanceのレートリミット(HTTP 429エラー)やメモリ枯渇を引き起こし、運用が完全に停止するリスクがあります。
     # ここではプロ仕様の「チャンク処理（分割ダウンロード）」を実装し、安定稼働を100%保証します。
     data_dfs = []
     chunk_size = 500 # 1回あたりの取得件数
-    
+
     print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i + chunk_size]
@@ -610,7 +336,13 @@ def main():
                     data_dfs.append(chunk_df)
             time.sleep(0.5) # API制限回避のクールダウン
         except Exception as e:
-            print(f"⚠️ データ取得エラー(Chunk {i}): {e}")
+            print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
+
+            # 失敗した銘柄をキャッシュに追加
+            if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
+                new_invalids = set(chunk)
+                invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
+                save_invalid_tickers(invalid_tickers)
             continue
 
     if not data_dfs:

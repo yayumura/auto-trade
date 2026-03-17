@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-from core.config import ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE
+import json
+import os
+from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE
 from core.log_setup import send_discord_notify
 
 # --- 【中核1】レジーム（地合い）認識 ---
@@ -41,8 +43,25 @@ def detect_market_regime():
         print(f"⚠️ レジーム判定エラー: {e}")
         return "RANGE"
 
+# --- 【補助】無効銘柄キャッシュ管理 ---
+def load_invalid_tickers():
+    if os.path.exists(EXCLUSION_CACHE_FILE):
+        try:
+            with open(EXCLUSION_CACHE_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_invalid_tickers(invalid_set):
+    try:
+        with open(EXCLUSION_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(invalid_set), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ キャッシュ保存エラー: {e}")
+
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio: list, account: dict, broker, is_simulation: bool = True):
+def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True):
     """
     保有株式の利確・損切・タイムストップを判定し、売却処理を行う。
     is_simulation = False の場合は broker.execute_market_order() を叩いて実際の売り注文を出す。
@@ -105,10 +124,13 @@ def manage_positions(portfolio: list, account: dict, broker, is_simulation: bool
                 atr = current_price * 0.02
             
             sell_reason = None
+            # レジームに応じた損切り倍率の選択
+            current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+            
             if is_closing_time:
                 sell_reason = "大引け決済 (Daytrade Time Stop)"
-            elif current_price <= buy_price - (atr * ATR_STOP_LOSS):
-                sell_reason = "ボラティリティ損切 (Stop Loss)"
+            elif current_price <= buy_price - (atr * current_stop_loss_mult):
+                sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
             elif current_price <= highest_price_db - (atr * ATR_TRAIL) and highest_price_db > buy_price:
                 if current_price > buy_price * 1.005: 
                     sell_reason = f"トレール利確 (Trailing Stop from {highest_price_db:.1f})"
@@ -217,6 +239,10 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
             
             if latest['Close'] < 100 or daily_avg_trade_value < 300000000:
                 continue 
+
+            # 【追加】相対的ボラティリティ制限 (ATRが株価の15%を超えたら除外)
+            if latest['ATR'] > latest['Close'] * 0.15:
+                continue
 
             score = 0
             

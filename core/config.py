@@ -11,6 +11,7 @@ PORTFOLIO_FILE = os.path.join(BASE_DIR, 'virtual_portfolio.csv')
 HISTORY_FILE = os.path.join(BASE_DIR, 'trade_history.csv')
 ACCOUNT_FILE = os.path.join(BASE_DIR, 'account.json')
 EXECUTION_LOG_FILE = os.path.join(BASE_DIR, 'execution_log.csv') 
+EXCLUSION_CACHE_FILE = os.path.join(BASE_DIR, 'invalid_tickers.json')
 
 # --- API Keys ---
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -32,6 +33,10 @@ MAX_ALLOCATION_PCT = 0.30 # 1銘柄あたりの最大投資比率（30%）
 MIN_ALLOCATION_AMOUNT = 200000 # 少額資金時の最低投資保証額（20万円）
 TAX_RATE = 0.20315        # 約20.3%
 
+# --- Market Filters ---
+TARGET_MARKETS = ['プライム（内国株式）', 'スタンダード（内国株式）', 'グロース（内国株式）']
+
 # --- Target Exits ---
-ATR_STOP_LOSS = 2.0       # 絶対損切(ATRの2倍)
+ATR_STOP_LOSS = 2.0       # 絶対損切(ATRの2倍) - BULL用
+RANGE_ATR_STOP_LOSS = 3.0 # RANGEレジーム用の緩めの損切
 ATR_TRAIL = 1.5           # トレール利確(最高値からATRの1.5倍)

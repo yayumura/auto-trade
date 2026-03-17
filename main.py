@@ -5,9 +5,14 @@ from datetime import datetime
 
 from core.config import DEBUG_MODE, MAX_POSITIONS, DATA_FILE, MAX_RISK_PER_TRADE, ATR_STOP_LOSS, TRADE_MODE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT
 from core.log_setup import setup_logging, send_discord_notify
+from core.config import (
+    INITIAL_CASH, MAX_POSITIONS, DATA_FILE, 
+    PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE, EXECUTION_LOG_FILE,
+    TARGET_MARKETS
+)
 from core.sim_broker import SimulationBroker
 from core.kabucom_broker import KabucomBroker
-from core.logic import detect_market_regime, manage_positions, select_best_candidates
+from core.logic import detect_market_regime, manage_positions, select_best_candidates, load_invalid_tickers, save_invalid_tickers
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
 def main():
@@ -51,7 +56,7 @@ def main():
     if regime == "BEAR":
         print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
         send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。")
-        portfolio, account, sell_acts, trade_logs = manage_positions(portfolio, account, broker, is_simulation=is_sim)
+        portfolio, account, sell_acts, trade_logs = manage_positions(portfolio, account, broker, regime=regime, is_simulation=is_sim)
         actions_taken.extend(sell_acts)
         broker.save_positions(portfolio)
         broker.save_account(account)
@@ -67,7 +72,7 @@ def main():
         return
 
     # --- 3. ポジション管理（利確・損切・タイムストップ） ---
-    portfolio, account, sell_acts, trade_logs = manage_positions(portfolio, account, broker, is_simulation=is_sim)
+    portfolio, account, sell_acts, trade_logs = manage_positions(portfolio, account, broker, regime=regime, is_simulation=is_sim)
     actions_taken.extend(sell_acts)
     broker.save_positions(portfolio)
     broker.save_account(account)
@@ -108,8 +113,15 @@ def main():
         
         # 【修正】ETF・REIT等を除外：完全一致ではなく「内国株式」という文字が含まれるものだけを残す（部分一致）
         if '市場・商品区分' in df_symbols.columns:
-            df_symbols = df_symbols[df_symbols['市場・商品区分'].str.contains('内国株式', na=False)]
+            df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
+            print(f"  🔍 市場フィルタリング適用後: {len(df_symbols)}銘柄 (ETF/REIT等を除外)")
             
+        # 【追加】無効銘柄キャッシュの読み込みと除外
+        invalid_tickers = load_invalid_tickers()
+        if invalid_tickers:
+            df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
+            print(f"  🔍 無効銘柄キャッシュ適用後: {len(df_symbols)}銘柄")
+        
         # 既に保有している銘柄は除外
         held_codes = [str(p['code']) for p in portfolio]
         targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
@@ -131,7 +143,13 @@ def main():
                     data_dfs.append(chunk_df)
             time.sleep(0.5)
         except Exception as e:
-            print(f"⚠️ データ取得エラー(Chunk {i}): {e}")
+            print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
+
+            # 失敗した銘柄をキャッシュに追加（Possibly delisted等の場合のみが望ましいが、簡易的に失敗全件対象）
+            if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
+                new_invalids = set(chunk)
+                invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
+                save_invalid_tickers(invalid_tickers)
             continue
 
     if not data_dfs:
