@@ -20,7 +20,7 @@ from core.config import (
     GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST
+    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
 
@@ -49,7 +49,7 @@ def release_lock():
         except:
             pass
 
-# --- 既存CSVとJSONの読み書き処理 (完全に維持) ---
+# --- 既存CSVとJSONの読み書き処理 ---
 def load_account():
     account = safe_read_json(ACCOUNT_FILE)
     return account if account is not None else {"cash": INITIAL_CASH}
@@ -121,7 +121,7 @@ from core.logic import (
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
-# --- シグナルハンドラ (Phase 12: Graceful Shutdown) ---
+# --- シグナルハンドラ ---
 def handle_shutdown(signum, frame):
     print(f"\n🛑 シグナル({signum})を受信しました。安全にシャットダウンを開始します...")
     try:
@@ -135,7 +135,6 @@ def main():
     if not acquire_lock():
         sys.exit(1)
         
-    # シグナルの登録
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
@@ -148,7 +147,7 @@ def main():
             send_discord_notify(msg)
         except:
             pass
-        time.sleep(10) # API制限回避とログ氾濫防止のためのクールダウン (Phase 13)
+        time.sleep(10)
     finally:
         release_lock()
 
@@ -210,13 +209,11 @@ def _main_exec():
         server_datetime = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.now(JST)
         now_time = server_datetime.time()
 
-        # 15:30（大引け）を過ぎたら本日の運用を終了
         if now_time >= datetime.strptime("15:30", "%H:%M").time() and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
             send_discord_notify("🏁 【業務終了】15:30（大引け）を過ぎたため、自動運用を終了しました。")
             break
 
-        # タイムフィルター（取引時間外の待機）
         if not DEBUG_MODE:
             if server_datetime.weekday() >= 5: 
                 print("💤 本日は市場休業日（土日）です。")
@@ -230,7 +227,6 @@ def _main_exec():
                 time.sleep(600)
                 continue
 
-        # --- 以下、定期実行される中身 ---
         print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')})")
 
         account = load_account()
@@ -258,7 +254,6 @@ def _main_exec():
         # --- 2. 保有ポジション管理 ---
         portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=broker, regime=regime, is_simulation=is_sim)
         
-        # ▼ インデント（字下げ）を修正し、ループの中に収めました
         actions_taken.extend(sell_actions)
         for log in trade_logs_from_manage:
             log_trade(log)
@@ -352,16 +347,6 @@ def _main_exec():
 
         data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
         
-        if data_df.isnull().values.any():
-            print("⚠️ 取得データに欠損値(NaN)が含まれています。不正確な計算を避けるためスキャンを中断します。")
-            null_counts = data_df.isnull().sum()
-            bad_cols = null_counts[null_counts > 0].index.tolist()
-            print(f"   欠損箇所: {bad_cols[:5]}.. (計 {len(bad_cols)} 列)")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
-            continue
-        
         try:
             last_update = data_df.index[-1]
             if last_update.tzinfo is None:
@@ -426,7 +411,10 @@ def _main_exec():
             
             total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
             risk_amount = total_equity * MAX_RISK_PER_TRADE
-            risk_per_share = atr * ATR_STOP_LOSS
+            
+            # 【修正済】レジームに応じた正しい損切り幅を使ってリスクを計算する
+            current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+            risk_per_share = atr * current_sl_mult
             
             ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
             
@@ -474,7 +462,6 @@ def _main_exec():
             print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
             send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
             
-        # ▼ ループの最後に必ず「サマリー出力」と「15分待機」を行うように構造を改善しました
         print_execution_summary(actions_taken, portfolio, account, regime)
         print(f"\n💤 次のスキャン（15分後）まで待機します...")
         time.sleep(900)
