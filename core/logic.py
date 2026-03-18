@@ -140,7 +140,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             
             if is_closing_time:
-                sell_reason = "大引け直前決済 (Daytrade Time Stop 15:25)"
+                sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif current_price <= buy_price - (atr * current_stop_loss_mult):
                 sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
             elif current_price <= highest_price_db - (atr * ATR_TRAIL) and highest_price_db > buy_price:
