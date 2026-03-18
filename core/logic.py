@@ -85,8 +85,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     remaining_portfolio = []
     current_time = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
     now_time = datetime.now(JST).time()
-    # 2024年11月の東証取引時間延長(15:30)に対応。15:25を大引け直前の手仕舞いラインとする。
-    is_closing_time = now_time >= datetime.strptime("15:25", "%H:%M").time() 
+    # 2024年11月の東証取引時間延長(15:30)に対応。15:15を大引け直前の手仕舞いラインとする。
+    is_closing_time = now_time >= datetime.strptime("15:15", "%H:%M").time() 
 
     for p in portfolio:
         code = str(p['code'])
