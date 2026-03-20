@@ -20,7 +20,8 @@ from core.config import (
     GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST
+    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
+    load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
 
@@ -319,7 +320,15 @@ def _main_exec():
             if invalid_tickers:
                 df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
                 print(f"  🔍 無効銘柄キャッシュ適用後: {len(df_symbols)}銘柄")
-            
+
+            # --- インサイダー取引防止フィルタ ---
+            insider_codes = load_insider_exclusion_codes()
+            if insider_codes:
+                before_count = len(df_symbols)
+                df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
+                excluded_count = before_count - len(df_symbols)
+                print(f"  🚫 インサイダー除外適用後: {len(df_symbols)}銘柄 ({excluded_count}銘柄を除外)")
+
             held_codes = [str(p['code']) for p in portfolio]
             targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
         except Exception as e:

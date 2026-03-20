@@ -37,6 +37,10 @@ HISTORY_FILE = os.path.join(DATA_ROOT, 'trade_history.csv')
 EXECUTION_LOG_FILE = os.path.join(DATA_ROOT, 'execution_log.csv') 
 EXCLUSION_CACHE_FILE = os.path.join(DATA_ROOT, 'invalid_tickers.json')
 
+# --- インサイダー取引防止設定 ---
+# プロジェクトルートの insider_exclusion.json で管理。新規買付のみ禁止（保有中のポジション管理は対象外）。
+INSIDER_EXCLUSION_FILE = os.path.join(BASE_DIR, 'insider_exclusion.json')
+
 # --- API Keys & Webhooks ---
 KABUCOM_API_PASSWORD = os.environ.get("KABUCOM_API_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -57,6 +61,23 @@ TAX_RATE = 0.20315        # 約20.3%
 
 # --- Market Filters ---
 TARGET_MARKETS = ['プライム（内国株式）', 'スタンダード（内国株式）', 'グロース（内国株式）']
+
+def load_insider_exclusion_codes() -> set:
+    """
+    insider_exclusion.json から取引禁止銘柄コードのセットを読み込む。
+    ファイルが存在しない・JSON破損の場合は空のsetを返す（フェイルセーフ）。
+    """
+    import json
+    if not os.path.exists(INSIDER_EXCLUSION_FILE):
+        return set()
+    try:
+        with open(INSIDER_EXCLUSION_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        codes = data.get('codes', [])
+        return set(str(c) for c in codes if not str(c).startswith('_'))
+    except Exception as e:
+        print(f"⚠️ [insider_exclusion.json] 読み込みエラー（除外なしで続行）: {e}")
+        return set()
 
 # --- Target Exits ---
 ATR_STOP_LOSS = 2.0       # 絶対損切(ATRの2倍) - BULL用
