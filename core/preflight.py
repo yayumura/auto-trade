@@ -4,9 +4,17 @@ import sys
 import requests
 from datetime import datetime, timedelta
 from core.config import (
-    KABUCOM_API_PASSWORD, GEMINI_API_KEY, 
+    KABUCOM_API_PASSWORD, GEMINI_API_KEY, TRADE_MODE,
     DATA_ROOT, LOG_DIR, BASE_DIR
 )
+
+# 削除対象外の重要ファイル（ポートフォリオ・取引履歴は絶対に削除しない）
+_PROTECTED_FILES = {
+    "virtual_portfolio.csv",
+    "trade_history.csv",
+    "account.json",
+    "execution_log.csv",
+}
 
 def pre_flight_check():
     """
@@ -28,10 +36,13 @@ def pre_flight_check():
             print(f"📁 [ディレクトリ作成] {d} を作成します...")
             os.makedirs(d, exist_ok=True)
 
-    # 3. 必須APIキーの存在確認 (警告のみか強制停止かは運用によるが、ここでは停止)
+    # 3. 必須APIキーの存在確認 (TRADE_MODEに応じて必須キーを決定)
     missing_keys = []
-    if not KABUCOM_API_PASSWORD: missing_keys.append("KABUCOM_API_PASSWORD")
+    # AI定性フィルターはGEMINI_API_KEYが必須（全モード共通）
     if not GEMINI_API_KEY: missing_keys.append("GEMINI_API_KEY")
+    # カブコムAPIは本番・テストモードでのみ必須
+    if TRADE_MODE in ("KABUCOM_LIVE", "KABUCOM_TEST"):
+        if not KABUCOM_API_PASSWORD: missing_keys.append("KABUCOM_API_PASSWORD")
     
     if missing_keys:
         print(f"❌ [設定漏れ] 以下の必須設定が .env にありません: {', '.join(missing_keys)}")
@@ -52,19 +63,25 @@ def pre_flight_check():
     import yfinance as yf
     try:
         ticker = yf.Ticker("7203.T") # トヨタ
-        if ticker.fast_info['lastPrice'] is None:
-            raise ValueError("データ受信失敗")
+        last_price = ticker.fast_info.get('lastPrice')  # M-5: KeyErrorを防ぐため.get()を使用
+        if last_price is None:
+            raise ValueError("データ受信失敗 (lastPrice=None)")
         print("✅ マーケットデータ API OK")
     except Exception as e:
         print(f"⚠️ [API 警告] マーケットデータAPIに不安定な兆候があります: {e}")
     # yfinanceは一時的な事が多いので警告にとどめる
 
     # 6. ディスク・クリーンアップ (Phase 14)
+    # C-5修正: 重要データファイル(_PROTECTED_FILES)は絶対に削除対象外
     print("🧹 [Housekeeping] 古い一時データの清掃確認...")
     try:
         now_ts = time.time()
         for filename in os.listdir(DATA_ROOT):
-            if filename.endswith(".csv"):
+            # 重要ファイルは除外
+            if filename in _PROTECTED_FILES:
+                continue
+            # 削除対象: 一時キャッシュ系のJSONのみ（invalid_tickers等）
+            if filename.endswith(".json") and filename.startswith("invalid_"):
                 file_path = os.path.join(DATA_ROOT, filename)
                 # 7日以上(604800秒)経過したものを削除
                 if now_ts - os.path.getmtime(file_path) > 604800:

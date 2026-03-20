@@ -43,7 +43,7 @@ def detect_market_regime():
         if today.weekday() < 5 and now_time > datetime.strptime("09:15", "%H:%M").time() and last_date < today:
              print(f"⚠️ [Data Stale] 指数データが古すぎます(最終更新: {last_date})。レジーム判定が不正確な可能性があります。")
 
-        if current < sma20 * 0.95 or volatility > 0.30:
+        if current < sma20 * 0.95 and volatility > 0.30:
             return "BEAR" 
         elif current > sma20:
             return "BULL"
@@ -98,9 +98,13 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     continue
                 df = data[ticker].dropna()
             else:
-                if len(portfolio) == 1 or ticker == data.columns.name:
+                # yfinanceが単一銘柄でMultiIndexでなくFlatなDFを返すケース
+                # H-1: columns.nameはNoneのことが多いため、len(portfolio)==1のみで判定する
+                if len(portfolio) == 1:
                     df = data.dropna()
                 else:
+                    # 複数銘柄なのにMultiIndexでない = 想定外のデータ形式。安全に保持継続
+                    print(f"⚠️ [{code}] 想定外のデータ形式(non-MultiIndex with multiple positions)。保持継続。")
                     remaining_portfolio.append(p)
                     continue
             
@@ -232,7 +236,9 @@ def calculate_technicals_for_scan(df):
     delta = df[price_col].diff()
     up = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
     down = -1 * delta.clip(upper=0).ewm(span=14, adjust=False).mean()
-    df['RSI'] = np.where((up + down) == 0, 50, 100 * up / (up + down))
+    # M-4: np.where→pd.Series.whereに変更し、pandas Seriesの型一貫性を保つ
+    rsi_denominator = up + down
+    df['RSI'] = (100 * up / rsi_denominator).where(rsi_denominator != 0, other=50.0)
     
     tr1 = df['High'] - df['Low']
     tr2 = abs(df['High'] - df['Close'].shift())
@@ -313,6 +319,8 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
                 continue
 
             if score > 0:
+                # M-2: 出来高スパイク等によるスコア過大を防止するためキャップを設ける
+                score = min(score, 500)
                 name_row = df_symbols[df_symbols['コード'].astype(str) == code]
                 name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
                 candidates.append({
@@ -321,7 +329,9 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
                     "price": latest['Close'], 
                     "atr": latest['ATR']
                 })
-        except Exception:
+        except Exception as e:
+            # H-2: 例外を無言でスキップせず、デバッグ可能なログを出力する
+            print(f"⚠️ [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
             continue
             
     return sorted(candidates, key=lambda x: x['score'], reverse=True)[:3]

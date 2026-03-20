@@ -29,91 +29,43 @@ from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, sa
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
 
 def acquire_lock():
+    """原子的なロックファイル取得。open('x')はファイルが既存の場合FileExistsErrorを発生させる（TOCTOU安全）。"""
+    # まず既存ロックが有効なプロセスのものか確認
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
             import psutil
             if psutil.pid_exists(old_pid):
-                print(f"⚠️ エラー: 他のシミュレーションインスタンス(PID: {old_pid})が既に実行中です。")
+                print(f"⚠️ エラー: 他のインスタンス(PID: {old_pid})が既に実行中です。")
                 return False
-        except:
-            pass
-    with open(LOCK_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-    return True
+            # 古いプロセスは終了済み → ロックファイルを削除して再取得
+            print(f"⚠️ 古いロックファイルを検出(PID: {old_pid}, 既に終了)。削除して続行します。")
+            os.remove(LOCK_FILE)
+        except (ValueError, ImportError, OSError) as e:
+            print(f"⚠️ ロックファイルの解析に失敗しました({e})。古いロックを削除して続行します。")
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
+    # open('x') = 排他的新規作成。ファイルが既存の場合は FileExistsError (原子的)
+    try:
+        with open(LOCK_FILE, 'x') as f:
+            f.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        print("⚠️ エラー: ロックファイルの競合が発生しました。別のインスタンスが起動した可能性があります。")
+        return False
 
 def release_lock():
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)
-        except:
-            pass
+        except OSError as e:
+            print(f"⚠️ ロックファイルの削除に失敗しました: {e}")
 
-# --- 既存CSVとJSONの読み書き処理 ---
-def load_account():
-    account = safe_read_json(ACCOUNT_FILE)
-    return account if account is not None else {"cash": INITIAL_CASH}
-
-def save_account(account_data):
-    atomic_write_json(ACCOUNT_FILE, account_data)
-
-def load_portfolio():
-    df = safe_read_csv(PORTFOLIO_FILE)
-    return df.to_dict('records') if not df.empty else []
-
-def save_portfolio(portfolio):
-    df = pd.DataFrame(portfolio)
-    atomic_write_csv(PORTFOLIO_FILE, df)
-
-def log_trade(trade_record):
-    write_header = not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0
-    df = pd.DataFrame([trade_record])
-    df.to_csv(HISTORY_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
-
-def print_execution_summary(actions, portfolio, account, regime="不明"):
-    current_time = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-    stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-    total_assets = account['cash'] + stock_value
-    
-    print("\n" + "="*50)
-    print(f" 📊 実行サマリー (レジーム: {regime})")
-    print("="*50)
-    print("\n【今回のアクション】")
-    action_str = " | ".join(actions) if actions else "アクションなし"
-    
-    if actions:
-        for act in actions:
-            print(f" ✔ {act}")
-    else:
-        print(" - アクションなし (保有維持 / 新規見送り)")
-        
-    print("\n【現在の保有株式】")
-    if portfolio:
-        for p in portfolio:
-            cp = float(p.get('current_price', p['buy_price']))
-            val = cp * int(p['shares'])
-            profit_pct = (cp - float(p['buy_price'])) / float(p['buy_price']) * 100
-            print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
-    else:
-        print(" - 保有なし")
-        
-    print("\n【口座ステータス】")
-    print(f" 💰 現金残高:   {account['cash']:>10,.0f}円")
-    print(f" 📈 株式評価額: {stock_value:>10,.0f}円")
-    print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
-    print("="*50 + "\n")
-
-    write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
-    df_log = pd.DataFrame([{
-        "time": current_time,
-        "actions": action_str,
-        "portfolio_count": len(portfolio),
-        "stock_value_yen": stock_value,
-        "cash_yen": account['cash'],
-        "total_assets_yen": total_assets
-    }])
-    df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+# --- 不要になった既存CSVとJSONの読み書き処理およびサマリー出力（M-1, L-2） ---
+# これらはBroker(sim_broker.py, kabucom_broker.py)内に移行済みのため削除しました。
 
 
 from core.logic import (
@@ -271,9 +223,9 @@ def _main_exec():
         
         actions_taken.extend(sell_actions)
         for log in trade_logs_from_manage:
-            log_trade(log)
-        save_portfolio(portfolio)
-        save_account(account)
+            if hasattr(broker, 'log_trade'): broker.log_trade(log)
+        if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
+        if hasattr(broker, 'save_account'): broker.save_account(account)
 
         if regime == "BEAR":
             print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
@@ -451,32 +403,55 @@ def _main_exec():
             
             if cost <= account['cash'] and shares_to_buy >= 100:
                 if account['cash'] - cost < 0:
-                     print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
-                     send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
+                    print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
+                    send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
+                elif is_sim:
+                    # --- シミュレーションモード: 即時約定とみなしてローカルを更新 ---
+                    print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
+                    print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
+                    notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
+                    send_discord_notify(notify_msg)
+                    actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
+                    account['cash'] -= cost  # シミュレーションのみローカル残高を更新
+                    portfolio.append({
+                        "code": best_target['code'], "name": best_target['name'],
+                        "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                        "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
+                        "current_price": round(buy_price, 1), "shares": shares_to_buy
+                    })
+                    if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
+                    if hasattr(broker, 'save_account'): broker.save_account(account)
                 else:
-                    order_id = "SIM-ORDER"
-                    if not is_sim:
-                        # auカブコムAPIへ成行買い注文を送信 (side="2" は買い)
-                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
-                    
+                    # --- 本番APIモード: C-2修正: 約定確認後にのみポートフォリオ追加 ---
+                    order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
                     if order_id:
-                        print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
-                        
-                        notify_msg = f"🏆 **【新規買付】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
-                        send_discord_notify(notify_msg)
-                        
-                        actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
-                        
-                        account['cash'] -= cost
-                        portfolio.append({
-                            "code": best_target['code'], "name": best_target['name'], 
-                            "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
-                            "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1), 
-                            "current_price": round(buy_price, 1), "shares": shares_to_buy
-                        })
-                        save_portfolio(portfolio)
-                        save_account(account)
+                        print(f"\n🏆 【注文送信】{regime}戦略: {best_target['code']} {best_target['name']} — 約定確認待ち...")
+                        send_discord_notify(f"⏳ 【注文送信】{best_target['code']} {best_target['name']} {shares_to_buy}株 — 約定確認中 (ID: {order_id})")
+                        # C-2: 売り同様、約定確認を必須とする
+                        details = broker.wait_for_execution(order_id)
+                        if details and details.get('State') == 6:
+                            # 約定完了: 実際の約定価格をAPIから取得
+                            exec_price = float(details.get('Price', buy_price))
+                            exec_cost = exec_price * shares_to_buy
+                            print(f"✅ 約定完了: {best_target['code']} {shares_to_buy}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
+                            notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {shares_to_buy}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
+                            send_discord_notify(notify_msg)
+                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({exec_cost:,.0f}円)")
+                            # C-1: 本番モードではローカル残高を手動操作しない。
+                            # account はループ先頭の broker.get_account_balance() で最新化される。
+                            portfolio.append({
+                                "code": best_target['code'], "name": best_target['name'],
+                                "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
+                                "current_price": round(exec_price, 1), "shares": shares_to_buy
+                            })
+                            if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
+                            # account はAPIから正確な値が返るため、ここでは保存しない
+                        else:
+                            state_val = details.get('State') if details else 'timeout'
+                            msg = f"⚠️ 【注文未約定】{best_target['code']}の買付注文が約定しませんでした (State: {state_val})。次サイクルで再確認します。"
+                            print(msg)
+                            send_discord_notify(msg)
                     else:
                         msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
                         print(msg)
@@ -494,7 +469,18 @@ def _main_exec():
             print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
             send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
             
-        print_execution_summary(actions_taken, portfolio, account, regime)
+        summary_record = {
+            "time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+            "actions": actions_taken,
+            "portfolio": portfolio,
+            "stock_value_yen": sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
+            "cash_yen": account['cash'],
+            "total_assets_yen": account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
+            "regime": regime
+        }
+        if hasattr(broker, 'log_execution_summary'):
+            broker.log_execution_summary(summary_record)
+            
         print(f"\n💤 次のスキャン（15分後）まで待機します...")
         time.sleep(900)
 

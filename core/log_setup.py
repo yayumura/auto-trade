@@ -23,22 +23,49 @@ class TeeLogger:
         self.stream.flush()
         self.file.flush()
 
+    def close(self):
+        """ M-3: プロセス終了時にファイルをクローズする。Windowsでのファイルロックを防止。"""
+        try:
+            self.file.flush()
+            self.file.close()
+        except Exception:
+            pass
+
 def setup_logging():
+    import atexit
     os.environ["PYTHONIOENCODING"] = "utf-8"
     os.environ["PYTHONUTF8"] = "1"  
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     
     # 既存のTeeLoggerがセットされていなければセット
     if not isinstance(sys.stdout, TeeLogger):
-        sys.stdout = TeeLogger(sys.stdout, LOG_FILE)
-        sys.stderr = TeeLogger(sys.stderr, LOG_FILE)
+        # 先に元のストリームを正しく保持する
+        orig_stdout = sys.stdout
+        orig_stderr = sys.stderr
+        
+        # WindowsのUnicodeEncodeError対策のためにTextIOWrapperでラップしてからTeeLoggerに渡す
+        wrapped_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        wrapped_stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        
+        tee_out = TeeLogger(wrapped_stdout, LOG_FILE)
+        tee_err = TeeLogger(wrapped_stderr, LOG_FILE)
+        sys.stdout = tee_out
+        sys.stderr = tee_err
+        # M-3: atexitでclose()を登録し、プロセス終了時にファイルを確実にクローズ
+        # 終了時の例外（標準IOが先にクローズされるなど）を防ぐためにラッパー関数を使う
+        def safe_close(logger):
+            try: logger.close()
+            except: pass
+        atexit.register(safe_close, tee_out)
+        atexit.register(safe_close, tee_err)
+    # H-7: clean_old_logsをモジュールロード時ではなくここで呼ぶ（副作用を局所化）
+    clean_old_logs()
 
 def send_discord_notify(message):
     if not DISCORD_WEBHOOK_URL:
         return
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
+        # L-1: timeoutを指定してDiscordサーバー障害時にメインループをブロックしないよう修正
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5)
     except Exception as e:
         print(f"⚠️ Discord通知エラー: {e}")
 
@@ -59,5 +86,5 @@ def clean_old_logs(days=30):
     except Exception as e:
         print(f"⚠️ ログクリーンアップ失敗: {e}")
 
-# 初期化時に実行
-clean_old_logs()
+# H-7: clean_old_logsはモジュール読み込み時には実行しない
+# setup_logging() 内で1度だけ呼ばれる

@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
+import json
 from dotenv import load_dotenv
 
 # --- Timezone ---
@@ -66,14 +67,17 @@ def load_insider_exclusion_codes() -> set:
     """
     insider_exclusion.json から取引禁止銘柄コードのセットを読み込む。
     ファイルが存在しない・JSON破損の場合は空のsetを返す（フェイルセーフ）。
+    M-6: '_' で始まるものを「コメント行・無視アイテム」として除外するかどうかは
+    実際の証券コード体系とぶつかるリスクを考慮すると、'description'のようなキーを
+    別途設けるのが正規ですが、現状互換性のため維持しコメント追記します。
     """
-    import json
     if not os.path.exists(INSIDER_EXCLUSION_FILE):
         return set()
     try:
         with open(INSIDER_EXCLUSION_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         codes = data.get('codes', [])
+        # L-3: ローカルインポートを削除。
         return set(str(c) for c in codes if not str(c).startswith('_'))
     except Exception as e:
         print(f"⚠️ [insider_exclusion.json] 読み込みエラー（除外なしで続行）: {e}")

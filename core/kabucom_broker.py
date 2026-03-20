@@ -55,7 +55,9 @@ class KabucomBroker(BaseBroker):
 
     def get_server_time(self) -> datetime:
         """ 取引所（証券会社側）の現在時刻を取得する """
-        if not self.token: return datetime.now()
+        from core.config import JST
+        fallback = datetime.now(JST)  # H-6: JST aware datetimeを常に返すよう修正
+        if not self.token: return fallback
         url = f"{self.base_url}/symbol/7203@1" # トヨタの時価情報から時刻を拝借
         try:
             res = requests.get(url, headers=self._get_headers(), timeout=5)
@@ -63,18 +65,16 @@ class KabucomBroker(BaseBroker):
                 # サーバーの現在時刻はレスポンスの 'TradingDate' ではなく、本来はAPIのリファレンスから
                 # 明示的な「サーバー時刻」エンドポイントを叩くべきだが、多くのAPIではレスポンスヘッダや
                 # 時価情報の更新時刻が基準となる。ここでは簡易的にトヨタの時価時刻を基準とする。
-                # 実際の KabuステーションAPI には /common/servertime のようなものがないため、
-                # トヨタの時価データの 'CurrentPriceTime' 等を使用するのが一般的。
+                # 実際の KabuステーションAPI には /common/servertime のようなものがないため。
                 time_str = res.json().get('CurrentPriceTime', "")
                 if time_str:
                     # 時刻のみ(HH:mm:ss)の場合は当日の日付を付加
-                    from core.config import JST
                     today = datetime.now(JST).date()
                     full_time_str = f"{today} {time_str}"
                     return datetime.strptime(full_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
-            return datetime.now()
-        except:
-            return datetime.now()
+            return fallback
+        except Exception:
+            return fallback
 
     def get_active_orders(self) -> list:
         """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
@@ -251,6 +251,23 @@ class KabucomBroker(BaseBroker):
                 # 6: 全部約定, 7: 一部約定, 8: 取消済, 9: 失効, 10: 出来ず
                 if state == 6:
                     print(f"✨ 注文 ID: {order_id} 全部約定しました。")
+                    return details
+                elif state == 7:
+                    # H-5: 一部約定を検出。残りの注文を取消して約定分のみを返す。
+                    cum_qty = details.get('CumQty', 0)
+                    leaves_qty = details.get('LeavesQty', 0)
+                    print(f"⚠️ 注文 ID: {order_id} 一部約定 ({cum_qty}株約定, 残{leaves_qty}株)。残りの注文を取消します。")
+                    # 残りの注文をキャンセルする
+                    try:
+                        cancel_url = f"{self.base_url}/cancelorder"
+                        cancel_data = {"OrderId": order_id, "Password": self.password}
+                        requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
+                    except Exception as ce:
+                        print(f"⚠️ 残注文の取消に失敗（手動確認要）: {ce}")
+                    # 一部約定を全部約定たこととしてdetailsを返すが、Phase上位に一部約定であることを通知
+                    details['_partial'] = True
+                    details['State'] = 6  # 上位の約定チェックが State==6 を期待するため
+                    details['Qty'] = cum_qty  # 実際に約定した株数で上書き
                     return details
                 elif state in [8, 9, 10]:
                     print(f"❌ 注文 ID: {order_id} は約定しませんでした (State: {state})。")
