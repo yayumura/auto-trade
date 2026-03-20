@@ -1,6 +1,9 @@
 # 環境変数（APIキー等の機密情報）
 .env
 
+# インサイダー取引防止リスト（勤務先等の個人情報を含むため非公開）
+insider_exclusion.json
+
 # 自動生成ファイル（トレードBOTの出力）
 account.json
 virtual_portfolio.csv
