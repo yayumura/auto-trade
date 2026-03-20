@@ -10,8 +10,35 @@ import re
 import warnings
 import json
 import signal
+from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
+
+class MarketPhase(Enum):
+    PRE_MARKET = "寄り前"
+    MORNING = "前場"
+    LUNCH = "昼休み"
+    AFTERNOON = "後場"
+    CLOSING_TIME = "大引け後"
+
+def get_market_phase(now_time) -> MarketPhase:
+    """現在時刻から市場のフェーズを判定する"""
+    from datetime import datetime
+    t900 = datetime.strptime("09:00", "%H:%M").time()
+    t1130 = datetime.strptime("11:30", "%H:%M").time()
+    t1230 = datetime.strptime("12:30", "%H:%M").time()
+    t1530 = datetime.strptime("15:30", "%H:%M").time()
+    
+    if now_time < t900:
+        return MarketPhase.PRE_MARKET
+    elif t900 <= now_time < t1130:
+        return MarketPhase.MORNING
+    elif t1130 <= now_time < t1230:
+        return MarketPhase.LUNCH
+    elif t1230 <= now_time < t1530:
+        return MarketPhase.AFTERNOON
+    else:
+        return MarketPhase.CLOSING_TIME
 
 # --- ファイルパス・設定・APIキー設定 (core.configより一括取得) ---
 from core.config import (
@@ -147,12 +174,21 @@ def _main_exec():
 
     print(f"\n🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (自律ループ型監視中)")
 
+    # --- [V2-C1] ループ頻度の分離 ---
+    last_scan_time = 0
+    SCAN_INTERVAL_SEC = 900   # スキャン間隔（15分）
+    MONITOR_INTERVAL_SEC = 30 # ポジション監視間隔（30秒）
+
     while True:
+        loop_start_time = time.time()
         # --- [Phase 14] Server Time Sync ---
         server_datetime = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.now(JST)
         now_time = server_datetime.time()
 
-        if now_time >= datetime.strptime("15:30", "%H:%M").time() and not DEBUG_MODE:
+        phase = get_market_phase(now_time)
+        print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
+
+        if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
             send_discord_notify("🏁 【業務終了】15:30（大引け）を過ぎたため、自動運用を終了しました。")
             break
@@ -162,15 +198,10 @@ def _main_exec():
                 print("💤 本日は市場休業日（土日）です。")
                 break
             
-            m_open, m_close = datetime.strptime("09:00", "%H:%M").time(), datetime.strptime("11:30", "%H:%M").time()
-            a_open, a_close = datetime.strptime("12:30", "%H:%M").time(), datetime.strptime("15:30", "%H:%M").time()
-            
-            if not ((m_open <= now_time <= m_close) or (a_open <= now_time <= a_close)):
-                print(f"💤 取引時間外です（現在サーバー時刻: {now_time.strftime('%H:%M:%S')}）。10分待機します...")
-                time.sleep(600)
+            if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
+                print(f"💤 取引時間外（{phase.value}）です。次の監視まで待機します...")
+                time.sleep(MONITOR_INTERVAL_SEC)
                 continue
-
-        print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')})")
 
         # --- 【追加】In-flight Guard をループ内に移動（二重発注の完全防止） ---
         if not is_sim:
@@ -180,8 +211,8 @@ def _main_exec():
                     msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注事故を防ぐため、約定または取消されるまでスキャンを待機します。"
                     print(msg)
                     send_discord_notify(msg)
-                    print(f"\n💤 次のスキャン（15分後）まで待機します...")
-                    time.sleep(900)
+                    print(f"\n💤 次の監視({MONITOR_INTERVAL_SEC}秒後)まで待機します...")
+                    time.sleep(MONITOR_INTERVAL_SEC)
                     continue
             except Exception as e:
                 print(f"⚠️ 注文状態の確認エラー: {e}")
@@ -194,8 +225,8 @@ def _main_exec():
             msg = f"⚠️ 【API通信エラー】口座情報またはポジションの取得に失敗しました: {e}"
             print(msg)
             send_discord_notify(msg)
-            print(f"\n💤 一時的な通信障害のため、次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            print(f"\n💤 一時的な通信障害のため、次の監視({MONITOR_INTERVAL_SEC}秒後)まで待機します...")
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         actions_taken = []
@@ -205,12 +236,11 @@ def _main_exec():
         try:
             regime = detect_market_regime()
         except Exception as e:
-            msg = f"❌ 【致命的エラー】レジーム判定（日経平均取得）に失敗しました: {e}"
+            msg = f"⚠️ 【警告】レジーム判定（日経平均取得）に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
             print(msg)
             send_discord_notify(msg)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
-            continue
+            regime = "RANGE"
+            last_scan_time = loop_start_time + SCAN_INTERVAL_SEC  # 新規スキャンをスキップ
 
         print(f"📊 現在のレジーム: 【{regime}】")
         
@@ -229,39 +259,36 @@ def _main_exec():
 
         if regime == "BEAR":
             print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
-            send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            # send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。") # 重複通知防止
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         if len(portfolio) >= MAX_POSITIONS:
-            print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
-            send_discord_notify(f"💡 【見送り】最大ポジション（{MAX_POSITIONS}銘柄）保有中のため新規スキャンをスキップしました。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            # print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         now_time = datetime.now(JST).time()
 
         if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
-            print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
-            send_discord_notify("💡 【見送り】寄り付き直後（9:30前）のためエントリー待機中。保有監視のみ実行しました。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            # print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         if now_time >= datetime.strptime("14:30", "%H:%M").time():
-            print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
-            send_discord_notify("💡 【見送り】大引け前（14:30以降）のため新規買付を終了。保有ポジションの決済監視のみ実行しました。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            # print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
-        # --- 3. システムによる数学的スクリーニング（高速） ---
+        # --- 3. システムによる数学的スクリーニング（スキャンループ分離 V2-C1） ---
+        now_time_sec = time.time()
+        if (now_time_sec - last_scan_time) < SCAN_INTERVAL_SEC:
+            # スキャン時刻に達していない場合は監視ループのみ回す
+            time.sleep(MONITOR_INTERVAL_SEC)
+            continue
+            
+        last_scan_time = now_time_sec
+        print("\n=> 🔍 定期スキャン処理（銘柄探索）を開始します...")
         try:
             df_symbols = pd.read_csv(DATA_FILE)
             if '市場・商品区分' in df_symbols.columns:
@@ -285,8 +312,7 @@ def _main_exec():
             targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
         except Exception as e:
             print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         tickers = [f"{code}.T" for code in targets]
@@ -303,7 +329,9 @@ def _main_exec():
                 if chunk_df is not None and not chunk_df.empty:
                     if isinstance(chunk_df.columns, pd.MultiIndex):
                         data_dfs.append(chunk_df)
-                time.sleep(0.5) 
+                # V2-H1: yfinanceレートリミット回避策としてランダムスリープを導入
+                import random
+                time.sleep(random.uniform(1.0, 2.5)) 
             except Exception as e:
                 print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
                 if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
@@ -315,9 +343,7 @@ def _main_exec():
         if not data_dfs:
             print("⚠️ データの取得に完全に失敗しました。")
             send_discord_notify("⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
         data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
@@ -332,9 +358,7 @@ def _main_exec():
                  msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。安全のため買付を見送ります。"
                  print(msg)
                  send_discord_notify(msg)
-                 print_execution_summary(actions_taken, portfolio, account, regime)
-                 print(f"\n💤 次のスキャン（15分後）まで待機します...")
-                 time.sleep(900)
+                 time.sleep(MONITOR_INTERVAL_SEC)
                  continue
         except Exception as e:
             print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
@@ -345,16 +369,13 @@ def _main_exec():
         
         if not top_candidates:
             print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
-            send_discord_notify(f"💡 【見送り】レジーム: {regime} | スクリーニングの結果、優位性のある銘柄が見つかりませんでした。")
-            print_execution_summary(actions_taken, portfolio, account, regime)
-            print(f"\n💤 次のスキャン（15分後）まで待機します...")
-            time.sleep(900)
+            time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
-        print(f"\n--- 🤖 AI定性フィルターチェック (対象: 上位{len(top_candidates)}銘柄のみ) ---")
+        print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
         best_target = None
         
-        for item in top_candidates:
+        for item in top_candidates[:1]: # M-2: スコア1位のみ判定しブロッキング削減
             print(f"審査中: {item['code']} {item['name']} (スコア: {item['score']:.1f})")
             news = get_recent_news(item['code'], item['name'])
             
@@ -369,15 +390,15 @@ def _main_exec():
                 best_target = item
                 break
             else:
-                print(f"  -> 🚨 リジェクト検知: {reason} (次の候補へ移行)")
+                print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
 
         if best_target:
             if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0:
                 print(f"\n💡 異常な価格データ({best_target['price']})を検知したため、安全装置が作動し買付を強制キャンセルしました。")
                 send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格データに異常を検知（{best_target['price']}）。買付を強制キャンセルしました。")
-                print_execution_summary(actions_taken, portfolio, account, regime)
-                print(f"\n💤 次のスキャン（15分後）まで待機します...")
-                time.sleep(900)
+                print(f"\n💤 ポジション監視のみ継続します...")
+                last_scan_time = loop_start_time + SCAN_INTERVAL_SEC  # スキャン遅延
+                time.sleep(MONITOR_INTERVAL_SEC)
                 continue
                 
             raw_price = float(best_target['price'])
@@ -481,8 +502,10 @@ def _main_exec():
         if hasattr(broker, 'log_execution_summary'):
             broker.log_execution_summary(summary_record)
             
-        print(f"\n💤 次のスキャン（15分後）まで待機します...")
-        time.sleep(900)
+        elapsed = time.time() - loop_start_time
+        sleep_time = max(5.0, MONITOR_INTERVAL_SEC - elapsed)
+        print(f"\n💤 次の監視({MONITOR_INTERVAL_SEC}秒周期)まで待機します...")
+        time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()

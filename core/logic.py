@@ -126,18 +126,26 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             else:
                 current_price_raw = float(df['Close'].iloc[-1])
                 
-            # シミュレーション用スリッページ
-            current_price = current_price_raw * 0.999 if is_simulation else current_price_raw 
-            
-            buy_price = float(p['buy_price']) * split_ratio
-            highest_price_db = float(p.get('highest_price', p['buy_price'])) * split_ratio
-            
+            # [V2-C3] ストップ高/安張り付き（流動性枯渇）のフェイルセーフ
+            if 'Volume' in df.columns and float(df['Volume'].iloc[-1]) == 0:
+                print(f"⚠️ [{code}] 最新足の出来高が0です（ストップ高/安・特別気配等）。売却依頼を見送ります。")
+                remaining_portfolio.append(p)
+                continue
+
+            # --- ATR(Average True Range)の計算 ---
             tr1 = df['High'] - df['Low']
             tr2 = abs(df['High'] - df['Close'].shift())
             tr3 = abs(df['Low'] - df['Close'].shift())
             atr = float(pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean().iloc[-1])
             if pd.isna(atr) or atr == 0:
-                atr = current_price * 0.02
+                atr = current_price_raw * 0.02
+                
+            # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの10%をスリッページとする)
+            if is_simulation:
+                slippage = atr * 0.1
+                current_price = max(0.1, current_price_raw - slippage)
+            else:
+                current_price = current_price_raw
             
             sell_reason = None
             # レジームに応じた損切り倍率の選択

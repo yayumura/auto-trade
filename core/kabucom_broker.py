@@ -273,7 +273,25 @@ class KabucomBroker(BaseBroker):
                     print(f"❌ 注文 ID: {order_id} は約定しませんでした (State: {state})。")
                     return details
             time.sleep(2)
-        print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。")
+        print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。ゾンビ処理化を防ぐため取消要求を送信します。")
+        try:
+            cancel_url = f"{self.base_url}/cancelorder"
+            cancel_data = {"OrderId": order_id, "Password": self.password}
+            requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
+            print("✅ タイムアウト注文の強制取消要求を送信しました。")
+        except Exception as e:
+            print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）: {e}")
+            
+        # --- [V2-C2] 取消完了の確認ポーリングを追加 ---
+        print(f"⏳ 注文 ID: {order_id} の取消完了を待機中...")
+        cancel_start = time.time()
+        while time.time() - cancel_start < 15:
+            details = self.get_order_details(order_id)
+            if details and details.get('State') == 8: # 8: 取消済
+                print(f"✅ 注文 ID: {order_id} の取消が完了しました。")
+                return details
+            time.sleep(2)
+        print(f"⚠️ 注文 ID: {order_id} の取消完了が規定時間内に確認できませんでした（State: {details.get('State') if details else 'Unknown'}）。ゾンビポジションに注意してください。")
         return None
 
     # ---------------------------------------------------------

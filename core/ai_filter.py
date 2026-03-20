@@ -1,6 +1,8 @@
 import urllib.parse
 import feedparser
 import re
+import requests
+import concurrent.futures
 from google import genai
 from core.config import GEMINI_API_KEY, GROQ_API_KEY, GEMINI_MODEL
 
@@ -20,18 +22,21 @@ def clean_text_for_ai(text):
     text = re.sub(r'[\r\n\t]+', ' ', text)
     return re.sub(r'[^\x20-\x7E\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', '', text).strip()
 
-def get_recent_news(code, name):
+def get_recent_news(code, name, timeout=5):
     clean_name = re.sub(r'\s+', ' ', name).strip()
     query = urllib.parse.quote(f"{code} {clean_name}")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
     try:
-        feed = feedparser.parse(rss_url)
+        # V2-M2: requestsでタイムアウト付き取得
+        res = requests.get(rss_url, timeout=timeout)
+        feed = feedparser.parse(res.content)
         titles = [entry.title for entry in feed.entries[:5]]
         return " | ".join(titles) if titles else "ニュースなし"
-    except:
-        return ""
+    except Exception as e:
+        print(f"⚠️ ニュース取得タイムアウト/エラー({code}): {e}")
+        return "ニュースなし"
 
-def ai_qualitative_filter(code, name, news_text):
+def _ai_qualitative_filter_core(code, name, news_text):
     if not gemini_client:
         return True, "API Key Missing (Skipped)"
         
@@ -86,3 +91,15 @@ def ai_qualitative_filter(code, name, news_text):
         
         # APIが完全に死んでいる、あるいは不明なエラーの場合は、機会損失を防ぐため「一時承認」
         return True, f"AI判定エラー回避(一時承認): {e}"
+
+def ai_qualitative_filter(code, name, news_text, timeout=10):
+    """V2-M2: APIやネットワークのスタックを防ぐため、タイムアウト付きでAI判定を実行する"""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_ai_qualitative_filter_core, code, name, news_text)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            print(f"⚠️ {code} のAI判定がAPIタイムアウト({timeout}秒)しました。機会損失を防ぐため一時承認します。")
+            return True, "AI判定タイムアウト(一時承認)"
+        except Exception as e:
+            return True, f"AI実行時エラー回避(一時承認): {e}"
