@@ -118,6 +118,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 split_ratio = float(df['Adj Close'].iloc[0]) / float(df['Close'].iloc[0])
                 if split_ratio > 1.0: split_ratio = 1.0 
 
+            # ポジション情報の復元と分割補正
+            buy_price = float(p.get('buy_price', 0)) * split_ratio
+            highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
+
             # --- [Phase 13] 価格入力の階層化 (Price Input Hierarchy) ---
             # 証券会社API由来のリアルタイム価格(p['current_price'])がある場合は、yfinanceの遅延データより優先する
             api_price = p.get('current_price')

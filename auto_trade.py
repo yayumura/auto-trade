@@ -219,8 +219,8 @@ def _main_exec():
 
         # --- 【修正】Brokerパターン完全適用（APIから最新の口座・ポジションを取得） ---
         try:
-            account = broker.get_account_balance() if hasattr(broker, 'get_account_balance') else load_account()
-            portfolio = broker.get_positions() if hasattr(broker, 'get_positions') else load_portfolio()
+            account = broker.get_account_balance()
+            portfolio = broker.get_positions()
         except Exception as e:
             msg = f"⚠️ 【API通信エラー】口座情報またはポジションの取得に失敗しました: {e}"
             print(msg)
