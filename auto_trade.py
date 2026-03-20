@@ -452,19 +452,32 @@ def _main_exec():
                         details = broker.wait_for_execution(order_id)
                         if details and details.get('State') == 6:
                             # 約定完了: 実際の約定価格をAPIから取得
-                            exec_price = float(details.get('Price', buy_price))
-                            exec_cost = exec_price * shares_to_buy
-                            print(f"✅ 約定完了: {best_target['code']} {shares_to_buy}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
-                            notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {shares_to_buy}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
+                            exec_price = float(details.get('Price', 0))
+                            if exec_price == 0:
+                                # 成行注文時は Price が 0 になるため、約定明細から平均価格を算出するか推定値を使用
+                                exec_price = buy_price
+                                exec_details = details.get('Details', [])
+                                if exec_details:
+                                    total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
+                                    total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
+                                    if total_qty > 0:
+                                        exec_price = total_val / total_qty
+                            
+                            # 一部約定時は実際の約定数量を取得
+                            actual_qty = int(details.get('Qty', shares_to_buy))
+                            exec_cost = exec_price * actual_qty
+                            
+                            print(f"✅ 約定完了: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
+                            notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
                             send_discord_notify(notify_msg)
-                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({exec_cost:,.0f}円)")
+                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
                             # C-1: 本番モードではローカル残高を手動操作しない。
                             # account はループ先頭の broker.get_account_balance() で最新化される。
                             portfolio.append({
                                 "code": best_target['code'], "name": best_target['name'],
                                 "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                                 "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
-                                "current_price": round(exec_price, 1), "shares": shares_to_buy
+                                "current_price": round(exec_price, 1), "shares": actual_qty
                             })
                             if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                             # account はAPIから正確な値が返るため、ここでは保存しない
