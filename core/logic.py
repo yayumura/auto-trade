@@ -177,14 +177,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
 
             if sell_reason:
-                gross_profit = (current_price - buy_price) * p['shares']
-                tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
-                net_profit = gross_profit - tax_amount 
-                
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
                 if is_simulation:
-                    sale_proceeds = (current_price * p['shares']) - tax_amount
-                    account['cash'] += sale_proceeds
+                    actual_qty = int(p['shares'])
+                    exec_price = current_price
                 else:
                     if broker:
                         order_id = broker.execute_market_order(code, int(p['shares']), side="1") # 1: 売り
@@ -200,27 +196,59 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                             remaining_portfolio.append(p)
                             continue
                             
-                        # リアル取引でも約定完了したらローカル残高を回復させる
-                        sale_proceeds = (current_price * p['shares']) - tax_amount
-                        account['cash'] += sale_proceeds
+                        # APIからの約定データをパースする
+                        exec_price = float(details.get('Price', 0))
+                        if exec_price == 0:
+                            exec_price = current_price
+                            exec_details = details.get('Details', [])
+                            if exec_details:
+                                total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
+                                total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
+                                if total_qty > 0:
+                                    exec_price = total_val / total_qty
+                        
+                        actual_qty = int(details.get('Qty', p['shares']))
                         
                     else:
                         print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
                         remaining_portfolio.append(p)
                         continue
+
+                # 実際の約定値に基づいて損益計算
+                gross_profit = (exec_price - buy_price) * actual_qty
+                tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
+                net_profit = gross_profit - tax_amount 
                 
-                msg = f"💰【決済】{code} {p['name']} ({sell_reason})\n   税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
+                sale_proceeds = (exec_price * actual_qty) - tax_amount
+                
+                if is_simulation:
+                    account['cash'] += sale_proceeds
+                else:
+                    # 本番APIの場合は broker.get_account_balance() が最新を反映するので本来不要だが、
+                    # 同一ループ内の計算のためにローカル変数も一応更新しておく
+                    account['cash'] += sale_proceeds
+
+                # 一部約定のケースでの残存株の扱い
+                if actual_qty < int(p['shares']):
+                    remaining_p = p.copy()
+                    remaining_p['shares'] = int(p['shares']) - actual_qty
+                    remaining_portfolio.append(remaining_p)
+                    print(f"⚠️ [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
+                
+                msg = f"💰【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
                 print(msg)
                 send_discord_notify(msg)
                 
-                act_str = f"決済: {code} {p['name']} ({sell_reason}) {net_profit:+.0f}円"
+                act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
                 actions.append(act_str)
+                
+                actual_profit_pct = (exec_price - buy_price) / buy_price
                 
                 trade_record = {
                     "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
-                    "buy_price": buy_price, "sell_price": current_price, "highest_price_reached": highest_price,
-                    "shares": p['shares'], "gross_profit": gross_profit, "tax_amount": tax_amount, 
-                    "net_profit": net_profit, "profit_pct": profit_pct, "reason": sell_reason
+                    "buy_price": buy_price, "sell_price": exec_price, "highest_price_reached": highest_price,
+                    "shares": actual_qty, "gross_profit": gross_profit, "tax_amount": tax_amount, 
+                    "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason
                 }
                 trade_logs.append(trade_record)
             else:

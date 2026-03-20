@@ -268,7 +268,6 @@ def _main_exec():
             time.sleep(MONITOR_INTERVAL_SEC)
             continue
 
-        now_time = datetime.now(JST).time()
 
         if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
             # print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
@@ -319,7 +318,7 @@ def _main_exec():
         print(f"\n--- 📈 数学的スクリーニング ({len(tickers)}銘柄) ---")
 
         data_dfs = []
-        chunk_size = 500 
+        chunk_size = 100 
 
         print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
         for i in range(0, len(tickers), chunk_size):
