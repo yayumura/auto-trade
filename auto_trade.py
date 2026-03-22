@@ -327,14 +327,15 @@ def _main_exec():
                         if chunk_df is not None and not chunk_df.empty:
                             if isinstance(chunk_df.columns, pd.MultiIndex):
                                 data_dfs.append(chunk_df)
-                        time.sleep(random.uniform(1.0, 2.5)) 
                     except Exception as e:
                         print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
                         if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
                             new_invalids = set(chunk)
                             invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
                             save_invalid_tickers(invalid_tickers)
-                        continue
+                    finally:
+                        # ✅ エラーが起きても起きなくても必ずスリープし、IPブロックを防ぐ
+                        time.sleep(random.uniform(1.0, 2.5))
 
                 if not data_dfs:
                     print("⚠️ データの取得に完全に失敗しました。")
@@ -424,12 +425,16 @@ def _main_exec():
                 
                 if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
                     if is_sim:
+                        # 実質コスト（手数料バッファ込）を計算
+                        total_sim_cost = cost * COMMISSION_BUFFER
                         print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
+                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円 (実質: {total_sim_cost:,.0f}円)")
                         notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
                         send_discord_notify(notify_msg)
                         actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
-                        account['cash'] -= cost
+                        
+                        # ✅ 手数料込のコストを引くことで、SIM成績の非現実的な上振れを防ぐ
+                        account['cash'] -= total_sim_cost
                         portfolio.append({
                             "code": best_target['code'], "name": best_target['name'],
                             "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
