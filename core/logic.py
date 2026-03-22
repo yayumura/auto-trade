@@ -77,8 +77,14 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
     print(f"\n--- 💼 保有監視 ({len(portfolio)}銘柄) ---")
     tickers = [f"{p['code']}.T" for p in portfolio]
-    data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
     
+    # ✅ try-exceptで囲み、一時的な通信エラーでBOTが落ちるのを防ぐ
+    try:
+        data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
+    except Exception as e:
+        print(f"⚠️ 保有銘柄のデータ取得に一時的なエラーが発生しました(次回リトライ): {e}")
+        return portfolio, account, actions, trade_logs
+
     if data is None or data.empty:
         return portfolio, account, actions, trade_logs
 
@@ -219,7 +225,14 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
                 net_profit = gross_profit - tax_amount 
                 
-                sale_proceeds = (exec_price * actual_qty) - tax_amount
+                # ✅ SIMモードの場合は売却手数料(約0.3%)も差し引いて現実の口座に近づける
+                if is_simulation:
+                    COMMISSION_RATE = 0.003
+                    sell_commission = int((exec_price * actual_qty) * COMMISSION_RATE)
+                    sale_proceeds = (exec_price * actual_qty) - tax_amount - sell_commission
+                else:
+                    # 実運用時はAPIが正のためそのまま計算ベースとして扱う
+                    sale_proceeds = (exec_price * actual_qty) - tax_amount
                 
                 if is_simulation:
                     account['cash'] += sale_proceeds
