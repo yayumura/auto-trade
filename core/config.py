@@ -52,7 +52,7 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 # --- Strategy Parameters ---
-DEBUG_MODE = False        # 本番運用時は必ずFalse
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"  # .envで DEBUG_MODE=true に設定して切り替え
 INITIAL_CASH = 1000000    # 初回シミュレーション用資金
 MAX_POSITIONS = 4         # リスク分散上限
 MAX_RISK_PER_TRADE = 0.02 # 1トレードあたりの許容リスク（総資金の2%）

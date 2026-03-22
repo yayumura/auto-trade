@@ -304,6 +304,10 @@ class KabucomBroker(BaseBroker):
         df = pd.DataFrame(portfolio)
         atomic_write_csv(PORTFOLIO_FILE, df)
 
+    def save_portfolio(self, portfolio: list):
+        """auto_trade.py との互換性のためのエイリアス（M-4修正）"""
+        self.save_positions(portfolio)
+
     def save_account(self, account: dict):
         """ 同上 """
         from core.config import ACCOUNT_FILE

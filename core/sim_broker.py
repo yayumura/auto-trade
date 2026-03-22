@@ -27,6 +27,10 @@ class SimulationBroker(BaseBroker):
         df = pd.DataFrame(portfolio)
         atomic_write_csv(PORTFOLIO_FILE, df)
 
+    def save_portfolio(self, portfolio: list):
+        """auto_trade.py との互換性のためのエイリアス（M-3修正）"""
+        self.save_positions(portfolio)
+
     def execute_market_order(self, code: str, shares: int, side: str) -> str:
         """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
         import time

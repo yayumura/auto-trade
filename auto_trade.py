@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import random
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
@@ -10,6 +11,7 @@ import re
 import warnings
 import json
 import signal
+import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
@@ -194,8 +196,12 @@ def _main_exec():
             break
 
         if not DEBUG_MODE:
-            if server_datetime.weekday() >= 5: 
-                print("💤 本日は市場休業日（土日）です。")
+            # H-3修正: 土日 + 日本の祝日（jpholiday）を判定
+            is_weekend = server_datetime.weekday() >= 5
+            is_holiday = jpholiday.is_holiday(server_datetime.date())
+            if is_weekend or is_holiday:
+                reason = "土日" if is_weekend else f"祝日({jpholiday.is_holiday_name(server_datetime.date())})"
+                print(f"💤 本日は市場休業日（{reason}）です。")
                 break
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
@@ -328,8 +334,7 @@ def _main_exec():
                 if chunk_df is not None and not chunk_df.empty:
                     if isinstance(chunk_df.columns, pd.MultiIndex):
                         data_dfs.append(chunk_df)
-                # V2-H1: yfinanceレートリミット回避策としてランダムスリープを導入
-                import random
+                # V2-H1: yfinanceレートリミット回避策としてランダムスリープを導入（L-1: import randomはファイル先頭に移動済）
                 time.sleep(random.uniform(1.0, 2.5)) 
             except Exception as e:
                 print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
@@ -392,9 +397,10 @@ def _main_exec():
                 print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
 
         if best_target:
-            if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0:
-                print(f"\n💡 異常な価格データ({best_target['price']})を検知したため、安全装置が作動し買付を強制キャンセルしました。")
-                send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格データに異常を検知（{best_target['price']}）。買付を強制キャンセルしました。")
+            # C-2修正: atr <= 0 も明示的にガード（元のコードでも risk_per_share > 0 チェックで防げていたが、早期リジェクトで明確化）
+            if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0 or best_target['atr'] <= 0:
+                print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={best_target['price']}, atr={best_target['atr']})")
+                send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
                 print(f"\n💤 ポジション監視のみ継続します...")
                 last_scan_time = loop_start_time + SCAN_INTERVAL_SEC  # スキャン遅延
                 time.sleep(MONITOR_INTERVAL_SEC)
@@ -420,12 +426,11 @@ def _main_exec():
             
             shares_to_buy = (raw_shares // 100) * 100
             cost = buy_price * shares_to_buy
+            # C-1修正: 論理矛盾していたデッドコードを整理。手数料バッファ(0.3%)を確保した上で余力チェック(H-1修正)
+            COMMISSION_BUFFER = 1.003  # 手数料・スリッページ用0.3%バッファ
             
-            if cost <= account['cash'] and shares_to_buy >= 100:
-                if account['cash'] - cost < 0:
-                    print("\n💡 致命的な資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
-                    send_discord_notify(f"⚠️ 【安全装置作動】資金計算エラー: 買付余力がマイナスになるため取引を強制ブロックしました。")
-                elif is_sim:
+            if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
+                if is_sim:
                     # --- シミュレーションモード: 即時約定とみなしてローカルを更新 ---
                     print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
                     print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
