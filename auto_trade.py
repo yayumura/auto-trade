@@ -246,7 +246,7 @@ def _main_exec():
             print(msg)
             send_discord_notify(msg)
             regime = "RANGE"
-            last_scan_time = loop_start_time + SCAN_INTERVAL_SEC  # 新規スキャンをスキップ
+            last_scan_time = loop_start_time  # 新規スキャンをスキップ
 
         print(f"📊 現在のレジーム: 【{regime}】")
         
@@ -263,250 +263,231 @@ def _main_exec():
         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
         if hasattr(broker, 'save_account'): broker.save_account(account)
 
+        # --- スキャン実行の判定（Reporting Bypass解消のため should_scan フラグ制御） ---
+        should_scan = True
+
         if regime == "BEAR":
             print("🚨 【警告】パニック・弱気相場を検知。資金保護のため新規買い付けを完全に停止します。")
-            # send_discord_notify("🚨 【BEAR相場検知】パニック・弱気相場のため新規買い付けを停止。手仕舞いのみ実行します。") # 重複通知防止
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
+            should_scan = False
+        elif len(portfolio) >= MAX_POSITIONS:
+            should_scan = False
+        elif now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
+            should_scan = False
+        elif now_time >= datetime.strptime("14:30", "%H:%M").time():
+            should_scan = False
+        else:
+            now_time_sec = time.time()
+            if (now_time_sec - last_scan_time) < SCAN_INTERVAL_SEC:
+                should_scan = False
 
-        if len(portfolio) >= MAX_POSITIONS:
-            # print(f"\n💡 最大ポジション（{MAX_POSITIONS}銘柄）保有中。新規スキャンをスキップします。")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
-
-
-        if now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
-            # print("\n💡 寄り付き直後（9:30前）は値動きがランダムで危険なため、新規エントリーのスキャンを待機します。")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
-
-        if now_time >= datetime.strptime("14:30", "%H:%M").time():
-            # print("\n💡 大引け前（14:30以降）のため、オーバーナイトリスクを避けるべく本日の新規買付を終了します。")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
-
-        # --- 3. システムによる数学的スクリーニング（スキャンループ分離 V2-C1） ---
-        now_time_sec = time.time()
-        if (now_time_sec - last_scan_time) < SCAN_INTERVAL_SEC:
-            # スキャン時刻に達していない場合は監視ループのみ回す
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
+        # --- 3. システムによる数学的スクリーニング ---
+        if should_scan:
+            last_scan_time = time.time()
+            print("\n=> 🔍 定期スキャン処理（銘柄探索）を開始します...")
             
-        last_scan_time = now_time_sec
-        print("\n=> 🔍 定期スキャン処理（銘柄探索）を開始します...")
-        try:
-            df_symbols = pd.read_csv(DATA_FILE)
-            if '市場・商品区分' in df_symbols.columns:
-                df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
-                print(f"  🔍 市場フィルタリング適用後: {len(df_symbols)}銘柄 (ETF/REIT等を除外)")
-
-            invalid_tickers = load_invalid_tickers()
-            if invalid_tickers:
-                df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
-                print(f"  🔍 無効銘柄キャッシュ適用後: {len(df_symbols)}銘柄")
-
-            # --- インサイダー取引防止フィルタ ---
-            insider_codes = load_insider_exclusion_codes()
-            if insider_codes:
-                before_count = len(df_symbols)
-                df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
-                excluded_count = before_count - len(df_symbols)
-                print(f"  🚫 インサイダー除外適用後: {len(df_symbols)}銘柄 ({excluded_count}銘柄を除外)")
-
-            held_codes = [str(p['code']) for p in portfolio]
-            targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
-        except Exception as e:
-            print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
-
-        tickers = [f"{code}.T" for code in targets]
-        print(f"\n--- 📈 数学的スクリーニング ({len(tickers)}銘柄) ---")
-
-        data_dfs = []
-        chunk_size = 100 
-
-        print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
-        for i in range(0, len(tickers), chunk_size):
-            chunk = tickers[i:i + chunk_size]
+            should_continue_scan = True
             try:
-                chunk_df = yf.download(chunk, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
-                if chunk_df is not None and not chunk_df.empty:
-                    if isinstance(chunk_df.columns, pd.MultiIndex):
-                        data_dfs.append(chunk_df)
-                # V2-H1: yfinanceレートリミット回避策としてランダムスリープを導入（L-1: import randomはファイル先頭に移動済）
-                time.sleep(random.uniform(1.0, 2.5)) 
+                df_symbols = pd.read_csv(DATA_FILE)
+                if '市場・商品区分' in df_symbols.columns:
+                    df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
+                    print(f"  🔍 市場フィルタリング適用後: {len(df_symbols)}銘柄 (ETF/REIT等を除外)")
+
+                invalid_tickers = load_invalid_tickers()
+                if invalid_tickers:
+                    df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
+                    print(f"  🔍 無効銘柄キャッシュ適用後: {len(df_symbols)}銘柄")
+
+                # --- インサイダー取引防止フィルタ ---
+                insider_codes = load_insider_exclusion_codes()
+                if insider_codes:
+                    before_count = len(df_symbols)
+                    df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
+                    excluded_count = before_count - len(df_symbols)
+                    print(f"  🚫 インサイダー除外適用後: {len(df_symbols)}銘柄 ({excluded_count}銘柄を除外)")
+
+                held_codes = [str(p['code']) for p in portfolio]
+                targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
             except Exception as e:
-                print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
-                if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
-                    new_invalids = set(chunk)
-                    invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
-                    save_invalid_tickers(invalid_tickers)
-                continue
+                print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
+                should_continue_scan = False
 
-        if not data_dfs:
-            print("⚠️ データの取得に完全に失敗しました。")
-            send_discord_notify("⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
+            if should_continue_scan:
+                tickers = [f"{code}.T" for code in targets]
+                print(f"\n--- 📈 数学的スクリーニング ({len(tickers)}銘柄) ---")
 
-        data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
-        
-        try:
-            last_update = data_df.index[-1]
-            if last_update.tzinfo is None:
-                last_update = JST.localize(last_update)
-            
-            age = datetime.now(JST) - last_update
-            if age.total_seconds() > 3600: 
-                 msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。安全のため買付を見送ります。"
-                 print(msg)
-                 send_discord_notify(msg)
-                 time.sleep(MONITOR_INTERVAL_SEC)
-                 continue
-        except Exception as e:
-            print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
+                data_dfs = []
+                chunk_size = 100 
 
-        print("✅ データ取得完了。評価アルゴリズムを実行します...")
-        
-        top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
-        
-        if not top_candidates:
-            print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
-            time.sleep(MONITOR_INTERVAL_SEC)
-            continue
+                print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
+                import random
+                for i in range(0, len(tickers), chunk_size):
+                    chunk = tickers[i:i + chunk_size]
+                    try:
+                        chunk_df = yf.download(chunk, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
+                        if chunk_df is not None and not chunk_df.empty:
+                            if isinstance(chunk_df.columns, pd.MultiIndex):
+                                data_dfs.append(chunk_df)
+                        time.sleep(random.uniform(1.0, 2.5)) 
+                    except Exception as e:
+                        print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
+                        if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
+                            new_invalids = set(chunk)
+                            invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
+                            save_invalid_tickers(invalid_tickers)
+                        continue
 
-        print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
-        best_target = None
-        
-        for item in top_candidates[:1]: # M-2: スコア1位のみ判定しブロッキング削減
-            print(f"審査中: {item['code']} {item['name']} (スコア: {item['score']:.1f})")
-            news = get_recent_news(item['code'], item['name'])
-            
-            if not news or news == "ニュースなし":
-                print("  -> ニュースなし(問題なしと判断)")
-                best_target = item
-                break
+                if not data_dfs:
+                    print("⚠️ データの取得に完全に失敗しました。")
+                    send_discord_notify("⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
+                    should_continue_scan = False
+
+            if should_continue_scan:
+                data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
                 
-            is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
-            if is_safe:
-                print(f"  -> ✅ 合格 (悪材料なし)")
-                best_target = item
-                break
-            else:
-                print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
-
-        if best_target:
-            # C-2修正: atr <= 0 も明示的にガード（元のコードでも risk_per_share > 0 チェックで防げていたが、早期リジェクトで明確化）
-            if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0 or best_target['atr'] <= 0:
-                print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={best_target['price']}, atr={best_target['atr']})")
-                send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
-                print(f"\n💤 ポジション監視のみ継続します...")
-                last_scan_time = loop_start_time + SCAN_INTERVAL_SEC  # スキャン遅延
-                time.sleep(MONITOR_INTERVAL_SEC)
-                continue
-                
-            raw_price = float(best_target['price'])
-            buy_price = raw_price * 1.001 
-            atr = float(best_target['atr'])
-            
-            total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-            risk_amount = total_equity * MAX_RISK_PER_TRADE
-            
-            current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-            risk_per_share = atr * current_sl_mult
-            
-            ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
-            
-            max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
-            max_shares_by_allocation = int(max_investment_amount // buy_price)
-
-            max_shares_by_cash = int(account['cash'] // buy_price)
-            raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
-            
-            shares_to_buy = (raw_shares // 100) * 100
-            cost = buy_price * shares_to_buy
-            # C-1修正: 論理矛盾していたデッドコードを整理。手数料バッファ(0.3%)を確保した上で余力チェック(H-1修正)
-            COMMISSION_BUFFER = 1.003  # 手数料・スリッページ用0.3%バッファ
-            
-            if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
-                if is_sim:
-                    # --- シミュレーションモード: 即時約定とみなしてローカルを更新 ---
-                    print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                    print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
-                    notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
-                    send_discord_notify(notify_msg)
-                    actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
-                    account['cash'] -= cost  # シミュレーションのみローカル残高を更新
-                    portfolio.append({
-                        "code": best_target['code'], "name": best_target['name'],
-                        "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                        "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
-                        "current_price": round(buy_price, 1), "shares": shares_to_buy
-                    })
-                    if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
-                    if hasattr(broker, 'save_account'): broker.save_account(account)
-                else:
-                    # --- 本番APIモード: C-2修正: 約定確認後にのみポートフォリオ追加 ---
-                    order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
-                    if order_id:
-                        print(f"\n🏆 【注文送信】{regime}戦略: {best_target['code']} {best_target['name']} — 約定確認待ち...")
-                        send_discord_notify(f"⏳ 【注文送信】{best_target['code']} {best_target['name']} {shares_to_buy}株 — 約定確認中 (ID: {order_id})")
-                        # C-2: 売り同様、約定確認を必須とする
-                        details = broker.wait_for_execution(order_id)
-                        if details and details.get('State') == 6:
-                            # 約定完了: 実際の約定価格をAPIから取得
-                            exec_price = float(details.get('Price', 0))
-                            if exec_price == 0:
-                                # 成行注文時は Price が 0 になるため、約定明細から平均価格を算出するか推定値を使用
-                                exec_price = buy_price
-                                exec_details = details.get('Details', [])
-                                if exec_details:
-                                    total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
-                                    total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
-                                    if total_qty > 0:
-                                        exec_price = total_val / total_qty
-                            
-                            # 一部約定時は実際の約定数量を取得
-                            actual_qty = int(details.get('Qty', shares_to_buy))
-                            exec_cost = exec_price * actual_qty
-                            
-                            print(f"✅ 約定完了: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
-                            notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
-                            send_discord_notify(notify_msg)
-                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
-                            # C-1: 本番モードではローカル残高を手動操作しない。
-                            # account はループ先頭の broker.get_account_balance() で最新化される。
-                            portfolio.append({
-                                "code": best_target['code'], "name": best_target['name'],
-                                "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
-                                "current_price": round(exec_price, 1), "shares": actual_qty
-                            })
-                            if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
-                            # account はAPIから正確な値が返るため、ここでは保存しない
-                        else:
-                            state_val = details.get('State') if details else 'timeout'
-                            msg = f"⚠️ 【注文未約定】{best_target['code']}の買付注文が約定しませんでした (State: {state_val})。次サイクルで再確認します。"
-                            print(msg)
-                            send_discord_notify(msg)
-                    else:
-                        msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
+                try:
+                    last_update = data_df.index[-1]
+                    if last_update.tzinfo is None:
+                        last_update = JST.localize(last_update)
+                    
+                    age = datetime.now(JST) - last_update
+                    if age.total_seconds() > 3600: 
+                        msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。安全のため買付を見送ります。"
                         print(msg)
                         send_discord_notify(msg)
-            else:
-                if shares_to_buy < 100:
-                    msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — ボラティリティ過大(ATR:{atr:.1f})のためリスク管理制限で買付キャンセル。"
-                    print(f"\n{msg}")
-                    send_discord_notify(msg)
+                        should_continue_scan = False
+                except Exception as e:
+                    print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
+
+            if should_continue_scan:
+                print("✅ データ取得完了。評価アルゴリズムを実行します...")
+                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
+                
+                if not top_candidates:
+                    print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
+                    should_continue_scan = False
+
+            if should_continue_scan:
+                print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
+                best_target = None
+                
+                for item in top_candidates[:1]:
+                    print(f"審査中: {item['code']} {item['name']} (スコア: {item['score']:.1f})")
+                    news = get_recent_news(item['code'], item['name'])
+                    
+                    if not news or news == "ニュースなし":
+                        print("  -> ニュースなし(問題なしと判断)")
+                        best_target = item
+                        break
+                        
+                    is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
+                    if is_safe:
+                        print(f"  -> ✅ 合格 (悪材料なし)")
+                        best_target = item
+                        break
+                    else:
+                        print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
+
+                if best_target:
+                    if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0 or best_target['atr'] <= 0:
+                        print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={best_target['price']}, atr={best_target['atr']})")
+                        send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
+                        last_scan_time = loop_start_time
+                        should_continue_scan = False
                 else:
-                    msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 現金不足 ({cost:,.0f}円必要 / 残高{account['cash']:,.0f}円)。"
-                    print(f"\n{msg}")
-                    send_discord_notify(msg)
-        else:
-            print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
-            send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
-            
+                    print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
+                    send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
+                    should_continue_scan = False
+
+            if should_continue_scan and best_target:
+                raw_price = float(best_target['price'])
+                buy_price = raw_price * 1.001 
+                atr = float(best_target['atr'])
+                
+                total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                risk_amount = total_equity * MAX_RISK_PER_TRADE
+                
+                current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+                risk_per_share = atr * current_sl_mult
+                
+                ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+                
+                max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                max_shares_by_allocation = int(max_investment_amount // buy_price)
+
+                # 手数料バッファ(0.3%)を確保した上で余力チェック
+                COMMISSION_BUFFER = 1.003  
+                max_shares_by_cash = int((account['cash'] / COMMISSION_BUFFER) // buy_price)
+                raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
+                
+                shares_to_buy = (raw_shares // 100) * 100
+                cost = buy_price * shares_to_buy
+                
+                if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
+                    if is_sim:
+                        print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
+                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 概算代金: {cost:,.0f}円 (ATR: {atr:.1f})")
+                        notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
+                        send_discord_notify(notify_msg)
+                        actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
+                        account['cash'] -= cost
+                        portfolio.append({
+                            "code": best_target['code'], "name": best_target['name'],
+                            "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                            "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
+                            "current_price": round(buy_price, 1), "shares": shares_to_buy
+                        })
+                        if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
+                        if hasattr(broker, 'save_account'): broker.save_account(account)
+                    else:
+                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
+                        if order_id:
+                            print(f"\n🏆 【注文送信】{regime}戦略: {best_target['code']} {best_target['name']} — 約定確認待ち...")
+                            send_discord_notify(f"⏳ 【注文送信】{best_target['code']} {best_target['name']} {shares_to_buy}株 — 約定確認中 (ID: {order_id})")
+                            details = broker.wait_for_execution(order_id)
+                            if details and details.get('State') == 6:
+                                exec_price = float(details.get('Price', 0))
+                                if exec_price == 0:
+                                    exec_price = buy_price
+                                    exec_details = details.get('Details', [])
+                                    if exec_details:
+                                        total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
+                                        total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
+                                        if total_qty > 0:
+                                            exec_price = total_val / total_qty
+                                
+                                actual_qty = int(details.get('Qty', shares_to_buy))
+                                exec_cost = exec_price * actual_qty
+                                
+                                print(f"✅ 約定完了: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
+                                notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
+                                send_discord_notify(notify_msg)
+                                actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
+                                portfolio.append({
+                                    "code": best_target['code'], "name": best_target['name'],
+                                    "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                    "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
+                                    "current_price": round(exec_price, 1), "shares": actual_qty
+                                })
+                                if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
+                            else:
+                                state_val = details.get('State') if details else 'timeout'
+                                msg = f"⚠️ 【注文未約定】{best_target['code']}の買付注文が約定しませんでした (State: {state_val})。次サイクルで再確認します。"
+                                print(msg)
+                                send_discord_notify(msg)
+                        else:
+                            msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
+                            print(msg)
+                            send_discord_notify(msg)
+                else:
+                    if shares_to_buy < 100:
+                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — ボラティリティ過大(ATR:{atr:.1f})のためリスク管理制限で買付キャンセル。"
+                        print(f"\n{msg}")
+                        send_discord_notify(msg)
+                    else:
+                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 現金不足 ({cost:,.0f}円必要 / 残高{account['cash']:,.0f}円)。"
+                        print(f"\n{msg}")
+                        send_discord_notify(msg)
+
         summary_record = {
             "time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
             "actions": actions_taken,
