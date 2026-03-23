@@ -65,6 +65,8 @@ def safe_read_csv(path):
         return pd.DataFrame()
     try:
         return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
     except Exception as e:
         print(f"⚠️ [Data Recovery] CSVファイル {path} の読み込みに失敗しました({e})。空のデータとして処理します。")
         return pd.DataFrame()

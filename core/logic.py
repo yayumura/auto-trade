@@ -137,10 +137,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 current_price_raw = float(df['Close'].iloc[-1])
                 
             # [V2-C3] ストップ高/安張り付き（流動性枯渇）のフェイルセーフ
+            is_volume_zero = False
             if 'Volume' in df.columns and float(df['Volume'].iloc[-1]) == 0:
-                print(f"⚠️ [{code}] 最新足の出来高が0です（ストップ高/安・特別気配等）。売却依頼を見送ります。")
-                remaining_portfolio.append(p)
-                continue
+                is_volume_zero = True
+
 
             # --- ATR(Average True Range)の計算 ---
             tr1 = df['High'] - df['Low']
@@ -178,11 +178,18 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             else:
                 highest_price = highest_price_db
 
+            # [AI改善策2] +0.00%固定化バグの修正: ポートフォリオの現在値をライブデータで常時更新する
+            p['current_price'] = round(current_price_raw / split_ratio if split_ratio > 0 else current_price_raw, 1)
+
+
             profit_pct = (current_price - buy_price) / buy_price
             split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
             print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
 
             if sell_reason:
+                if is_volume_zero:
+                    print(f"⚠️ [{code}] 出来高0(特別気配等)ですが、{sell_reason} のため決済注文を強行します。")
+
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
                 if is_simulation:
                     actual_qty = int(p['shares'])
@@ -223,16 +230,20 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 # 実際の約定値に基づいて損益計算
                 gross_profit = (exec_price - buy_price) * actual_qty
                 tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
-                net_profit = gross_profit - tax_amount 
                 
-                # ✅ SIMモードの場合は売却手数料(約0.3%)も差し引いて現実の口座に近づける
+                # ✅ SIMモードの場合は売却手数料(最近のゼロ手数料コースを考慮し0.000とする)
                 if is_simulation:
-                    COMMISSION_RATE = 0.003
+                    COMMISSION_RATE = 0.000  # [AI改善策1] 手数料ゼロコースに合わせてコストを排除
                     sell_commission = int((exec_price * actual_qty) * COMMISSION_RATE)
+                    buy_commission = int((buy_price * actual_qty) * COMMISSION_RATE)
                     sale_proceeds = (exec_price * actual_qty) - tax_amount - sell_commission
+                    net_profit = gross_profit - tax_amount - sell_commission - buy_commission
+
                 else:
                     # 実運用時はAPIが正のためそのまま計算ベースとして扱う
                     sale_proceeds = (exec_price * actual_qty) - tax_amount
+                    net_profit = gross_profit - tax_amount 
+
                 
                 if is_simulation:
                     account['cash'] += sale_proceeds
@@ -325,8 +336,8 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
             daily_avg_trade_value = (df['Volume'].sum() / days_available) * latest['Close']
             
             # --- [Phase 12] 流動性・スパイクガード ---
-            # 1. 売買代金制限 (3億円以上)
-            if latest['Close'] < 100 or daily_avg_trade_value < 300000000:
+            # 1. 売買代金制限 (10億円以上)
+            if latest['Close'] < 100 or daily_avg_trade_value < 1000000000:
                 continue 
 
             # 2. スパイク・ガード: 直近15分で異常な価格変化(5%以上)がないか
@@ -363,6 +374,9 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
                 if latest['Close'] > latest['SMA20']: continue 
                 if latest['Close'] > latest['BB_Lower']: continue 
                 if latest['RSI'] > 35: continue
+                # [AI改善策3] 落ちるナイフを防ぐため、直近足が陽線(Open < Close)であることを要求
+                if 'Open' in df.columns and latest['Close'] <= latest['Open']: continue
+
                 vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
                 
                 deviation_depth = abs(latest['Deviation']) * 100

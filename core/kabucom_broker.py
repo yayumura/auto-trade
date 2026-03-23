@@ -121,8 +121,9 @@ class KabucomBroker(BaseBroker):
         if not self.token: 
             raise ConnectionError("認証トークンがないためポジションを取得できません")
         
-        # 1. APIから最新のポジションを取得
-        url = f"{self.base_url}/positions?product=0" # 0: 現物
+        # 1. APIから最新の信用ポジションを取得 (デイトレード信用対応)
+        url = f"{self.base_url}/positions?product=2" # 2: 信用
+
         api_positions = None
         for retry in [False, True]:
             try:
@@ -188,22 +189,27 @@ class KabucomBroker(BaseBroker):
         """
         if not self.token: return None
         
-        url = f"{self.base_url}/sendorder"
+        # デイトレ信用 (一般信用デイトレ) 対応マッピング
+        # side: "2" (買) -> CashMargin: 2 (新規)
+        # side: "1" (売) -> CashMargin: 3 (返済)
+        cash_margin = 2 if side == "2" else 3
+        
         data = {
             "Password": self.password,
             "Symbol": code,
             "Exchange": 1,      # 1: 東証
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
-            "CashMargin": 1,    # 1: 新規（現物買）or 返済（現物売）
-            "MarginTradeType": 1, 
-            "DelivType": 2,     # 2: お預り金（現物買の場合必須）
-            "AccountType": 4,   # 4: 特定口座
+            "CashMargin": cash_margin,  # 2: 新規(買建), 3: 返済(売埋)
+            "MarginTradeType": 3,       # 3: 一般信用(買建/売建)デイトレード
+            "DelivType": 0,             # 0: 指定なし (信用取引時は0)
+            "AccountType": 4,           # 4: 特定口座
             "Qty": shares,
-            "FrontOrderType": 10, # 10: 成行
-            "Price": 0,         # 成行なので0
-            "ExpireDay": 0      # 当日限り
+            "FrontOrderType": 10,       # 10: 成行
+            "Price": 0,                 # 成行なので0
+            "ExpireDay": 0              # 当日限り
         }
+
         
         try:
             res = requests.post(url, headers=self._get_headers(), json=data, timeout=10)

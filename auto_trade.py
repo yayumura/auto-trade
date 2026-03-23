@@ -273,8 +273,9 @@ def _main_exec():
             should_scan = False
         elif now_time < datetime.strptime("09:30", "%H:%M").time() and not DEBUG_MODE:
             should_scan = False
-        elif now_time >= datetime.strptime("14:30", "%H:%M").time():
+        elif now_time >= datetime.strptime("14:00", "%H:%M").time():
             should_scan = False
+
         else:
             now_time_sec = time.time()
             if (now_time_sec - last_scan_time) < SCAN_INTERVAL_SEC:
