@@ -210,7 +210,7 @@ class KabucomBroker(BaseBroker):
             "ExpireDay": 0              # 当日限り
         }
 
-        
+        url = f"{self.base_url}/sendorder"
         try:
             res = requests.post(url, headers=self._get_headers(), json=data, timeout=10)
             if res.status_code == 200:
@@ -284,12 +284,8 @@ class KabucomBroker(BaseBroker):
                     leaves_qty = details.get('LeavesQty', 0)
                     print(f"⚠️ 注文 ID: {order_id} 一部約定 ({cum_qty}株約定, 残{leaves_qty}株)。残りの注文を取消します。")
                     # 残りの注文をキャンセルする
-                    try:
-                        cancel_url = f"{self.base_url}/cancelorder"
-                        cancel_data = {"OrderId": order_id, "Password": self.password}
-                        requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
-                    except Exception as ce:
-                        print(f"⚠️ 残注文の取消に失敗（手動確認要）: {ce}")
+                    if not self.cancel_order(order_id):
+                        print(f"⚠️ 残注文の取消に失敗（手動確認要）")
                     # 一部約定を全部約定たこととしてdetailsを返すが、Phase上位に一部約定であることを通知
                     details['_partial'] = True
                     details['State'] = 6  # 上位の約定チェックが State==6 を期待するため
@@ -300,13 +296,10 @@ class KabucomBroker(BaseBroker):
                     return details
             time.sleep(2)
         print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。ゾンビ処理化を防ぐため取消要求を送信します。")
-        try:
-            cancel_url = f"{self.base_url}/cancelorder"
-            cancel_data = {"OrderId": order_id, "Password": self.password}
-            requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
+        if self.cancel_order(order_id):
             print("✅ タイムアウト注文の強制取消要求を送信しました。")
-        except Exception as e:
-            print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）: {e}")
+        else:
+            print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）")
             
         # --- [V2-C2] 取消完了の確認ポーリングを追加 ---
         print(f"⏳ 注文 ID: {order_id} の取消完了を待機中...")

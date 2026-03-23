@@ -185,6 +185,9 @@ def _main_exec():
     SCAN_INTERVAL_SEC = 900   # スキャン間隔（15分）
     MONITOR_INTERVAL_SEC = 30 # ポジション監視間隔（30秒）
 
+    # [Day 2 Ops] タイムアウトによりキャンセル要求済みの注文IDをキャッシュする（連打防止）
+    canceled_orders = set()
+
     while True:
         loop_start_time = time.time()
         # --- [Phase 14] Server Time Sync ---
@@ -230,9 +233,13 @@ def _main_exec():
                                 duration_mins = (datetime.now(JST) - order_time).total_seconds() / 60
                                 
                                 if duration_mins >= 5.0:
+                                    if order_id in canceled_orders:
+                                        has_stuck_order = True
+                                        continue
                                     print(f"🚨 【タイムアウト】注文ID: {order_id} は発注から {duration_mins:.1f} 分経過しましたが約定していません。")
                                     print(f"🔄 ゾンビ化と完全フリーズを防ぐため、強制オートキャンセルを実行します。")
-                                    broker.cancel_order(order_id)
+                                    if broker.cancel_order(order_id):
+                                        canceled_orders.add(order_id)
                                     send_discord_notify(f"🚨 【オートキャンセル発動】注文ID: {order_id} が5分以上約定しないため、システムが自力で取り消しました（資金拘束解除）。")
                                     has_stuck_order = True
                             except Exception as e:
