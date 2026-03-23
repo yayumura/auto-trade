@@ -231,6 +231,26 @@ class KabucomBroker(BaseBroker):
             print(f"⚠️ 注文通信エラー: {e}")
             return None
 
+    def cancel_order(self, order_id: str) -> bool:
+        """ API経由で注文を取り消す (オートキャンセル機構用) """
+        if not self.token: return False
+        cancel_url = f"{self.base_url}/cancelorder"
+        cancel_data = {"OrderId": order_id, "Password": self.password}
+        try:
+            res = requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
+            if res.status_code == 200:
+                order_res = res.json()
+                if order_res.get('Result') == 0:
+                    return True
+                else:
+                    print(f"⚠️ 取消要求失敗: {order_res}")
+                    return False
+            else:
+                return False
+        except Exception as e:
+            print(f"⚠️ 取消要求通信エラー: {e}")
+            return False
+
     def get_order_details(self, order_id: str) -> dict:
         """ 注文詳細（ステータス・約定単価等）を取得する """
         if not self.token or not order_id: return None

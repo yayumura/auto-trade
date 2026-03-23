@@ -42,6 +42,10 @@ class SimulationBroker(BaseBroker):
         import time
         return f"SIM-{int(time.time())}"
 
+    def cancel_order(self, order_id: str) -> bool:
+        """ シミュレーションでは即キャンセル成功とする """
+        return True
+
     def log_trade(self, trade_record: dict):
         write_header = not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0
         df = pd.DataFrame([trade_record])

@@ -3,6 +3,7 @@ import json
 import tempfile
 import pandas as pd
 import time
+import shutil
 from functools import wraps
 
 def retry_io(max_retries=5, delay=0.1):
@@ -70,3 +71,20 @@ def safe_read_csv(path):
     except Exception as e:
         print(f"⚠️ [Data Recovery] CSVファイル {path} の読み込みに失敗しました({e})。空のデータとして処理します。")
         return pd.DataFrame()
+
+@retry_io()
+def rotate_csv_if_large(filepath, max_size_mb=2):
+    """ファイルサイズが増大した場合に、アーカイブフォルダへ退避させます。"""
+    if not os.path.exists(filepath):
+        return
+    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+    if size_mb > max_size_mb:
+        dir_name = os.path.dirname(filepath)
+        archive_dir = os.path.join(dir_name, "archive")
+        os.makedirs(archive_dir, exist_ok=True)
+        base_name = os.path.basename(filepath)
+        name, ext = os.path.splitext(base_name)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        archive_path = os.path.join(archive_dir, f"{name}_{timestamp}{ext}")
+        shutil.move(filepath, archive_path)
+        print(f"📦 [Archive] ログ肥大化防止: {base_name} が {max_size_mb}MB を超過したため、{archive_dir} へ退避・初期化しました。")

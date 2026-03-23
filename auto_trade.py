@@ -139,6 +139,11 @@ def _main_exec():
     
     setup_logging()
     
+    # [Day 2 Ops] CSV肥大化防止のアーカイブ処理
+    from core.file_io import rotate_csv_if_large
+    rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=2)
+    rotate_csv_if_large(HISTORY_FILE, max_size_mb=2)
+    
     # --- 1. Brokerの初期化 ---
     from core.sim_broker import SimulationBroker
     from core.kabucom_broker import KabucomBroker
@@ -213,6 +218,31 @@ def _main_exec():
             try:
                 active_orders = broker.get_active_orders()
                 if active_orders:
+                    # ✅ [Day 2 Ops] 未約定注文のオートキャンセル（5分滞留）
+                    has_stuck_order = False
+                    for order in active_orders:
+                        order_id = order.get('ID')
+                        recv_time_str = order.get('RecvTime')
+                        if order_id and recv_time_str:
+                            try:
+                                clean_time_str = recv_time_str[:19].replace("T", " ")
+                                order_time = datetime.strptime(clean_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST)
+                                duration_mins = (datetime.now(JST) - order_time).total_seconds() / 60
+                                
+                                if duration_mins >= 5.0:
+                                    print(f"🚨 【タイムアウト】注文ID: {order_id} は発注から {duration_mins:.1f} 分経過しましたが約定していません。")
+                                    print(f"🔄 ゾンビ化と完全フリーズを防ぐため、強制オートキャンセルを実行します。")
+                                    broker.cancel_order(order_id)
+                                    send_discord_notify(f"🚨 【オートキャンセル発動】注文ID: {order_id} が5分以上約定しないため、システムが自力で取り消しました（資金拘束解除）。")
+                                    has_stuck_order = True
+                            except Exception as e:
+                                print(f"⚠️ 注文時間のパースエラー: {e}")
+
+                    if has_stuck_order:
+                        print("⏳ キャンセル処理を行ったため、反映を待機します...")
+                        time.sleep(10)
+                        continue
+                        
                     msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注事故を防ぐため、約定または取消されるまでスキャンを待機します。"
                     print(msg)
                     send_discord_notify(msg)
