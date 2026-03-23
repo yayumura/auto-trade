@@ -24,7 +24,13 @@ class SimulationBroker(BaseBroker):
         return df.to_dict('records') if not df.empty else []
 
     def save_positions(self, portfolio: list):
-        df = pd.DataFrame(portfolio)
+        if not portfolio:
+            df = pd.DataFrame(columns=[
+                'code', 'name', 'buy_time', 'buy_price', 
+                'highest_price', 'current_price', 'shares'
+            ])
+        else:
+            df = pd.DataFrame(portfolio)
         atomic_write_csv(PORTFOLIO_FILE, df)
 
     def save_portfolio(self, portfolio: list):

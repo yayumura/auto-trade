@@ -324,7 +324,7 @@ def _main_exec():
                 for i in range(0, len(tickers), chunk_size):
                     chunk = tickers[i:i + chunk_size]
                     try:
-                        chunk_df = yf.download(chunk, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
+                        chunk_df = yf.download(chunk, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
                         if chunk_df is not None and not chunk_df.empty:
                             if isinstance(chunk_df.columns, pd.MultiIndex):
                                 data_dfs.append(chunk_df)
@@ -426,16 +426,14 @@ def _main_exec():
                 
                 if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
                     if is_sim:
-                        # 実質コスト（手数料バッファ込）を計算
-                        total_sim_cost = cost * COMMISSION_BUFFER
                         print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円 (実質: {total_sim_cost:,.0f}円)")
+                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円")
                         notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
                         send_discord_notify(notify_msg)
                         actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
                         
-                        # ✅ 手数料込のコストを引くことで、SIM成績の非現実的な上振れを防ぐ
-                        account['cash'] -= total_sim_cost
+                        # ✅ 手数料ゼロ化に伴い、代金分のみを現金から引く
+                        account['cash'] -= cost
                         portfolio.append({
                             "code": best_target['code'], "name": best_target['name'],
                             "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
