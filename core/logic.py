@@ -5,6 +5,7 @@ from datetime import datetime
 
 import json
 import os
+import time
 from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
@@ -80,7 +81,6 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     
     # ✅ try-exceptで囲み、一時的な通信エラーでBOTが落ちるのを防ぐ
     data = None
-    import time
     for retry in range(3):
         try:
             data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
@@ -91,9 +91,6 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
     if data is None or data.empty:
         print("⚠️ 規定回数リトライしましたがデータが取得できませんでした(次回リトライへ持ち越し)")
-        return portfolio, account, actions, trade_logs
-
-    if data is None or data.empty:
         return portfolio, account, actions, trade_logs
 
     remaining_portfolio = []

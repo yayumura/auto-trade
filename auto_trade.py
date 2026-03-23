@@ -25,7 +25,6 @@ class MarketPhase(Enum):
 
 def get_market_phase(now_time) -> MarketPhase:
     """現在時刻から市場のフェーズを判定する"""
-    from datetime import datetime
     t900 = datetime.strptime("09:00", "%H:%M").time()
     t1130 = datetime.strptime("11:30", "%H:%M").time()
     t1230 = datetime.strptime("12:30", "%H:%M").time()
@@ -417,8 +416,9 @@ def _main_exec():
                 max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
                 max_shares_by_allocation = int(max_investment_amount // buy_price)
 
-                # 手数料完全無料前提で余力チェックバッファを撤廃（1.000）し資金効率を最大化
-                COMMISSION_BUFFER = 1.000  
+                # 手数料完全無料前提だが、float演算誤差による資金不足判定を防ぐ極小のバッファ
+                COMMISSION_BUFFER = 1.0001  
+
 
                 max_shares_by_cash = int((account['cash'] / COMMISSION_BUFFER) // buy_price)
                 raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
