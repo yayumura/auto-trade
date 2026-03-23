@@ -133,6 +133,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             buy_price = float(p.get('buy_price', 0)) * split_ratio
             highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
 
+            # 【AI指摘対応】株式分割時に保有株数も逆数で補正する
+            if split_ratio < 0.99:
+                original_shares = int(p.get('shares', 0))
+                p['shares'] = int(original_shares / split_ratio)
+                print(f"🔄 [{code}] 株式分割を検知: {original_shares}株 -> {p['shares']}株 に価格と共に補正しました。")
+
             # --- [Phase 13] 価格入力の階層化 (Price Input Hierarchy) ---
             # 証券会社API由来のリアルタイム価格(p['current_price'])がある場合は、yfinanceの遅延データより優先する
             api_price = p.get('current_price')

@@ -5,7 +5,7 @@ import pandas as pd
 import time
 from functools import wraps
 
-def retry_io(max_retries=3, delay=0.1):
+def retry_io(max_retries=5, delay=0.1):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
