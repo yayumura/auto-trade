@@ -237,7 +237,7 @@ class KabucomBroker(BaseBroker):
         cancel_url = f"{self.base_url}/cancelorder"
         cancel_data = {"OrderId": order_id, "Password": self.password}
         try:
-            res = requests.post(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
+            res = requests.put(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
             if res.status_code == 200:
                 order_res = res.json()
                 if order_res.get('Result') == 0:
