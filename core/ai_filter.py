@@ -95,8 +95,12 @@ def _ai_qualitative_filter_core(code, name, news_text):
 def ai_qualitative_filter(code, name, news_text, timeout=10):
     """V2-M2: APIやネットワークのスタックを防ぐため、安全にAI判定を実行する"""
     try:
-        # スレッドプールを使わず直接実行（requestsなどは内部でタイムアウト処理を持つ）
-        return _ai_qualitative_filter_core(code, name, news_text)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_ai_qualitative_filter_core, code, name, news_text)
+            return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        print(f"⚠️ {code} のAI判定が{timeout}秒以内に応答しませんでした。機会損失を防ぐため一時承認します。")
+        return True, "AI判定タイムアウトのため一時承認"
     except Exception as e:
         # 万が一クライアント内で長引いてエラーを吐いた場合の最後のセーフティネット
         print(f"⚠️ {code} のAI判定中に予期せぬエラーが発生しました。機会損失を防ぐため一時承認します: {e}")

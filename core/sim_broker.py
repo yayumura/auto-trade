@@ -37,7 +37,7 @@ class SimulationBroker(BaseBroker):
         """auto_trade.py との互換性のためのエイリアス（M-3修正）"""
         self.save_positions(portfolio)
 
-    def execute_market_order(self, code: str, shares: int, side: str) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
         """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
         import time
         return f"SIM-{int(time.time())}"

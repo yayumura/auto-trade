@@ -482,7 +482,8 @@ def _main_exec():
                         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         if hasattr(broker, 'save_account'): broker.save_account(account)
                     else:
-                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2")
+                        print(f"🛡️ 【安全機構】スリッページ上限価格（{buy_price:.1f}円）を伴う指値注文で買い付けます")
+                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2", price=buy_price)
                         if order_id:
                             print(f"\n🏆 【注文送信】{regime}戦略: {best_target['code']} {best_target['name']} — 約定確認待ち...")
                             send_discord_notify(f"⏳ 【注文送信】{best_target['code']} {best_target['name']} {shares_to_buy}株 — 約定確認中 (ID: {order_id})")

@@ -181,18 +181,16 @@ class KabucomBroker(BaseBroker):
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
         """
-        現物の成行注文（買い/売り）を発注する純粋APIラッパー。
+        現物の成行・指値注文（買い/売り）を発注する純粋APIラッパー。
         成功時は OrderId を返し、失敗時は None を返すようにシグネチャを変更。
         side: "1" (売), "2" (買)
         """
         if not self.token: return None
         
-        # デイトレ信用 (一般信用デイトレ) 対応マッピング
-        # side: "2" (買) -> CashMargin: 2 (新規)
-        # side: "1" (売) -> CashMargin: 3 (返済)
         cash_margin = 2 if side == "2" else 3
+        front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         
         data = {
             "Password": self.password,
@@ -200,56 +198,68 @@ class KabucomBroker(BaseBroker):
             "Exchange": 1,      # 1: 東証
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
-            "CashMargin": cash_margin,  # 2: 新規(買建), 3: 返済(売埋)
-            "MarginTradeType": 3,       # 3: 一般信用(買建/売建)デイトレード
-            "DelivType": 0,             # 0: 指定なし (信用取引時は0)
-            "AccountType": 4,           # 4: 特定口座
+            "CashMargin": cash_margin,
+            "MarginTradeType": 3,
+            "DelivType": 0,
+            "AccountType": 4,   # 4: 特定口座
             "Qty": shares,
-            "FrontOrderType": 10,       # 10: 成行
-            "Price": 0,                 # 成行なので0
-            "ExpireDay": 0              # 当日限り
+            "FrontOrderType": front_order_type,
+            "Price": int(price),
+            "ExpireDay": 0      # 当日限り
         }
 
         url = f"{self.base_url}/sendorder"
-        try:
-            res = requests.post(url, headers=self._get_headers(), json=data, timeout=10)
-            if res.status_code == 200:
-                order_res = res.json()
-                if order_res.get('Result') == 0:
-                    order_id = order_res.get('OrderId')
-                    env = "【本番】" if self.is_production else "【検証API】"
-                    act = "買い" if side == "2" else "売り"
-                    print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act}")
-                    return order_id
+        
+        for retry in [False, True]:
+            try:
+                res = requests.post(url, headers=self._get_headers(force_refresh=retry), json=data, timeout=10)
+                if res.status_code == 200:
+                    order_res = res.json()
+                    if order_res.get('Result') == 0:
+                        order_id = order_res.get('OrderId')
+                        env = "【本番】" if self.is_production else "【検証API】"
+                        act = "買い" if side == "2" else "売り"
+                        otype = "指値" if price > 0 else "成行"
+                        print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
+                        return order_id
+                    else:
+                        print(f"⚠️ 注文拒否: {order_res}")
+                        return None
+                elif res.status_code == 401 and not retry:
+                    print("🔄 [API] トークン期限切れ(401)を検知。再認証して注文をリトライします...")
+                    continue
                 else:
-                    print(f"⚠️ 注文拒否: {order_res}")
+                    print(f"⚠️ 注文HTTPエラー: {res.status_code} {res.text}")
                     return None
-            else:
-                print(f"⚠️ 注文HTTPエラー: {res.status_code} {res.text}")
+            except Exception as e:
+                print(f"⚠️ 注文通信エラー: {e}")
                 return None
-        except Exception as e:
-            print(f"⚠️ 注文通信エラー: {e}")
-            return None
+        return None
 
     def cancel_order(self, order_id: str) -> bool:
         """ API経由で注文を取り消す (オートキャンセル機構用) """
         if not self.token: return False
         cancel_url = f"{self.base_url}/cancelorder"
         cancel_data = {"OrderId": order_id, "Password": self.password}
-        try:
-            res = requests.put(cancel_url, headers=self._get_headers(), json=cancel_data, timeout=10)
-            if res.status_code == 200:
-                order_res = res.json()
-                if order_res.get('Result') == 0:
-                    return True
+        
+        for retry in [False, True]:
+            try:
+                res = requests.put(cancel_url, headers=self._get_headers(force_refresh=retry), json=cancel_data, timeout=10)
+                if res.status_code == 200:
+                    order_res = res.json()
+                    if order_res.get('Result') == 0:
+                        return True
+                    else:
+                        print(f"⚠️ 取消要求失敗: {order_res}")
+                        return False
+                elif res.status_code == 401 and not retry:
+                    continue
                 else:
-                    print(f"⚠️ 取消要求失敗: {order_res}")
                     return False
-            else:
+            except Exception as e:
+                print(f"⚠️ 取消要求通信エラー: {e}")
                 return False
-        except Exception as e:
-            print(f"⚠️ 取消要求通信エラー: {e}")
-            return False
+        return False
 
     def get_order_details(self, order_id: str) -> dict:
         """ 注文詳細（ステータス・約定単価等）を取得する """
