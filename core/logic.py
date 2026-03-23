@@ -79,10 +79,18 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     tickers = [f"{p['code']}.T" for p in portfolio]
     
     # ✅ try-exceptで囲み、一時的な通信エラーでBOTが落ちるのを防ぐ
-    try:
-        data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=True, progress=False)
-    except Exception as e:
-        print(f"⚠️ 保有銘柄のデータ取得に一時的なエラーが発生しました(次回リトライ): {e}")
+    data = None
+    import time
+    for retry in range(3):
+        try:
+            data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
+            break
+        except Exception as e:
+            print(f"⚠️ 保有銘柄のデータ取得に一時的なエラー ({retry+1}/3): {e}")
+            time.sleep(2)
+
+    if data is None or data.empty:
+        print("⚠️ 規定回数リトライしましたがデータが取得できませんでした(次回リトライへ持ち越し)")
         return portfolio, account, actions, trade_logs
 
     if data is None or data.empty:

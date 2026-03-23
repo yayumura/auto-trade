@@ -402,8 +402,9 @@ def _main_exec():
 
             if should_continue_scan and best_target:
                 raw_price = float(best_target['price'])
-                buy_price = raw_price * 1.001 
                 atr = float(best_target['atr'])
+                buy_price = raw_price + (atr * 0.1)  # ATRベースのスリッページ（対称性確保）
+                
                 
                 total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
                 risk_amount = total_equity * MAX_RISK_PER_TRADE
@@ -416,8 +417,9 @@ def _main_exec():
                 max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
                 max_shares_by_allocation = int(max_investment_amount // buy_price)
 
-                # 手数料バッファ(0.3%)を確保した上で余力チェック
-                COMMISSION_BUFFER = 1.003  
+                # 手数料完全無料前提で余力チェックバッファを撤廃（1.000）し資金効率を最大化
+                COMMISSION_BUFFER = 1.000  
+
                 max_shares_by_cash = int((account['cash'] / COMMISSION_BUFFER) // buy_price)
                 raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
                 
