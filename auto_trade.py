@@ -235,10 +235,16 @@ def _main_exec():
                                 if duration_mins >= 5.0:
                                     cancel_count = canceled_orders.get(order_id, 0)
                                     if cancel_count >= 3:
-                                        msg = f"🚨 【要手動介入】注文 ID: {order_id} が3回取消要求しても消えません！証券アプリから状況を確認してください。"
-                                        print(msg)
-                                        send_discord_notify(msg)
-                                        has_stuck_order = True
+                                        # 【修正】通知は「ちょうど3回目」の時だけ送る（スパム防止）
+                                        if cancel_count == 3:
+                                            msg = f"🚨 【要手動介入】注文 ID: {order_id} が3回取消要求しても消えません！証券アプリから状況を確認してください。"
+                                            print(msg)
+                                            send_discord_notify(msg)
+                                        
+                                        # カウントを進めて次回以降の通知を抑制
+                                        canceled_orders[order_id] = cancel_count + 1
+                                        # has_stuck_order = True にしないことで、10sループに吸い込まれるのを防ぐ
+                                        # 後続の「未約定注文あり」ブロックで30s待機状態に移行させる
                                         continue
 
                                     print(f"🚨 【タイムアウト】注文ID: {order_id} は発注から {duration_mins:.1f} 分経過しましたが約定していません。")
