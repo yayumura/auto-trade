@@ -98,7 +98,7 @@ def release_lock():
 
 from core.logic import (
     detect_market_regime, manage_positions, select_best_candidates, 
-    load_invalid_tickers, save_invalid_tickers
+    load_invalid_tickers, save_invalid_tickers, normalize_tick_size
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -185,8 +185,8 @@ def _main_exec():
     SCAN_INTERVAL_SEC = 900   # スキャン間隔（15分）
     MONITOR_INTERVAL_SEC = 30 # ポジション監視間隔（30秒）
 
-    # [Day 2 Ops] タイムアウトによりキャンセル要求済みの注文IDをキャッシュする（連打防止）
-    canceled_orders = set()
+    # [Day 2 Ops] タイムアウトによりキャンセル要求済みの注文IDをキャッシュする（回数カウント付き）
+    canceled_orders = {}
 
     while True:
         loop_start_time = time.time()
@@ -233,14 +233,20 @@ def _main_exec():
                                 duration_mins = (datetime.now(JST) - order_time).total_seconds() / 60
                                 
                                 if duration_mins >= 5.0:
-                                    if order_id in canceled_orders:
+                                    cancel_count = canceled_orders.get(order_id, 0)
+                                    if cancel_count >= 3:
+                                        msg = f"🚨 【要手動介入】注文 ID: {order_id} が3回取消要求しても消えません！証券アプリから状況を確認してください。"
+                                        print(msg)
+                                        send_discord_notify(msg)
                                         has_stuck_order = True
                                         continue
+
                                     print(f"🚨 【タイムアウト】注文ID: {order_id} は発注から {duration_mins:.1f} 分経過しましたが約定していません。")
-                                    print(f"🔄 ゾンビ化と完全フリーズを防ぐため、強制オートキャンセルを実行します。")
+                                    print(f"🔄 ゾンビ化と完全フリーズを防ぐため、強制オートキャンセルを実行します（試行 {cancel_count + 1}/3）。")
                                     if broker.cancel_order(order_id):
-                                        canceled_orders.add(order_id)
-                                    send_discord_notify(f"🚨 【オートキャンセル発動】注文ID: {order_id} が5分以上約定しないため、システムが自力で取り消しました（資金拘束解除）。")
+                                        canceled_orders[order_id] = cancel_count + 1
+                                    
+                                    send_discord_notify(f"🚨 【オートキャンセル発動】注文ID: {order_id} が5分以上約定しないため、システムが取り消しを試行しました。")
                                     has_stuck_order = True
                             except Exception as e:
                                 print(f"⚠️ 注文時間のパースエラー: {e}")
@@ -439,7 +445,8 @@ def _main_exec():
             if should_continue_scan and best_target:
                 raw_price = float(best_target['price'])
                 atr = float(best_target['atr'])
-                buy_price = raw_price + (atr * 0.1)  # ATRベースのスリッページ（対称性確保）
+                # ATRベースのスリッページを加味し、呼値（Tick Size）に合わせて正規化（不利な方向に丸めて約定優先）
+                buy_price = normalize_tick_size(raw_price + (atr * 0.1), is_buy=True)
                 
                 
                 total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])

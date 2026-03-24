@@ -10,6 +10,33 @@ from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE,
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
 
+def normalize_tick_size(price: float, is_buy: bool) -> int:
+    """
+    東証の呼値ルールに合わせて指値価格を安全かつ有効な価格に丸める。
+    絶対に約定させたい(Marketable Limit Order)ため、あえて不利な方向
+    （買付なら上、売却なら下）の有効な呼値に丸めます。
+    """
+    p = float(price)
+    if p <= 3000:
+        tick = 1
+    elif p <= 5000:
+        tick = 5
+    elif p <= 10000:
+        tick = 10
+    elif p <= 30000:
+        tick = 50
+    elif p <= 50000:
+        tick = 100
+    else:
+        tick = 100 # 簡易版
+
+    if is_buy:
+        # 買付：指定価格以上の最小の呼値（切り上げ）
+        return int((p + tick - 0.0001) // tick * tick)
+    else:
+        # 売却：指定価格以下の最大の呼値（切り捨て）
+        return int(p // tick * tick)
+
 # --- 【中核1】レジーム（地合い）認識 ---
 def detect_market_regime():
     """
@@ -207,7 +234,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     exec_price = current_price
                 else:
                     if broker:
-                        order_id = broker.execute_market_order(code, int(p['shares']), side="1") # 1: 売り
+                        # [V2-M2] 決済時にもスリッページを制限した指値（Marketable Limit Order）を使用
+                        # ATRの半分(0.5)を下限価格として設定し、それより下では絶対に売らない防波堤を作る
+                        limit_sell_price = normalize_tick_size(current_price_raw - (atr * 0.5), is_buy=False)
+                        order_id = broker.execute_market_order(code, int(p['shares']), side="1", price=limit_sell_price) # 1: 売り
                         if not order_id:
                             print(f"⚠️ {code} の売却注文が証券会社APIで拒否・失敗しました。")
                             remaining_portfolio.append(p)
