@@ -377,11 +377,20 @@ def _main_exec():
                             if isinstance(chunk_df.columns, pd.MultiIndex):
                                 data_dfs.append(chunk_df)
                     except Exception as e:
-                        print(f"⚠️ 個別データ取得失敗 ({len(chunk)}銘柄): {e}")
-                        if "possibly delisted" in str(e).lower() or "not found" in str(e).lower():
-                            new_invalids = set(chunk)
-                            invalid_tickers.update([t.replace('.T', '') for t in new_invalids])
-                            save_invalid_tickers(invalid_tickers)
+                        print(f"⚠️ データ取得中にエラーが発生しました: {e}")
+                        err_msg = str(e).lower()
+                        if "possibly delisted" in err_msg or "not found" in err_msg:
+                            # [AI修正] チャンク全体ではなく、エラー文に含まれる特定の銘柄を抽出してブラックリストに入れる
+                            # 例: "['1949.T']: possibly delisted" から '1949' を抽出
+                            found_codes = re.findall(r"(\d{4})\.T", err_msg, re.IGNORECASE)
+                            if found_codes:
+                                print(f"🚫 以下の銘柄が無効または上場廃止の可能性があるためブラックリストに登録します: {found_codes}")
+                                invalid_tickers.update(found_codes)
+                                save_invalid_tickers(invalid_tickers)
+                            else:
+                                # 銘柄が特定できない場合は、念のため chunk の個別再試行を行うか、警告に留める
+                                # ここではリミットを考慮し、ブラックリスト入りは特定の銘柄が明示されている時のみとする
+                                pass
                     finally:
                         # ✅ エラーが起きても起きなくても必ずスリープし、IPブロックを防ぐ
                         time.sleep(random.uniform(1.0, 2.5))
@@ -392,7 +401,7 @@ def _main_exec():
                     should_continue_scan = False
 
             if should_continue_scan:
-                data_df = pd.concat(data_dfs, axis=1) if len(data_dfs) > 1 else data_dfs[0]
+                data_df = pd.concat(data_dfs, axis=1, sort=False) if len(data_dfs) > 1 else data_dfs[0]
                 
                 try:
                     last_update = data_df.index[-1]
@@ -438,10 +447,17 @@ def _main_exec():
                         print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
 
                 if best_target:
-                    if pd.isna(best_target['price']) or pd.isna(best_target['atr']) or best_target['price'] <= 0 or best_target['atr'] <= 0:
+                    # [AI修正] ATRの値そのものよりも、投資価格に対するATR比率（ボラティリティ）を重視してチェック
+                    atr_pct = (atr / raw_price) if raw_price > 0 else 0
+                    if pd.isna(raw_price) or pd.isna(atr) or raw_price <= 0 or atr <= 0:
                         print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={best_target['price']}, atr={best_target['atr']})")
                         send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
                         last_scan_time = loop_start_time
+                        should_continue_scan = False
+                    elif atr_pct > 0.10: # 例: 15分足ベースのATRが株価の10%を超えるような超激動銘柄は避ける
+                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 異常なボラティリティ検知(ATR比率:{atr_pct*100:.1f}%)。ギャンブル性が高いため見送ります。"
+                        print(f"\n{msg}")
+                        send_discord_notify(msg)
                         should_continue_scan = False
                 else:
                     print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
@@ -537,7 +553,10 @@ def _main_exec():
                             send_discord_notify(msg)
                 else:
                     if shares_to_buy < 100:
-                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — ボラティリティ過大(ATR:{atr:.1f})のためリスク管理制限で買付キャンセル。"
+                        # [AI修正] 指摘の通り、「ATR 18.9」などが異常なのではなく、100株単位の制約とリスク許容度のミスマッチであることを明示
+                        target_risk_yen = risk_amount
+                        required_risk_for_100_shares = (atr * current_sl_mult) * 100
+                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 資金管理上の制限。1単元(100株)のリスク量({required_risk_for_100_shares:,.0f}円)が、許容上限({target_risk_yen:,.0f}円/トレード)を超えています。"
                         print(f"\n{msg}")
                         send_discord_notify(msg)
                     else:
