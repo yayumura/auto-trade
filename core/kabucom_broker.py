@@ -169,15 +169,19 @@ class KabucomBroker(BaseBroker):
                 
                 highest_price = max(highest_price, current_price)
                 buy_time = hist.get('buy_time', "Real API Position")
+                # 【新規】分割利確済みフラグの復元
+                partial_sold = hist.get('partial_sold', False)
             else:
                 highest_price = current_price
                 buy_time = "Real API Position"
+                partial_sold = False
 
             final_positions.append({
                 "code": code_sym, "name": p['SymbolName'], "shares": int(p['LeavesQty']),
                 "buy_price": float(p['Price']), "current_price": current_price,
                 "highest_price": round(highest_price, 1),
-                "buy_time": buy_time
+                "buy_time": buy_time,
+                "partial_sold": partial_sold
             })
         return final_positions
 

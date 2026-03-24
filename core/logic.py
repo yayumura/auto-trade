@@ -195,19 +195,38 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             else:
                 current_price = current_price_raw
             
+            # 【新規】分割利確（スケールアウト）のステータス確認
+            is_partial_sold = p.get('partial_sold', False)
+            
+            # トレール幅を動的に変更（半分利確後はトレール幅を1.5倍に広げて大化けを狙う）
+            current_trail_mult = ATR_TRAIL * 1.5 if is_partial_sold else ATR_TRAIL
+
             sell_reason = None
             # レジームに応じた損切り倍率の選択
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+            
+            # 売却株数の決定（デフォルトは全株）
+            sell_qty = int(p['shares'])
             
             if is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif current_price <= buy_price - (atr * current_stop_loss_mult):
                 sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif current_price <= highest_price_db - (atr * ATR_TRAIL) and highest_price_db > buy_price:
+            elif current_price <= highest_price_db - (atr * current_trail_mult) and highest_price_db > buy_price:
                 if current_price > buy_price * 1.005: 
                     sell_reason = f"トレール利確 (Trailing Stop from {highest_price_db:.1f})"
                 else:
                     sell_reason = "建値撤退 (Break Even)"
+            # --- 【新規】分割利確ロジック ---
+            elif not is_partial_sold and current_price >= buy_price + (atr * 1.5):
+                # 利益がATRの1.5倍に乗ったら、確実な利益ロックのために半分だけ利確する
+                sell_reason = f"分割利確 (Scale-out TP at ATRx1.5)"
+                # 100株単位に丸める。最低100株。
+                half_qty = (int(p['shares']) // 2 // 100) * 100
+                if half_qty >= 100:
+                    sell_qty = half_qty
+                else:
+                    sell_qty = int(p['shares']) # 100株しか持っていない場合は全決済
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -230,14 +249,14 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
                 if is_simulation:
-                    actual_qty = int(p['shares'])
+                    actual_qty = sell_qty # 【修正】決定した売却株数を適用
                     exec_price = current_price
                 else:
                     if broker:
                         # [V2-M2] 決済時にもスリッページを制限した指値（Marketable Limit Order）を使用
                         # ATRの半分(0.5)を下限価格として設定し、それより下では絶対に売らない防波堤を作る
                         limit_sell_price = normalize_tick_size(current_price_raw - (atr * 0.5), is_buy=False)
-                        order_id = broker.execute_market_order(code, int(p['shares']), side="1", price=limit_sell_price) # 1: 売り
+                        order_id = broker.execute_market_order(code, sell_qty, side="1", price=limit_sell_price) # 【修正】sell_qty を指定
                         if not order_id:
                             print(f"⚠️ {code} の売却注文が証券会社APIで拒否・失敗しました。")
                             remaining_portfolio.append(p)
@@ -261,7 +280,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                                 if total_qty > 0:
                                     exec_price = total_val / total_qty
                         
-                        actual_qty = int(details.get('Qty', p['shares']))
+                        actual_qty = int(details.get('Qty', sell_qty)) # 【修正】sell_qty をデフォルトに
                         
                     else:
                         print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
@@ -293,10 +312,15 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     # 同一ループ内の計算のためにローカル変数も一応更新しておく
                     account['cash'] += sale_proceeds
 
-                # 一部約定のケースでの残存株の扱い
+                # 一部約定（または分割利確）のケースでの残存株の扱い
                 if actual_qty < int(p['shares']):
                     remaining_p = p.copy()
                     remaining_p['shares'] = int(p['shares']) - actual_qty
+                    
+                    # 【新規】スケールアウト成功の場合、残りのポジションにフラグを立てる
+                    if "分割利確" in sell_reason:
+                        remaining_p['partial_sold'] = True
+                        
                     remaining_portfolio.append(remaining_p)
                     print(f"⚠️ [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
                 
@@ -333,6 +357,7 @@ def calculate_technicals_for_scan(df):
     
     price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
     df['SMA20'] = df[price_col].rolling(window=20).mean()
+    df['SMA50'] = df[price_col].rolling(window=50).mean() # 【新規】MTFA用の50期間線を追加
     df['STD20'] = df[price_col].rolling(window=20).std()
     df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
     df['BB_Lower'] = df['SMA20'] - (df['STD20'] * 2)
@@ -397,19 +422,40 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
             score = 0
             
             if regime == "BULL":
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                if vol_ratio < 2.5: continue
-                if latest['MACD'] < latest['Signal']: continue
-                if latest['RSI'] > 75: continue
+                # 1. MTFA（マルチタイムフレーム分析）: 15分足での中期トレンド確認
+                if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
+                    continue # 日足は強気でも、当日の日中がダウントレンド（落ちるナイフ）なら見送り
                 
                 today_date = df.index[-1].date()
                 today_df = df[df.index.date == today_date]
                 vwap_vol = today_df['Volume'].sum()
                 typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
                 vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
-                if latest['Close'] < vwap: continue
                 
-                score = (vol_ratio * 10) + (latest['RSI'] - df['RSI'].iloc[-2])
+                # 2. VWAP条件: 当日の買い手が勝っている状態を確認
+                if latest['Close'] < vwap: 
+                    continue
+                
+                # 3. 押し目買い（Pullback）判定: VWAPからの乖離率を計算
+                vwap_dev = (latest['Close'] - vwap) / vwap
+                
+                # 高値掴み防止: VWAPから+3%以上上に飛んでいる銘柄は反落リスクが高いため見送り
+                if vwap_dev > 0.03: 
+                    continue
+                    
+                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                if vol_ratio < 1.5: # 押し目狙いのため、ブレイクアウト時(2.5)より出来高条件を緩和
+                    continue
+                
+                if latest['MACD'] < latest['Signal']: continue
+                if latest['RSI'] > 75: continue
+
+                # スコアリング: VWAPに近い（押し目）ほど高得点、かつRSIの過熱ペナルティ
+                # RSIが50(ニュートラル)に近いほどペナルティが少なくなる
+                rsi_penalty = abs(50 - latest['RSI']) 
+                pullback_bonus = (0.03 - vwap_dev) * 1000 # 乖離0(VWAPぴったり)で30点のボーナス
+                
+                score = pullback_bonus + (vol_ratio * 5) - rsi_penalty
                 
             elif regime == "RANGE":
                 if latest['Close'] > latest['SMA20']: continue 
