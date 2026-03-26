@@ -42,15 +42,14 @@ def calculate_effective_age(last_update, current_time):
     step = timedelta(minutes=1)
     limit_time = current_time
     
-    # 効率化のため、日をまたぐ場合の初期スキップ
-    while temp_time + timedelta(days=1) < limit_time:
-        if is_business_day(temp_time):
-            # 1日分の取引時間は 2.5h (150m) + 3h (180m) = 330分
-            total_effective_seconds += 330 * 60
-        temp_time += timedelta(days=1)
-
     while temp_time < limit_time:
         if is_business_day(temp_time):
+            # 最適化: 00:00 でかつ翌日も範囲内なら丸一日分(5.5h)加算して飛ばす
+            if temp_time.time() == time(0, 0) and (temp_time + timedelta(days=1) <= limit_time):
+                total_effective_seconds += 330 * 60
+                temp_time += timedelta(days=1)
+                continue
+                
             t = temp_time.time()
             if (morn_start <= t < morn_end) or (aft_start <= t < aft_end):
                 total_effective_seconds += 60
