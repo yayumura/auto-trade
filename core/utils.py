@@ -12,6 +12,13 @@ def is_business_day(dt):
         return False
     return True
 
+def get_previous_business_day(dt):
+    """前営業日を取得する"""
+    temp = dt - timedelta(days=1)
+    while not is_business_day(temp):
+        temp -= timedelta(days=1)
+    return temp.date()
+
 def calculate_effective_age(last_update, current_time):
     """
     取引時間（9:00-11:30, 12:30-15:30）のみをカウントした実効経過秒数を計算する。

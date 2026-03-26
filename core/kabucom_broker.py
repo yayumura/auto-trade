@@ -281,28 +281,31 @@ class KabucomBroker(BaseBroker):
 
     # --- [New] リアルタイム監視用の銘柄登録・解除・板情報取得 ---
     def register_symbols(self, symbols: list):
-        """ kabuステーションAPI側に銘柄を監視登録する（board取得に必須） """
+        """ 
+        kabuステーションAPI側に銘柄を監視登録する。
+        仕様上1回あたり50銘柄までのため、チャンク分割して実行する。
+        """
         if not self.token: return False
         url = f"{self.base_url}/register"
         
-        # yfinance形式 (7203.T) -> カブコム形式 (7203@1)
-        reg_list = []
-        for s in symbols:
-            code = str(s).replace(".T", "")
-            reg_list.append({"Symbol": code, "Exchange": 1})
-            
-        data = {"Symbols": reg_list}
-        try:
-            res = requests.put(url, headers=self._get_headers(), json=data, timeout=10)
-            if res.status_code == 200:
-                print(f"✅ API銘柄登録完了 ({len(reg_list)}銘柄)")
-                return True
-            else:
-                print(f"⚠️ 銘柄登録エラー: {res.text}")
+        # yfinance形式 (7203.T) -> カブコム形式 (7203)
+        codes = [str(s).replace(".T", "") for s in symbols]
+        
+        chunk_size = 50
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i:i + chunk_size]
+            reg_list = [{"Symbol": c, "Exchange": 1} for c in chunk]
+            data = {"Symbols": reg_list}
+            try:
+                res = requests.put(url, headers=self._get_headers(), json=data, timeout=10)
+                if res.status_code == 200:
+                    print(f"✅ API銘柄登録完了 ({i+1}〜{i+len(chunk)}銘柄目)")
+                else:
+                    print(f"⚠️ 銘柄登録エラー ({i+1}〜): {res.text}")
+            except Exception as e:
+                print(f"⚠️ 銘柄登録通信エラー: {e}")
                 return False
-        except Exception as e:
-            print(f"⚠️ 銘柄登録通信エラー: {e}")
-            return False
+        return True
 
     def unregister_all(self):
         """ 登録済みの全銘柄を解除する（上限管理のため） """
@@ -331,7 +334,8 @@ class KabucomBroker(BaseBroker):
                     data = res.json()
                     results[code] = {
                         "price": data.get('CurrentPrice'),
-                        "status": data.get('CurrentPriceStatus'), # 特別気配等の判定用
+                        "prev_close": data.get('PreviousClose'), # [Expert Refinement] 前日終値を追加
+                        "status": data.get('CurrentPriceStatus'),
                         "bid": data.get('BidPrice'),
                         "ask": data.get('AskPrice')
                     }

@@ -15,7 +15,7 @@ import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
-from core.utils import calculate_effective_age
+from core.utils import calculate_effective_age, get_previous_business_day
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -206,6 +206,8 @@ def _main_exec():
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
             send_discord_notify("🏁 【業務終了】15:30（大引け）を過ぎたため、自動運用を終了しました。")
+            if not is_sim:
+                broker.unregister_all() # [Expert Refinement] 終了時に登録解除
             break
 
         if not DEBUG_MODE:
@@ -421,14 +423,21 @@ def _main_exec():
 
             if should_continue_scan:
                 data_df = pd.concat(data_dfs, axis=1, sort=False) if len(data_dfs) > 1 else data_dfs[0]
-                
                 try:
                     last_update = data_df.index[-1]
                     if last_update.tzinfo is None:
                         last_update = JST.localize(last_update)
                     
                     age = calculate_effective_age(last_update, datetime.now(JST))
-                    if age > 3600 and not is_morning_scan: 
+                    if is_morning_scan:
+                        # [Expert Refinement] 朝の日足スキャン時は秒数ではなく「日付」で判定
+                        prev_biz_day = get_previous_business_day(datetime.now(JST))
+                        if last_update.date() < prev_biz_day:
+                            msg = f"🚨 【致命的遅延】yfinanceの日足データが前営業日({prev_biz_day})より古いです(最新: {last_update.date()})。提供元の異常と判断し、本日の運用を停止します。"
+                            print(msg)
+                            send_discord_notify(msg)
+                            should_continue_scan = False
+                    elif age > 3600: 
                         msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（実効遅延: {age/60:.0f}分）。安全のため買付を見送ります。"
                         print(msg)
                         send_discord_notify(msg)
@@ -463,25 +472,43 @@ def _main_exec():
             if should_continue_scan:
                 print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
                 # [Hybrid Path] 日中はウォッチリストのみを精査対象にする
-                scan_targets = top_candidates[:3] if not watchlist else [c for c in top_candidates if c['code'] in watchlist][:3]
+                # 朝のスキャンで抽出された銘柄リスト（上位500件程度を対象にしても良い）から、
+                # リアルタイム価格で再度上位を絞り込む
+                scan_targets = top_candidates[:5] if not watchlist else [c for c in top_candidates if c['code'] in watchlist][:10]
                 
                 for item in scan_targets:
-                    # --- [Extra Phase] Gap & Special Quote Check ---
+                    # --- [Extra Phase] Gap & Special Quote Check (Expert Refinement) ---
                     if not is_sim and hasattr(broker, 'get_board_data'):
                         board = broker.get_board_data([item['code']])
                         b_info = board.get(str(item['code']))
                         if b_info:
                             c_price = b_info.get('price')
+                            p_close = b_info.get('prev_close', item['price']) # カブコム由来の前日終値を優先
+                            
                             # 9:00直後の特別気配（0円/None）をガード
                             if not c_price or c_price == 0:
-                                print(f"⚠️ {item['code']} は現在特別気配中または価格未決定です。スキップします。")
+                                print(f"⏳ {item['code']} は現在特別気配中または価格未決定です。値がつくまで待機（次ループへ）します。")
+                                continue # 除外はせず、単にこのターンの判定を飛ばす
+                                
+                            # 窓開け判定
+                            gap_pct = (c_price - p_close) / p_close
+                            is_gap_up = gap_pct > 0.03
+                            is_gap_down = gap_pct < -0.03
+                            
+                            should_exclude = False
+                            if regime == "BULL":
+                                if is_gap_down: # BULLでも下窓は危険
+                                    should_exclude = True
+                            else: # RANGE/BEAR等
+                                if is_gap_up or is_gap_down:
+                                    should_exclude = True
+                            
+                            if should_exclude:
+                                print(f"⚠️ {item['code']} 窓開け検知 ({gap_pct*100:+.1f}%, Regime:{regime})。リスク回避のため本日の監視から除外します。")
+                                if watchlist and item['code'] in watchlist:
+                                    watchlist.remove(item['code'])
                                 continue
-                            # 窓開け判定 (対 yfinanceの最終Close)
-                            yesterday_close = item['price']
-                            gap = abs(c_price - yesterday_close) / yesterday_close
-                            if gap > 0.03:
-                                print(f"⚠️ {item['code']} 窓開け検知 ({gap*100:.1f}%)。リスク回避のため除外します。")
-                                continue
+                            
                             # 現在値を最新化
                             item['price'] = c_price
 
