@@ -15,6 +15,7 @@ import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
+from core.utils import calculate_effective_age
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -184,6 +185,11 @@ def _main_exec():
     last_scan_time = 0
     SCAN_INTERVAL_SEC = 900   # スキャン間隔（15分）
     MONITOR_INTERVAL_SEC = 30 # ポジション監視間隔（30秒）
+    
+    # --- [Hybrid Monitoring State] ---
+    watchlist = []
+    has_morning_scanned = False
+    registered_count = 0
 
     # [Day 2 Ops] タイムアウトによりキャンセル要求済みの注文IDをキャッシュする（回数カウント付き）
     canceled_orders = {}
@@ -212,9 +218,15 @@ def _main_exec():
                 break
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
-                print(f"💤 取引時間外（{phase.value}）です。次の監視まで待機します...")
-                time.sleep(MONITOR_INTERVAL_SEC)
-                continue
+                # 寄り前のみスキャンを実行 (朝8:30以降)
+                if phase == MarketPhase.PRE_MARKET and now_time >= time(8, 30) and not has_morning_scanned:
+                    print(f"🌅 【朝のスキャン】監視銘柄の選定を開始します...")
+                    # ここでダミーの should_scan をバイパスして強制実行
+                    pass 
+                else:
+                    print(f"💤 取引時間外（{phase.value}）です。次の監視まで待機します...")
+                    time.sleep(MONITOR_INTERVAL_SEC)
+                    continue
 
         # --- 【追加】In-flight Guard をループ内に移動（二重発注の完全防止） ---
         if not is_sim:
@@ -325,9 +337,14 @@ def _main_exec():
             should_scan = False
 
         else:
-            now_time_sec = time.time()
-            if (now_time_sec - last_scan_time) < SCAN_INTERVAL_SEC:
                 should_scan = False
+        
+        # --- 2.5 朝の銘柄選定 (Hybrid Path) ---
+        if phase == MarketPhase.PRE_MARKET and now_time >= time(8, 30) and not has_morning_scanned:
+             should_scan = True
+             is_morning_scan = True
+        else:
+             is_morning_scan = False
 
         # --- 3. システムによる数学的スクリーニング ---
         if should_scan:
@@ -368,11 +385,13 @@ def _main_exec():
                 chunk_size = 100 
 
                 print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
-                import random
                 for i in range(0, len(tickers), chunk_size):
                     chunk = tickers[i:i + chunk_size]
                     try:
-                        chunk_df = yf.download(chunk, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
+                        # モーニングスキャンなら日足、日中なら15分足
+                        dl_period = "1mo" if is_morning_scan else "5d"
+                        dl_interval = "1d" if is_morning_scan else "15m"
+                        chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', threads=False, progress=False)
                         if chunk_df is not None and not chunk_df.empty:
                             if isinstance(chunk_df.columns, pd.MultiIndex):
                                 data_dfs.append(chunk_df)
@@ -408,9 +427,9 @@ def _main_exec():
                     if last_update.tzinfo is None:
                         last_update = JST.localize(last_update)
                     
-                    age = datetime.now(JST) - last_update
-                    if age.total_seconds() > 3600: 
-                        msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（最終更新: {last_update.strftime('%H:%M')} / 遅延: {age.total_seconds()/60:.0f}分）。安全のため買付を見送ります。"
+                    age = calculate_effective_age(last_update, datetime.now(JST))
+                    if age > 3600 and not is_morning_scan: 
+                        msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（実効遅延: {age/60:.0f}分）。安全のため買付を見送ります。"
                         print(msg)
                         send_discord_notify(msg)
                         should_continue_scan = False
@@ -421,15 +440,51 @@ def _main_exec():
                 print("✅ データ取得完了。評価アルゴリズムを実行します...")
                 top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
                 
-                if not top_candidates:
+                if is_morning_scan:
+                    # 朝のスキャンの場合は選定銘柄をウォッチリストに登録
+                    # API上限50に配慮し、保有数を差し引いた枠（最大40）に絞る
+                    max_watchlist = max(5, 50 - len(portfolio) - 2) 
+                    watchlist = [c['code'] for c in top_candidates[:max_watchlist]]
+                    has_morning_scanned = True
+                    print(f"📋 【ウォッチリスト確定】本日監視する {len(watchlist)} 銘柄を登録しました。")
+                    
+                    # APIへの登録 (BrokerがKabucomなら)
+                    if not is_sim:
+                        broker.unregister_all()
+                        reg_targets = watchlist + held_codes
+                        broker.register_symbols(reg_targets[:50])
+                    
+                    should_continue_scan = False # 朝は買うわけではないのでここで終了
+                
+                elif not top_candidates:
                     print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
                     should_continue_scan = False
 
             if should_continue_scan:
                 print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
-                best_target = None
+                # [Hybrid Path] 日中はウォッチリストのみを精査対象にする
+                scan_targets = top_candidates[:3] if not watchlist else [c for c in top_candidates if c['code'] in watchlist][:3]
                 
-                for item in top_candidates[:1]:
+                for item in scan_targets:
+                    # --- [Extra Phase] Gap & Special Quote Check ---
+                    if not is_sim and hasattr(broker, 'get_board_data'):
+                        board = broker.get_board_data([item['code']])
+                        b_info = board.get(str(item['code']))
+                        if b_info:
+                            c_price = b_info.get('price')
+                            # 9:00直後の特別気配（0円/None）をガード
+                            if not c_price or c_price == 0:
+                                print(f"⚠️ {item['code']} は現在特別気配中または価格未決定です。スキップします。")
+                                continue
+                            # 窓開け判定 (対 yfinanceの最終Close)
+                            yesterday_close = item['price']
+                            gap = abs(c_price - yesterday_close) / yesterday_close
+                            if gap > 0.03:
+                                print(f"⚠️ {item['code']} 窓開け検知 ({gap*100:.1f}%)。リスク回避のため除外します。")
+                                continue
+                            # 現在値を最新化
+                            item['price'] = c_price
+
                     print(f"審査中: {item['code']} {item['name']} (スコア: {item['score']:.1f})")
                     news = get_recent_news(item['code'], item['name'])
                     

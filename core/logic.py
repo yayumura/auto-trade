@@ -9,6 +9,7 @@ import time
 from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
+from core.utils import calculate_effective_age
 
 def normalize_tick_size(price: float, is_buy: bool) -> int:
     """
@@ -64,12 +65,13 @@ def detect_market_regime():
         print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
         
         # --- [Phase 13] データの鮮度チェック ---
-        last_date = close.index[-1].date()
-        today = datetime.now(JST).date()
-        # 平日（月ー金）かつ市場が開いている時間帯で、データが昨日以前なら警告
-        now_time = datetime.now(JST).time()
-        if today.weekday() < 5 and now_time > datetime.strptime("09:15", "%H:%M").time() and last_date < today:
-             print(f"⚠️ [Data Stale] 指数データが古すぎます(最終更新: {last_date})。レジーム判定が不正確な可能性があります。")
+        last_date_time = close.index[-1]
+        if last_date_time.tzinfo is None:
+            last_date_time = JST.localize(last_date_time)
+        
+        effective_age = calculate_effective_age(last_date_time, datetime.now(JST))
+        if effective_age > 3600:
+             print(f"⚠️ [Data Stale] 指数データが古すぎます(実効遅延: {effective_age/60:.1f}分)。レジーム判定が不正確な可能性があります。")
 
         if current < sma20 * 0.95 and volatility > 0.30:
             return "BEAR" 
@@ -406,14 +408,18 @@ def select_best_candidates(data_df, targets, df_symbols, regime):
             if latest['Close'] < 100 or daily_avg_trade_value < 1000000000:
                 continue 
 
-            # 2. スパイク・ガード: 直近15分で異常な価格変化(5%以上)がないか
-            if len(df) >= 2:
+            # 2. スパイク・ガード: 当日の始値を基準とした急激な変化
+            if 'Open' in df.columns:
                 p_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-                prev_close = df[p_col].iloc[-2]
-                current_change = abs(latest[p_col] - prev_close) / prev_close
-                if current_change > 0.05:
-                    print(f"⚠️ [Spike Guard] {code} の急激な価格変化({current_change*100:.1f}%)を検知。リスク回避のため除外します。")
-                    continue
+                # 窓開け（前日終値vs当日始値）ではなく、現在の足と「当日の始値」を比較
+                # または、現在足の一つ前と比較するが、日またぎは無視する
+                today_start = df[df.index.date == df.index[-1].date()]
+                if not today_start.empty:
+                    day_open = today_start['Open'].iloc[0]
+                    current_change = abs(latest[p_col] - day_open) / day_open
+                    if current_change > 0.10: # 日中10%以上の変動は異常値またはパニックと見なす
+                        print(f"⚠️ [Spike Guard] {code} の当日の急激な価格変化({current_change*100:.1f}%)を検知。")
+                        continue
 
             # 3. ボラティリティ制限 (ATRが株価の15%を超えたら除外)
             if latest['ATR'] > latest['Close'] * 0.15:

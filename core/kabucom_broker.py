@@ -279,6 +279,66 @@ class KabucomBroker(BaseBroker):
         except Exception:
             return None
 
+    # --- [New] リアルタイム監視用の銘柄登録・解除・板情報取得 ---
+    def register_symbols(self, symbols: list):
+        """ kabuステーションAPI側に銘柄を監視登録する（board取得に必須） """
+        if not self.token: return False
+        url = f"{self.base_url}/register"
+        
+        # yfinance形式 (7203.T) -> カブコム形式 (7203@1)
+        reg_list = []
+        for s in symbols:
+            code = str(s).replace(".T", "")
+            reg_list.append({"Symbol": code, "Exchange": 1})
+            
+        data = {"Symbols": reg_list}
+        try:
+            res = requests.put(url, headers=self._get_headers(), json=data, timeout=10)
+            if res.status_code == 200:
+                print(f"✅ API銘柄登録完了 ({len(reg_list)}銘柄)")
+                return True
+            else:
+                print(f"⚠️ 銘柄登録エラー: {res.text}")
+                return False
+        except Exception as e:
+            print(f"⚠️ 銘柄登録通信エラー: {e}")
+            return False
+
+    def unregister_all(self):
+        """ 登録済みの全銘柄を解除する（上限管理のため） """
+        if not self.token: return False
+        url = f"{self.base_url}/unregister/all"
+        try:
+            res = requests.put(url, headers=self._get_headers(), timeout=10)
+            return res.status_code == 200
+        except:
+            return False
+
+    def get_board_data(self, symbols: list) -> dict:
+        """ 
+        登録済み銘柄の時価情報（board）を取得する。
+        戻り値: { "7203": {"price": 1234, "status": "気配"}, ... }
+        """
+        results = {}
+        if not self.token: return results
+        
+        for s in symbols:
+            code = str(s).replace(".T", "")
+            url = f"{self.base_url}/board/{code}@1"
+            try:
+                res = requests.get(url, headers=self._get_headers(), timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    results[code] = {
+                        "price": data.get('CurrentPrice'),
+                        "status": data.get('CurrentPriceStatus'), # 特別気配等の判定用
+                        "bid": data.get('BidPrice'),
+                        "ask": data.get('AskPrice')
+                    }
+            except Exception:
+                continue
+        return results
+
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
         """ 注文が約定（または失敗）するまで待機する """
         print(f"⏳ 注文 ID: {order_id} の約定を待機中...")
