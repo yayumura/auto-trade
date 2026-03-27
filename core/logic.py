@@ -356,59 +356,55 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             # 【新規】分割利確（スケールアウト）のステータス確認
             is_partial_sold = p.get('partial_sold', False)
             
-            # トレール幅を動的に変更（半分利確後はトレール幅を1.5倍に広げて大化けを狙う）
+            # トレール幅を動的に変更
             current_trail_mult = ATR_TRAIL * 1.5 if is_partial_sold else ATR_TRAIL
 
             sell_reason = None
             # レジームに応じた損切り倍率の選択
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             
-            # 売却株数の決定（デフォルトは全株）
             sell_qty = current_shares
 
-            # 【新規】フェイルセーフ：絶対ストップとタイムストップ
-            hard_stop_price = buy_price * 0.98  # 買値から-2%で無条件カット
+            # 【修正1】フェイルセーフ：絶対ストップを-1.5%にタイト化
+            hard_stop_price = buy_price * 0.985  
             
             # 保有期間（日数）の計算
             current_dt = current_time_override if current_time_override else datetime.now(JST)
             if hasattr(current_dt, 'to_pydatetime'):
                 current_dt = current_dt.to_pydatetime()
             buy_dt = p['buy_time']
-            # p['buy_time'] が文字列の場合はdatetimeに変換（通常はdatetimeオブジェクトだが念のため）
             if isinstance(buy_dt, str):
                 try:
                     buy_dt = datetime.strptime(buy_dt, '%Y-%m-%d %H:%M:%S').replace(tzinfo=JST)
                 except ValueError:
-                    buy_dt = now_dt # 変換失敗時は現在時刻（保持0日扱い）
+                    buy_dt = now_dt 
             if hasattr(buy_dt, 'to_pydatetime'):
                 buy_dt = buy_dt.to_pydatetime()
-            
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
+            # 【修正2】勝ちトレード保護（買値から+2%以上上がったら勝ち確定モードへ移行）
+            is_winning_trade = current_price > (buy_price * 1.02)
+
             if current_price <= hard_stop_price:
-                sell_reason = "絶対損切 (-2% Hard Stop)"
-            elif hold_days > 3.0: 
-                sell_reason = "タイムストップ (Held > 3 days)"
+                sell_reason = "絶対損切 (-1.5% Hard Stop)"
+            elif hold_days > 4.0: # ホームランを待つため助走期間を4日に延長
+                sell_reason = "タイムストップ (Held > 4 days)"
             elif is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
-            elif current_price <= buy_price - (atr * current_stop_loss_mult):
-                sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif highest_price_db > buy_price and current_price <= highest_price_db - (atr * current_trail_mult):
-                # 利益が出ている状態から反落した場合
-                if current_price > buy_price * 1.01: # 1%以上の利益があれば「トレール利確」
-                    sell_reason = f"トレール利確 (Trailing Stop from {highest_price_db:.1f})"
-                else:
-                    sell_reason = "建値撤退 (Break Even / Minimal Profit)"
-            # --- 【新規】分割利確ロジック ---
-            elif not is_partial_sold and current_price >= buy_price + (atr * 8.0):
-                # 利益がATRの8.0倍（十分なトレンド）に乗ったら半分利確
-                sell_reason = f"分割利確 (Scale-out TP at ATRx8.0)"
-                # 100株単位に丸める。最低100株。
+            elif not is_winning_trade and current_price <= buy_price - (atr * current_stop_loss_mult):
+                # 利益が乗る前は通常のボラティリティ損切り
+                sell_reason = f"ボラティリティ初期損切 (Stop Loss ATR:{current_stop_loss_mult})"
+            elif is_winning_trade and current_price <= highest_price_db - (atr * 4.0):
+                # 【重要】+2%以上の利益が乗った後は、トレール幅を狭く（ATR4倍）して確実に利益を残す
+                sell_reason = f"追従型トレール利確 (Trailing Stop from {highest_price_db:.1f})"
+            elif not is_partial_sold and current_price >= buy_price + (atr * 15.0):
+                # 【修正3】利大を実現するため、分割利確の目標を大幅に遠く（ATR15倍）に設定
+                sell_reason = f"ホームラン分割利確 (Scale-out TP at ATRx15.0)"
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
                     sell_qty = half_qty
                 else:
-                    sell_qty = current_shares # 100株しか持っていない場合は全決済
+                    sell_qty = current_shares
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -602,31 +598,31 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             reason = "Unknown"
             if regime == "BULL":
-                # 【順張り戦略】上昇トレンドの「押し目」や「初動」を狙う
+                # 【順張り戦略】モメンタム・イグニッション（大口資金の流入に乗る初動ブレイクアウト）
+                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                is_yang_sen = latest['Close'] > latest['Open'] # 陽線であること
+                
                 if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
                     reason = "Below SMA50 (Macro trend is down)"
                     score -= 50
-                
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                if vol_ratio < 0.5:
-                    reason = f"VolRatio({vol_ratio:.2f}) < 0.5"
-                elif latest.get('RSI', 50) > 70: 
-                    # 【重要】RSIが70以上（短期的な買われすぎ・急騰直後）は高値掴みになるので避ける
-                    reason = f"RSI({latest['RSI']:.1f}) > 70 (Overbought)"
                 elif latest['Close'] < latest['SMA20']:
                     reason = "Below SMA20 (Short term momentum is weak)"
+                elif vol_ratio < 1.5: 
+                    # 【重要】出来高が平常時の1.5倍未満の静かな銘柄は「ダマシ」が多いので絶対買わない
+                    reason = f"Low Volume ({vol_ratio:.1f}x < 1.5x)"
+                elif not is_yang_sen:
+                    reason = "Not a Bullish Candle (Yin-sen)"
+                elif latest.get('RSI', 50) > 75: 
+                    reason = f"RSI({latest['RSI']:.1f}) > 75 (Overbought)"
                 else:
-                    # SMA20より上にあるが、離れすぎていない（安全なエントリーポイント）
-                    deviation_from_sma20 = abs(latest['Deviation']) 
                     macd_hist = latest['MACD'] - latest['Signal']
-                    
                     if macd_hist < 0:
-                        reason = "MACD Histogram is negative" # 下落モメンタム中は買わない
+                        reason = "MACD Histogram is negative" 
                     else:
-                        # 乖離が少ない（SMA20に近い）ほど安全として高く評価し、出来高も加味する
-                        score += ( (0.02 - deviation_from_sma20) * 1000 ) + (vol_ratio * 10)
+                        # 出来高の急増（機関の買い）とMACDの勢いをダイレクトにスコア化
+                        score = (vol_ratio * 50) + (macd_hist * 1000)
                         
-                        # [Bonus] 終値がVWAPより上にある（その日強い）銘柄を加点
+                        # 終値がVWAPより上にある（その日強い）銘柄を加点
                         today_date = df.index[-1].date()
                         today_df = df[df.index.date == today_date]
                         if not today_df.empty:
@@ -634,8 +630,9 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                             typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
                             vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
                             if latest['Close'] > vwap:
-                                score += 20
-                        reason = "Pullback / Breakout Setup"
+                                score += 50 # VWAPボーナスを強化
+                                
+                        reason = "Momentum Ignition (High Vol Breakout)"
 
             elif regime == "RANGE":
                 # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
