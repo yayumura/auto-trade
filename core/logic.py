@@ -363,12 +363,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             # レジームに応じた損切り倍率の選択
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             
+            # --- 【ピボット修正】VWAP Pullback戦略用の売却ロジック ---
             sell_qty = current_shares
 
-            # 【修正1】フェイルセーフ：絶対ストップを-1.5%にタイト化
-            hard_stop_price = buy_price * 0.985  
+            # 【修正1】絶対ストップを -4.0% に広げ、日中のノイズ（ダマシ）で死なないようにする
+            hard_stop_price = buy_price * 0.96  
             
-            # 保有期間（日数）の計算
             current_dt = current_time_override if current_time_override else datetime.now(JST)
             if hasattr(current_dt, 'to_pydatetime'):
                 current_dt = current_dt.to_pydatetime()
@@ -382,24 +382,24 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 buy_dt = buy_dt.to_pydatetime()
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
-            # 【修正2】勝ちトレード保護（買値から+2%以上上がったら勝ち確定モードへ移行）
-            is_winning_trade = current_price > (buy_price * 1.02)
+            # 【修正2】勝ち確定ラインを +1.5% に早める
+            is_winning_trade = current_price > (buy_price * 1.015)
 
             if current_price <= hard_stop_price:
-                sell_reason = "絶対損切 (-1.5% Hard Stop)"
-            elif hold_days > 4.0: # ホームランを待つため助走期間を4日に延長
-                sell_reason = "タイムストップ (Held > 4 days)"
+                sell_reason = "絶対損切 (-4.0% Hard Stop / Catastrophe)"
+            elif hold_days > 3.0: # 資金効率を上げるため3日で切る
+                sell_reason = "タイムストップ (Held > 3 days)"
             elif is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif not is_winning_trade and current_price <= buy_price - (atr * current_stop_loss_mult):
-                # 利益が乗る前は通常のボラティリティ損切り
+                # 通常の損切り（ATRベースで約1.5〜2%程度の適切な幅になる）
                 sell_reason = f"ボラティリティ初期損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif is_winning_trade and current_price <= highest_price_db - (atr * 4.0):
-                # 【重要】+2%以上の利益が乗った後は、トレール幅を狭く（ATR4倍）して確実に利益を残す
+            elif is_winning_trade and current_price <= highest_price_db - (atr * 3.0):
+                # 利益が1.5%乗ったら、トレール幅をATR3倍にギュッと縮めて利益を確保する
                 sell_reason = f"追従型トレール利確 (Trailing Stop from {highest_price_db:.1f})"
-            elif not is_partial_sold and current_price >= buy_price + (atr * 15.0):
-                # 【修正3】利大を実現するため、分割利確の目標を大幅に遠く（ATR15倍）に設定
-                sell_reason = f"ホームラン分割利確 (Scale-out TP at ATRx15.0)"
+            elif not is_partial_sold and current_price >= buy_price + (atr * 10.0):
+                # ATR10倍（約2〜3%）で半分利確し、残りはトレールで無限の利益を追う
+                sell_reason = f"分割利確 (Scale-out TP at ATRx10.0)"
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
                     sell_qty = half_qty
@@ -598,41 +598,39 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             reason = "Unknown"
             if regime == "BULL":
-                # 【順張り戦略】モメンタム・イグニッション（大口資金の流入に乗る初動ブレイクアウト）
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                is_yang_sen = latest['Close'] > latest['Open'] # 陽線であること
+                # 【順張り戦略】究極の押し目買い（VWAP Pullback）
+                # マクロは上昇トレンドだが、短期的に売られ、VWAP付近で反発した安全なポイントだけを狙う
                 
-                if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
-                    reason = "Below SMA50 (Macro trend is down)"
-                    score -= 50
-                elif latest['Close'] < latest['SMA20']:
-                    reason = "Below SMA20 (Short term momentum is weak)"
-                elif vol_ratio < 1.5: 
-                    # 【重要】出来高が平常時の1.5倍未満の静かな銘柄は「ダマシ」が多いので絶対買わない
-                    reason = f"Low Volume ({vol_ratio:.1f}x < 1.5x)"
+                # 当日のVWAPを計算
+                today_date = df.index[-1].date()
+                today_df = df[df.index.date == today_date]
+                vwap = latest['Close']
+                if not today_df.empty:
+                    vwap_vol = today_df['Volume'].sum()
+                    typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
+                    vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
+
+                is_yang_sen = latest['Close'] > latest['Open'] # 陽線（反発した）
+                rsi = latest.get('RSI', 50)
+                
+                if latest['Close'] < vwap:
+                    # VWAPより下は、その日のトレンドが完全に死んでいるので買わない
+                    reason = "Below VWAP (Intraday trend is dead)"
+                elif latest['Close'] > latest['SMA20']:
+                    # 移動平均より上にある＝すでに上がりすぎ。押し目（下落）が来るまで待つ
+                    reason = "Above SMA20 (Wait for pullback)"
+                elif rsi > 45:
+                    # 短期的に十分に売られていない
+                    reason = f"RSI({rsi:.1f}) > 45 (Not oversold enough)"
                 elif not is_yang_sen:
-                    reason = "Not a Bullish Candle (Yin-sen)"
-                elif latest.get('RSI', 50) > 75: 
-                    reason = f"RSI({latest['RSI']:.1f}) > 75 (Overbought)"
+                    # まだ下落中（陰線）なので落ちるナイフ
+                    reason = "Not bouncing (Yin-sen)"
                 else:
-                    macd_hist = latest['MACD'] - latest['Signal']
-                    if macd_hist < 0:
-                        reason = "MACD Histogram is negative" 
-                    else:
-                        # 出来高の急増（機関の買い）とMACDの勢いをダイレクトにスコア化
-                        score = (vol_ratio * 50) + (macd_hist * 1000)
-                        
-                        # 終値がVWAPより上にある（その日強い）銘柄を加点
-                        today_date = df.index[-1].date()
-                        today_df = df[df.index.date == today_date]
-                        if not today_df.empty:
-                            vwap_vol = today_df['Volume'].sum()
-                            typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
-                            vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
-                            if latest['Close'] > vwap:
-                                score += 50 # VWAPボーナスを強化
-                                
-                        reason = "Momentum Ignition (High Vol Breakout)"
+                    # 【合格】VWAPの上で、SMA20より下に沈み込み、陽線で反発した「完璧な押し目」
+                    # VWAPに近い（リスクが極めて低い）ほど高スコアにする
+                    vwap_distance = (latest['Close'] - vwap) / vwap
+                    score = ( (0.02 - vwap_distance) * 2000 ) + (latest['Volume'] / latest['Avg_Vol_15m'] * 10)
+                    reason = "VWAP Pullback (Perfect Dip Buy)"
 
             elif regime == "RANGE":
                 # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
