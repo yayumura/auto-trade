@@ -711,7 +711,11 @@ def _main_exec():
                         # 買付時は `shares_to_buy` と `atr` を渡して追従発注
                         details = broker.execute_chase_order(best_target['code'], shares_to_buy, side="2", atr=atr)
                         
-                        if details and details.get('State') == 6:
+                        # [Professional Audit Round 3] 部分約定 (State=7) を受容し、データの欠落を防ぐ
+                        state = details.get('State') if details else None
+                        actual_qty = int(details.get('Qty', 0)) if details else 0
+                        
+                        if details and state in [6, 7] and actual_qty > 0:
                             exec_price = float(details.get('Price', 0))
                             if exec_price == 0:
                                 exec_price = buy_price
@@ -722,7 +726,6 @@ def _main_exec():
                                     if total_qty > 0:
                                         exec_price = total_val / total_qty
                             
-                            actual_qty = int(details.get('Qty', shares_to_buy))
                             exec_cost = exec_price * actual_qty
                             
                             print(f"✅ 注文完了（追従済）: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円")
