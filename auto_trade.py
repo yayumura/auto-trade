@@ -66,13 +66,13 @@ def acquire_lock():
                 old_pid = int(f.read().strip())
             import psutil
             if psutil.pid_exists(old_pid):
-                print(f"⚠️ エラー: 他のインスタンス(PID: {old_pid})が既に実行中です。")
+                print(f"[WARNING] エラー: 他のインスタンス(PID: {old_pid})が既に実行中です。")
                 return False
             # 古いプロセスは終了済み → ロックファイルを削除して再取得
-            print(f"⚠️ 古いロックファイルを検出(PID: {old_pid}, 既に終了)。削除して続行します。")
+            print(f"[WARNING] 古いロックファイルを検出(PID: {old_pid}, 既に終了)。削除して続行します。")
             os.remove(LOCK_FILE)
         except (ValueError, ImportError, OSError) as e:
-            print(f"⚠️ ロックファイルの解析に失敗しました({e})。古いロックを削除して続行します。")
+            print(f"[WARNING] ロックファイルの解析に失敗しました({e})。古いロックを削除して続行します。")
             try:
                 os.remove(LOCK_FILE)
             except OSError:
@@ -83,7 +83,7 @@ def acquire_lock():
             f.write(str(os.getpid()))
         return True
     except FileExistsError:
-        print("⚠️ エラー: ロックファイルの競合が発生しました。別のインスタンスが起動した可能性があります。")
+        print("[WARNING] エラー: ロックファイルの競合が発生しました。別のインスタンスが起動した可能性があります。")
         return False
 
 def release_lock():
@@ -91,7 +91,7 @@ def release_lock():
         try:
             os.remove(LOCK_FILE)
         except OSError as e:
-            print(f"⚠️ ロックファイルの削除に失敗しました: {e}")
+            print(f"[WARNING] ロックファイルの削除に失敗しました: {e}")
 
 # --- 不要になった既存CSVとJSONの読み書き処理およびサマリー出力（M-1, L-2） ---
 # これらはBroker(sim_broker.py, kabucom_broker.py)内に移行済みのため削除しました。
@@ -106,9 +106,9 @@ from core.ai_filter import ai_qualitative_filter, get_recent_news
 
 # --- シグナルハンドラ ---
 def handle_shutdown(signum, frame):
-    print(f"\n🛑 シグナル({signum})を受信しました。安全にシャットダウンを開始します...")
+    print(f"\n[STOP] シグナル({signum})を受信しました。安全にシャットダウンを開始します...")
     try:
-        send_discord_notify("🛑 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
+        send_discord_notify("[STOP] 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
     except: pass
     release_lock()
     sys.exit(0)
@@ -124,7 +124,7 @@ def main():
     try:
         _main_exec()
     except Exception as e:
-        msg = f"💥 【致命的システムエラー】シミュレーションループ内で予期せぬ例外が発生しました:\n{e}"
+        msg = f"[CRITICAL] 【致命的システムエラー】シミュレーションループ内で予期せぬ例外が発生しました:\n{e}"
         print(msg)
         try:
             send_discord_notify(msg)
@@ -152,15 +152,15 @@ def _main_exec():
     
     try:
         if TRADE_MODE == "KABUCOM_LIVE":
-            print("⚡ 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
+            print("[LIVE] 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
             broker = KabucomBroker(is_production=True)
             is_sim = False
         elif TRADE_MODE == "KABUCOM_TEST":
-            print("🧪 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
+            print("[TEST] 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
             broker = KabucomBroker(is_production=False)
             is_sim = False
         else:
-            print("🎮 【シミュレーションモード】ローカルCSVベースで実行します")
+            print("[SIM] 【シミュレーションモード】ローカルCSVベースで実行します")
             broker = SimulationBroker()
             is_sim = True
     except Exception as e:
@@ -174,13 +174,13 @@ def _main_exec():
         import psutil
         process = psutil.Process(os.getpid())
         mem_info = process.memory_info()
-        print(f"📊 [System Health] Memory Usage: {mem_info.rss / 1024 / 1024:.1f} MB | CPU: {psutil.cpu_percent()}%")
+        print(f"[STAT] [System Health] Memory Usage: {mem_info.rss / 1024 / 1024:.1f} MB | CPU: {psutil.cpu_percent()}%")
     except ImportError:
         pass
     except Exception as e:
-        print(f"⚠️ リソース監視中にエラー: {e}")
+        print(f"[WARNING] リソース監視中にエラー: {e}")
 
-    print(f"\n🚀 ヘッジファンド仕様・アルゴリズムBOT 起動 (自律ループ型監視中)")
+    print(f"\n[START] ヘッジファンド仕様・アルゴリズムBOT 起動 (自律ループ型監視中)")
 
     # --- [V2-C1] ループ頻度の分離 ---
     last_scan_time = 0
@@ -199,7 +199,7 @@ def _main_exec():
     while True:
         # [Phase 15] ファイルベース・ソフトストップ
         if os.path.exists("stop.txt"):
-            print("🛑 stop.txt を検出しました。安全に停止します。")
+            print("[STOP] stop.txt を検出しました。安全に停止します。")
             try: os.remove("stop.txt")
             except: pass
             break
@@ -210,7 +210,7 @@ def _main_exec():
         now_time = server_datetime.time()
 
         phase = get_market_phase(now_time)
-        print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] 📈 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
+        print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
 
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
@@ -251,7 +251,7 @@ def _main_exec():
             try:
                 active_orders = broker.get_active_orders()
                 if active_orders:
-                    # ✅ [Day 2 Ops] 未約定注文のオートキャンセル（5分滞留）
+                    # [OK] [Day 2 Ops] 未約定注文のオートキャンセル（5分滞留）
                     has_stuck_order = False
                     for order in active_orders:
                         order_id = order.get('ID')
@@ -290,28 +290,28 @@ def _main_exec():
                                     send_discord_notify(f"🚨 【オートキャンセル発動】注文ID: {order_id} が5分以上約定しないため、システムが取り消しを試行しました。")
                                     has_stuck_order = True
                             except Exception as e:
-                                print(f"⚠️ 注文時間のパースエラー: {e}")
+                                print(f"[WARNING] 注文時間のパースエラー: {e}")
 
                     if has_stuck_order:
                         print("⏳ キャンセル処理を行ったため、反映を待機します...")
                         time.sleep(10)
                         continue
                         
-                    msg = f"⚠️ 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注事故を防ぐため、約定または取消されるまでスキャンを待機します。"
+                    msg = f"[WARNING] 【警告】未約定の注文が {len(active_orders)} 件残っています。二重発注事故を防ぐため、約定または取消されるまでスキャンを待機します。"
                     print(msg)
                     send_discord_notify(msg)
                     print(f"\n💤 次の監視({MONITOR_INTERVAL_SEC}秒後)まで待機します...")
                     time.sleep(MONITOR_INTERVAL_SEC)
                     continue
             except Exception as e:
-                print(f"⚠️ 注文状態の確認エラー: {e}")
+                print(f"[WARNING] 注文状態の確認エラー: {e}")
 
         # --- 【修正】Brokerパターン完全適用（APIから最新の口座・ポジションを取得） ---
         try:
             account = broker.get_account_balance()
             portfolio = broker.get_positions()
         except Exception as e:
-            msg = f"⚠️ 【API通信エラー】口座情報またはポジションの取得に失敗しました: {e}"
+            msg = f"[WARNING] 【API通信エラー】口座情報またはポジションの取得に失敗しました: {e}"
             print(msg)
             send_discord_notify(msg)
             print(f"\n💤 一時的な通信障害のため、次の監視({MONITOR_INTERVAL_SEC}秒後)まで待機します...")
@@ -337,14 +337,14 @@ def _main_exec():
             
             # 新規銘柄の初期化（yfinanceからのシードデータ取得）
             for code in new_codes:
-                print(f"🆕 新規銘柄をバッファに追加: {code}")
+                print(f"[NEW] 新規銘柄をバッファに追加: {code}")
                 # 5日分の15分足を初期データとして取得
                 hist = yf.download(str(code)+".T", period="5d", interval="15m", progress=False, threads=False)
-                realtime_buffers[code] = RealtimeBuffer(code=code, interval_mins=15, history_df=hist)
+                realtime_buffers[code] = RealtimeBuffer(code, hist, interval_mins=15)
             
             # 監視対象外のパージ（メモリリーク防止）
             for code in removed_codes:
-                print(f"🗑️ 監視対象外のバッファを削除: {code}")
+                print(f"[DELETE] 監視対象外のバッファを削除: {code}")
                 realtime_buffers.pop(code, None)
 
             # --- [Phase 2] 板情報によるバッファ更新 ---
@@ -356,20 +356,20 @@ def _main_exec():
                     if code in realtime_buffers:
                         realtime_buffers[code].update(price, vol, server_datetime)
         except Exception as e:
-            print(f"⚠️ リアルタイムバッファ・同期エラー: {e}")
+            print(f"[WARNING] リアルタイムバッファ・同期エラー: {e}")
 
         # --- 2. 相場環境（レジーム）判定 (Phase 1) ---
         try:
             # バッファを渡すことで、日内での yf.download の重複を排除
             regime = detect_market_regime(broker=broker, buffer=realtime_buffers.get("1321"))
         except Exception as e:
-            msg = f"⚠️ 【警告】レジーム判定に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
+            msg = f"[WARNING] 【警告】レジーム判定に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
             print(msg)
             send_discord_notify(msg)
             regime = "RANGE"
             last_scan_time = loop_start_time
 
-        print(f"📊 現在のレジーム: 【{regime}】")
+        print(f"[STAT] 現在のレジーム: 【{regime}】")
         
         if regime == "HOLIDAY":
             print("🏖️ 本日は市場休業日です。処理を終了します。")
@@ -444,12 +444,12 @@ def _main_exec():
                 held_codes = [str(p['code']) for p in portfolio]
                 targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
             except Exception as e:
-                print(f"⚠️ 銘柄リスト読み込みエラー: {e}")
+                print(f"[WARNING] 銘柄リスト読み込みエラー: {e}")
                 should_continue_scan = False
 
             if should_continue_scan:
                 tickers = [f"{code}.T" for code in targets]
-                print(f"\n--- 📈 数学的スクリーニング ({len(tickers)}銘柄) ---")
+                print(f"\n--- [UP] 数学的スクリーニング ({len(tickers)}銘柄) ---")
 
                 data_dfs = []
                 chunk_size = 100 
@@ -474,7 +474,7 @@ def _main_exec():
                                 chunk_df.columns = pd.MultiIndex.from_product([[chunk[0]], chunk_df.columns])
                                 data_dfs.append(chunk_df)
                     except Exception as e:
-                        print(f"⚠️ データ取得中にエラーが発生しました: {e}")
+                        print(f"[WARNING] データ取得中にエラーが発生しました: {e}")
                         err_msg = str(e).lower()
                         if "possibly delisted" in err_msg or "not found" in err_msg:
                             # [AI修正] チャンク全体ではなく、エラー文に含まれる特定の銘柄を抽出してブラックリストに入れる
@@ -489,12 +489,12 @@ def _main_exec():
                                 # ここではリミットを考慮し、ブラックリスト入りは特定の銘柄が明示されている時のみとする
                                 pass
                     finally:
-                        # ✅ エラーが起きても起きなくても必ずスリープし、IPブロックを防ぐ
+                        # [OK] エラーが起きても起きなくても必ずスリープし、IPブロックを防ぐ
                         time.sleep(random.uniform(1.0, 2.5))
 
                 if not data_dfs:
-                    print("⚠️ データの取得に完全に失敗しました。")
-                    send_discord_notify("⚠️ 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
+                    print("[WARNING] データの取得に完全に失敗しました。")
+                    send_discord_notify("[WARNING] 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
                     should_continue_scan = False
 
             if should_continue_scan:
@@ -514,15 +514,15 @@ def _main_exec():
                             send_discord_notify(msg)
                             should_continue_scan = False
                     elif age > 3600: 
-                        msg = f"⚠️ 【データ遅延警告】取得された価格データが古すぎます（実効遅延: {age/60:.0f}分）。安全のため買付を見送ります。"
+                        msg = f"[WARNING] 【データ遅延警告】取得された価格データが古すぎます（実効遅延: {age/60:.0f}分）。安全のため買付を見送ります。"
                         print(msg)
                         send_discord_notify(msg)
                         should_continue_scan = False
                 except Exception as e:
-                    print(f"⚠️ 鮮度チェック中にエラー（警告のみ）: {e}")
+                    print(f"[WARNING] 鮮度チェック中にエラー（警告のみ）: {e}")
 
             if should_continue_scan:
-                print("✅ データ取得完了。評価アルゴリズムを実行します...")
+                print("[OK] データ取得完了。評価アルゴリズムを実行します...")
                 # [Professional Audit] 二重買付防止：既に保有している銘柄をスキャンの対象から外す
                 held_codes = set(str(p['code']) for p in portfolio)
                 targets = [t for t in targets if str(t) not in held_codes]
@@ -602,7 +602,7 @@ def _main_exec():
                                     should_exclude = True
                             
                             if should_exclude:
-                                print(f"⚠️ {item['code']} 窓開け検知 ({gap_pct*100:+.1f}%, Regime:{regime})。リスク回避のため本日の監視から除外します。")
+                                print(f"[WARNING] {item['code']} 窓開け検知 ({gap_pct*100:+.1f}%, Regime:{regime})。リスク回避のため本日の監視から除外します。")
                                 if watchlist and item['code'] in watchlist:
                                     watchlist.remove(item['code'])
                                 continue
@@ -620,7 +620,7 @@ def _main_exec():
                         
                     is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
                     if is_safe:
-                        print(f"  -> ✅ 合格 (悪材料なし)")
+                        print(f"  -> [OK] 合格 (悪材料なし)")
                         best_target = item
                         break
                     else:
@@ -633,7 +633,7 @@ def _main_exec():
                     atr_pct = (atr / raw_price) if raw_price > 0 else 0
                     if pd.isna(raw_price) or pd.isna(atr) or raw_price <= 0 or atr <= 0:
                         print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={raw_price}, atr={atr})")
-                        send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
+                        send_discord_notify(f"[WARNING] 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
                         last_scan_time = loop_start_time
                         should_continue_scan = False
                     elif atr_pct > 0.10: # 例: 15分足ベースのATRが株価の10%を超えるような超激動銘柄は避ける
@@ -684,12 +684,12 @@ def _main_exec():
                 if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
                     if is_sim:
                         print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                        print(f"🛒 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円")
-                        notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n📊 AI判定: 問題なし"
+                        print(f"[BUY] 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円")
+                        notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n[STAT] AI判定: 問題なし"
                         send_discord_notify(notify_msg)
                         actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
                         
-                        # ✅ 手数料ゼロ化に伴い、代金分のみを現金から引く
+                        # [OK] 手数料ゼロ化に伴い、代金分のみを現金から引く
                         account['cash'] -= cost
                         # [Professional Audit] 資金管理の原子性（二重使用防止）のため、即座に保存
                         if hasattr(broker, 'save_account'): broker.save_account(account)
@@ -728,8 +728,8 @@ def _main_exec():
                             
                             exec_cost = exec_price * actual_qty
                             
-                            print(f"✅ 注文完了（追従済）: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円")
-                            notify_msg = f"🏆 **【新規買付・約定】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株\n📊 OMS: 追従完了"
+                            print(f"[OK] 注文完了（追従済）: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円")
+                            notify_msg = f"🏆 **【新規買付・約定】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株\n[STAT] OMS: 追従完了"
                             send_discord_notify(notify_msg)
                             actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
                             portfolio.append({
@@ -744,7 +744,7 @@ def _main_exec():
                                 save_watchlist(watchlist)
                             if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         else:
-                            msg = f"⚠️ 【注文未約定/エラー】{best_target['code']} の追従発注が完了しませんでした。次サイクルで再試行します。"
+                            msg = f"[WARNING] 【注文未約定/エラー】{best_target['code']} の追従発注が完了しませんでした。次サイクルで再試行します。"
                             print(msg)
                             send_discord_notify(msg)
                 else:

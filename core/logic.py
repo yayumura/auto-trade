@@ -36,9 +36,9 @@ class RealtimeBuffer:
         self.last_total_volume = None # カブコム由来の当日累積出来高の前回値を保持
         self.last_update_time = None # [Professional Audit] 鮮度監視用
 
-    def update(self, price, total_volume, timestamp):
+    def update(self, price, total_volume, timestamp, current_time_override=None):
         """ カブコムAPIの現在値(Tick)でバッファを更新または新規行追加 """
-        self.last_update_time = datetime.now(JST) # 更新時刻を記録
+        self.last_update_time = current_time_override or datetime.now(JST) # 更新時刻を記録
         if price is None or price <= 0: return self.df
         
         # 出来高の増分（デルタ）を計算
@@ -90,8 +90,9 @@ class RealtimeBuffer:
     def get_df(self):
         return self.df
 
-    def is_stale(self, max_seconds=3600):
+    def is_stale(self, max_seconds=3600, current_time_override=None):
         """ [Professional Audit] データの鮮度を確認。一定時間更新がない場合は True """
+        if current_time_override: return False # バックテスト時は鮮度チェックをスキップ
         if not self.last_update_time: return True
         return (datetime.now(JST) - self.last_update_time).total_seconds() > max_seconds
 
@@ -129,7 +130,7 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
         return int(p // tick * tick)
 
 # --- 【中核1】レジーム（地合い）認識 ---
-def detect_market_regime(broker=None, buffer=None):
+def detect_market_regime(broker=None, buffer=None, current_time_override=None):
     """
     市場の地合い（Regime）を推定する。
     buffer が提供されている場合は、yfinance の代わりにリアルタイムバッファを使用する。
@@ -143,7 +144,7 @@ def detect_market_regime(broker=None, buffer=None):
             
             # 履歴が20日分に満たない場合は yfinance で補完を試みる
             if len(close_daily_all) < 20:
-                print(f"ℹ️  バッファの履歴不足 ({len(close_daily_all)}D < 20D)。yfinance で補完データを取得します。")
+                print(f"[INFO] バッファの履歴不足 ({len(close_daily_all)}D < 20D)。yfinance で補完データを取得します。")
                 nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
             else:
                 nk = pd.DataFrame(close_daily_all)
@@ -186,15 +187,23 @@ def detect_market_regime(broker=None, buffer=None):
         # --- [Phase 1.2] 当日価格を結合してボラティリティの精度を向上 ---
         temp_close = close_daily.copy()
         if "Kabucom" in data_source:
-            today_date = datetime.now(JST).date()
+            # [Professional Audit] タイムゾーンの整合性を確保
+            now_jst = current_time_override or datetime.now(JST)
+            today_date = now_jst.date()
+            
+            # インデックスがタイムゾーンを持っていたら、新しいタイムスタンプにも合わせる
             if temp_close.index[-1].date() < today_date:
-                temp_close[pd.Timestamp(today_date)] = current
+                new_ts = pd.Timestamp(today_date)
+                if temp_close.index.tzinfo is not None:
+                    # インデックスと同じタイムゾーンを適用
+                    new_ts = new_ts.tz_localize(temp_close.index.tzinfo)
+                temp_close[new_ts] = current
             else:
                 temp_close.iloc[-1] = current
         
         volatility = float(temp_close.pct_change().dropna().std()) * np.sqrt(252)
 
-        print(f"  📈 {etf_ticker}: 現在値={current:.1f} ({data_source}) SMA20={sma20:.1f} Vol={volatility:.2f}")
+        print(f"  [Regime] {etf_ticker}: 現在値={current:.1f} ({data_source}) SMA20={sma20:.1f} Vol={volatility:.2f}")
 
         # レジーム判定ロジック（パーセンテージベースでスケール不変）
         if current < sma20 * 0.95 and volatility > 0.30:
@@ -205,7 +214,7 @@ def detect_market_regime(broker=None, buffer=None):
             return "RANGE"
 
     except Exception as e:
-        print(f"⚠️ レジーム判定エラー: {e}")
+        print(f"[Error] レジーム判定エラー: {e}")
         return "RANGE"
 
 # --- 【補助】無効銘柄キャッシュ管理 ---
@@ -216,10 +225,10 @@ def save_invalid_tickers(invalid_set):
     try:
         atomic_write_json(EXCLUSION_CACHE_FILE, list(invalid_set))
     except Exception as e:
-        print(f"⚠️ キャッシュ保存エラー: {e}")
+        print(f"[Error] キャッシュ保存エラー: {e}")
 
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None):
+def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None):
     """
     保有株式の利確・損切・タイムストップを判定し、売却処理を行う。
     realtime_buffers: { code: RealtimeBuffer } の辞書。存在すれば yfinance 通信を回避する。
@@ -244,7 +253,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             tickers_to_download.append(f"{code}.T")
 
     if tickers_to_download:
-        # ✅ 足りない分だけ一括取得
+        # [OK] 足りない分だけ一括取得
         try:
             downloaded = yf.download(tickers_to_download, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
             if not downloaded.empty:
@@ -255,15 +264,17 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     else:
                         data_map[code] = downloaded.dropna()
         except Exception as e:
-            print(f"⚠️ 保有銘柄のデータ取得に失敗: {e}")
+            print(f"[WARNING] 保有銘柄のデータ取得に失敗: {e}")
 
     if not data_map:
-        print("⚠️ 判定用のデータが取得できませんでした(次回リトライへ持ち越し)")
+        print("[WARNING] 判定用のデータが取得できませんでした(次回リトライへ持ち越し)")
         return portfolio, account, actions, trade_logs
 
     remaining_portfolio = []
-    current_time = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-    now_time = datetime.now(JST).time()
+    # 仮想時間の注入
+    now_dt = current_time_override or datetime.now(JST)
+    current_time = now_dt.strftime('%Y-%m-%d %H:%M:%S')
+    now_time = now_dt.time()
     # 2024年11月の東証取引時間延長(15:30)に対応。15:15を大引け直前の手仕舞いラインとする。
     is_closing_time = now_time >= datetime.strptime("15:15", "%H:%M").time() 
 
@@ -375,7 +386,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
             if sell_reason:
                 if is_volume_zero:
-                    print(f"⚠️ [{code}] 出来高0(特別気配等)ですが、{sell_reason} のため決済注文を強行します。")
+                    print(f"[WARNING] [{code}] 出来高0(特別気配等)ですが、{sell_reason} のため決済注文を強行します。")
 
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
                 if is_simulation:
@@ -392,7 +403,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         actual_qty = int(details.get('Qty', 0)) if details else 0
                         
                         if not details or state not in [6, 7] or actual_qty == 0:
-                            print(f"⚠️ {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
+                            print(f"[WARNING] {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
                             remaining_portfolio.append(p)
                             continue
                             
@@ -410,7 +421,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         actual_qty = int(details.get('Qty', sell_qty))
                         
                     else:
-                        print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
+                        print(f"[WARNING] エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
                         remaining_portfolio.append(p)
                         continue
 
@@ -418,7 +429,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 gross_profit = (exec_price - buy_price) * actual_qty
                 tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
                 
-                # ✅ SIMモードの場合は売却手数料(最近のゼロ手数料コースを考慮し0.000とする)
+                # [OK] SIMモードの場合は売却手数料(最近のゼロ手数料コースを考慮し0.000とする)
                 if is_simulation:
                     COMMISSION_RATE = 0.000  # [AI改善策1] 手数料ゼロコースに合わせてコストを排除
                     sell_commission = int((exec_price * actual_qty) * COMMISSION_RATE)
@@ -449,9 +460,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         remaining_p['partial_sold'] = True
                         
                     remaining_portfolio.append(remaining_p)
-                    print(f"⚠️ [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
+                    print(f"[WARNING] [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
                 
-                msg = f"💰【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
+                msg = f"[MONEY]【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
                 print(msg)
                 send_discord_notify(msg)
                 
@@ -471,7 +482,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 remaining_portfolio.append(p)
                 
         except Exception as e: 
-            print(f"⚠️ {code} 監視エラー: {e}")
+            print(f"[WARNING] {code} 監視エラー: {e}")
             remaining_portfolio.append(p)
 
     return remaining_portfolio, account, actions, trade_logs
@@ -511,7 +522,7 @@ def calculate_technicals_for_scan(df):
     
     return df
 
-def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=None):
+def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None):
     """ 地合い(レジーム)に応じた数学的スコアリングを行い、トップ候補を抽出 """
     candidates = []
     
@@ -550,7 +561,7 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
                     day_open = today_start['Open'].iloc[0]
                     current_change = abs(latest[p_col] - day_open) / day_open
                     if current_change > 0.10: # 日中10%以上の変動は異常値またはパニックと見なす
-                        print(f"⚠️ [Spike Guard] {code} の当日の急激な価格変化({current_change*100:.1f}%)を検知。")
+                        print(f"[WARNING] [Spike Guard] {code} の当日の急激な価格変化({current_change*100:.1f}%)を検知。")
                         continue
 
             # 3. ボラティリティ制限 (ATRが株価の15%を超えたら除外)
@@ -623,7 +634,7 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
                 })
         except Exception as e:
             # H-2: 例外を無言でスキップせず、デバッグ可能なログを出力する
-            print(f"⚠️ [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
+            print(f"[WARNING] [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
             continue
             
     return sorted(candidates, key=lambda x: x['score'], reverse=True)[:3]

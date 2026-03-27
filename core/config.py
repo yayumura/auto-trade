@@ -1,10 +1,11 @@
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import json
 from dotenv import load_dotenv
+import pytz
 
 # --- Timezone ---
-JST = timezone(timedelta(hours=9))
+JST = pytz.timezone('Asia/Tokyo')
 
 # --- Base Directories ---
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
