@@ -227,3 +227,13 @@ if __name__ == "__main__":
         print(f"Win Rate:     {res['win_rate']:.1f}%")
         print(f"Held Positions: {res['held_count']}")
         print("="*40)
+        
+        # --- Discord Summary Notification ---
+        from core.log_setup import send_discord_notify
+        summary_msg = (
+            f"【BACKTEST 最終結果】\n"
+            f"期間: {res['start_date']} - {res['end_date']}\n"
+            f"最終資産: {res['final_assets']:,.0f}円 ({res['profit_pct']:+.2f}%)\n"
+            f"取引回数: {res['trade_count']}回 | 勝率: {res['win_rate']:.1f}% | 保有: {res['held_count']}件"
+        )
+        send_discord_notify(summary_msg)

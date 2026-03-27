@@ -365,8 +365,31 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             
             # 売却株数の決定（デフォルトは全株）
             sell_qty = current_shares
+
+            # 【新規】フェイルセーフ：絶対ストップとタイムストップ
+            hard_stop_price = buy_price * 0.98  # 買値から-2%で無条件カット
             
-            if is_closing_time:
+            # 保有期間（日数）の計算
+            current_dt = current_time_override if current_time_override else datetime.now(JST)
+            if hasattr(current_dt, 'to_pydatetime'):
+                current_dt = current_dt.to_pydatetime()
+            buy_dt = p['buy_time']
+            # p['buy_time'] が文字列の場合はdatetimeに変換（通常はdatetimeオブジェクトだが念のため）
+            if isinstance(buy_dt, str):
+                try:
+                    buy_dt = datetime.strptime(buy_dt, '%Y-%m-%d %H:%M:%S').replace(tzinfo=JST)
+                except ValueError:
+                    buy_dt = now_dt # 変換失敗時は現在時刻（保持0日扱い）
+            if hasattr(buy_dt, 'to_pydatetime'):
+                buy_dt = buy_dt.to_pydatetime()
+            
+            hold_days = (current_dt - buy_dt).total_seconds() / 86400
+
+            if current_price <= hard_stop_price:
+                sell_reason = "絶対損切 (-2% Hard Stop)"
+            elif hold_days > 3.0: 
+                sell_reason = "タイムストップ (Held > 3 days)"
+            elif is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif current_price <= buy_price - (atr * current_stop_loss_mult):
                 sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
@@ -485,7 +508,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     if verbose:
                         print(log_msg)
                         print(details_msg)
-                    send_discord_notify(log_msg + "\n" + details_msg)
+                    if not current_time_override:
+                        send_discord_notify(log_msg + "\n" + details_msg)
                     
                     act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
                     actions.append(act_str)
@@ -613,15 +637,20 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 # 乖離率(Deviation)は SMA20 からの乖離
                 deviation = latest['Deviation'] 
                 
+                # --- 追加: 反発の確認（陽線であり、直近の足より上昇していること） ---
+                is_bouncing = (latest['Close'] > latest['Open']) and (latest['Close'] > df['Close'].iloc[-2])
+                
                 if latest.get('RSI', 50) > 40:
                     reason = f"RSI({latest['RSI']:.1f}) is not oversold"
                 elif deviation >= -0.015:
                     reason = f"Deviation({deviation:.2%}) is not deep enough" # SMA20から1.5%以上下落していない
+                elif not is_bouncing:
+                    reason = "Falling Knife (No Bounce Confirmed)" # 反発未確認はスキップ
                 else:
                     # マイナス乖離が深いほど高スコア（下落からのリバウンド狙い）
                     deviation_depth = abs(deviation) * 100
                     score = (deviation_depth * 20) + (vol_ratio * 5)
-                    reason = "Mean Reversion Score"
+                    reason = "Mean Reversion (Bounce)"
             else:
                 reason = f"Unsupported Regime: {regime}"
 
