@@ -144,7 +144,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         "final_assets": total_assets,
         "profit_pct": profit_pct,
         "trade_count": len(trade_history),
-        "win_rate": win_rate
+        "win_rate": win_rate,
+        "held_count": len(portfolio)
     }
 
 def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days=5):
@@ -224,4 +225,5 @@ if __name__ == "__main__":
         print(f"Net Profit:   {res['final_assets'] - res['initial_cash']:+.0f} ({res['profit_pct']:+.2f}%)")
         print(f"Total Trades: {res['trade_count']}")
         print(f"Win Rate:     {res['win_rate']:.1f}%")
+        print(f"Held Positions: {res['held_count']}")
         print("="*40)

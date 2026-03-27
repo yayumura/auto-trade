@@ -289,7 +289,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     current_time = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     now_time = now_dt.time()
     # 2024年11月の東証取引時間延長(15:30)に対応。15:15を大引け直前の手仕舞いラインとする。
-    is_closing_time = now_time >= datetime.strptime("15:15", "%H:%M").time() 
+    # is_closing_time = now_time >= datetime.strptime("15:15", "%H:%M").time() 
+    is_closing_time = False # デイトレ強制決済を無効化（スイングトレード化）
 
     for p in portfolio:
         code = str(p['code'])
@@ -345,9 +346,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             if pd.isna(atr) or atr == 0:
                 atr = current_price_raw * 0.02
                 
-            # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの10%をスリッページとする)
+            # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの3%をスリッページとする)
             if is_simulation:
-                slippage = atr * 0.1
+                slippage = atr * 0.03 # 0.1 から 0.03 に緩和
                 current_price = max(0.1, current_price_raw - slippage)
             else:
                 current_price = current_price_raw
@@ -376,9 +377,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 else:
                     sell_reason = "建値撤退 (Break Even / Minimal Profit)"
             # --- 【新規】分割利確ロジック ---
-            elif not is_partial_sold and current_price >= buy_price + (atr * 1.5):
-                # 利益がATRの1.5倍に乗ったら、確実な利益ロックのために半分だけ利確する
-                sell_reason = f"分割利確 (Scale-out TP at ATRx1.5)"
+            elif not is_partial_sold and current_price >= buy_price + (atr * 2.0):
+                # 利益がATRの2.0倍に乗ったら、確実な利益ロックのために半分だけ利確する
+                sell_reason = f"分割利確 (Scale-out TP at ATRx2.0)"
                 # 100株単位に丸める。最低100株。
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
