@@ -9,16 +9,20 @@ sys.path.append(os.getcwd())
 
 from core.logic import select_best_candidates, manage_positions, RealtimeBuffer, detect_market_regime
 from core.sim_broker import SimulationBroker
-from core.config import INITIAL_CASH, DATA_FILE, JST
+from core.config import (
+    INITIAL_CASH, DATA_FILE, JST, 
+    MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
+    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS
+)
 
-def run_backtest(target_codes, period="30d", interval="15m"):
-    print(f"Backtest Start: Period {period} (Interval: {interval})")
-    print(f"Target codes: {len(target_codes)}")
-    
-    # 1. 過去データの「全期間」を一括ダウンロード
+def run_backtest(target_codes, initial_cash_val=1000000, period="30d", interval="15m"):
+    # 1. 過去データのダウンロード
+    download_period = "60d" 
     tickers = [f"{code}.T" for code in target_codes] + ["1321.T"]
-    print("Downloading historical data...")
-    full_data = yf.download(tickers, period=period, interval=interval, group_by='ticker', auto_adjust=False, progress=True, threads=False)
+    print(f"Backtest Start: (Initial Cash={initial_cash_val:,.0f}, period={download_period}, test_eval=20d)")
+    print(f"Target codes: {len(target_codes)}")
+    print(f"Downloading historical data...")
+    full_data = yf.download(tickers, period=download_period, interval=interval, group_by='ticker', auto_adjust=False, progress=True, threads=False)
     
     if full_data.empty:
         print("Data download failed.")
@@ -33,23 +37,24 @@ def run_backtest(target_codes, period="30d", interval="15m"):
     # 日経平均ETF（1321）のデータを取り出す（レジーム判定用）
     df_1321_full = full_data['1321.T'].dropna() if '1321.T' in full_data.columns.levels[0] else pd.DataFrame()
 
-    # 2. シミュレーション用の「タイムライン（時刻の配列）」を作成
-    # 1321のインデックス（時刻）を基準とする
-    timeline = df_1321_full.index.unique().sort_values()
-    print(f"Timeline generated: Total {len(timeline)} steps")
+    # 2. タイムライン作成
+    all_times = df_1321_full.index.unique().sort_values()
+    test_start_idx = max(0, len(all_times) - 500) 
+    timeline = all_times[test_start_idx:]
+    print(f"Timeline generated: Total {len(timeline)} steps (Warmup points: {test_start_idx})")
 
     # 3. 口座とポートフォリオの初期化
-    account = {"cash": INITIAL_CASH}
-    portfolio = []
+    account = {"cash": initial_cash_val}
+    portfolio = [] 
     trade_history = []
     broker = SimulationBroker()
-
-    # スクリーニング用銘柄情報
+    
+    # 銘柄情報の読み込み
     df_symbols = pd.read_csv(DATA_FILE)
 
-    # 4. タイムマシン・ループ（過去から未来へ1ステップずつ進む）
+    # 4. タイムマシン・ループ
     for current_time in timeline:
-        # --- A. データのスライス（未来のデータを隠す / Look-ahead Biasの排除） ---
+        # --- A. データのスライス ---
         sliced_data = full_data.loc[:current_time]
         
         mock_buffers = {}
@@ -58,17 +63,15 @@ def run_backtest(target_codes, period="30d", interval="15m"):
             if ticker in sliced_data.columns.levels[0]:
                 df_sliced = sliced_data[ticker].dropna()
                 if not df_sliced.empty:
-                    # RealtimeBufferを「過去のその時点までのデータ」で初期化
                     mock_buffers[code] = RealtimeBuffer(code, df_sliced)
         
-        # 1321のバッファも作成（レジーム判定用）
         if not df_1321_full.loc[:current_time].empty:
             mock_buffers['1321'] = RealtimeBuffer('1321', df_1321_full.loc[:current_time])
 
-        # --- B. レジーム判定 (仮想時間の注入) ---
+        # --- B. レジーム判定 ---
         regime = detect_market_regime(broker=None, buffer=mock_buffers.get('1321'), current_time_override=current_time)
 
-        # --- C. 保有ポジションの管理（売却判定 / 仮想時間の注入） ---
+        # --- C. 保有ポジションの管理 ---
         portfolio, account, actions, logs = manage_positions(
             portfolio, account, broker=broker, regime=regime, 
             is_simulation=True, realtime_buffers=mock_buffers,
@@ -76,51 +79,78 @@ def run_backtest(target_codes, period="30d", interval="15m"):
         )
         trade_history.extend(logs)
 
-        # --- D. 新規銘柄のスキャンと買付判定 (仮想時間の注入) ---
-        # 9:30〜14:00の間のみ買付を行う（本業 auto_trade.py の仕様に準拠）
+        # --- D. 新規買付判定 ---
         market_time = current_time.time()
         start_buy = datetime.strptime("09:30", "%H:%M").time()
         end_buy = datetime.strptime("14:00", "%H:%M").time()
 
         if start_buy <= market_time < end_buy and len(portfolio) < 4:
-            held_codes = [str(p['code']) for p in portfolio]
-            scan_targets = [c for c in target_codes if str(c) not in held_codes]
-            
-            # ロジックを呼び出してスコアリング
-            candidates = select_best_candidates(sliced_data, scan_targets, df_symbols, regime, 
-                                               realtime_buffers=mock_buffers, current_time_override=current_time)
-            
-            if candidates:
-                best = candidates[0]
-                buy_price = float(best['price'])
-                
-                # 資金管理ロジック (暫定: 1銘柄あたり総資産の 25% 上限)
-                total_equity = account['cash'] + sum([p.get('current_price', p['buy_price']) * p['shares'] for p in portfolio])
-                invest_amount = total_equity * 0.25
-                shares = (int(invest_amount // buy_price) // 100) * 100
-                
-                if shares >= 100 and (buy_price * shares) <= account['cash']:
-                    cost = buy_price * shares
-                    account['cash'] -= cost
-                    portfolio.append({
-                        "code": best['code'], "name": best['name'],
-                        "buy_time": current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                        "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
-                        "current_price": round(buy_price, 1), "shares": shares
-                    })
-                    print(f"[{current_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares} shares @ {buy_price:.1f} (Regime:{regime})")
+            if current_time.minute in [0, 15, 30, 45]:
+                if not (current_time.hour == 11 and current_time.minute > 30) and not (current_time.hour == 12):
+                    held_codes = [str(p['code']) for p in portfolio]
+                    scan_targets = [c for c in target_codes if str(c) not in held_codes]
+                    
+                    candidates = select_best_candidates(None, scan_targets, df_symbols, regime, 
+                                                       realtime_buffers=mock_buffers, current_time_override=current_time)
+                    
+                    if candidates:
+                        best = candidates[0]
+                        best_df = mock_buffers[best['code']].df
+                        buy_price = float(best_df.iloc[-1]['Close'])
+                        atr = best['atr']
+                        
+                        # --- 資金管理ロジック (auto_trade.py から移植) ---
+                        total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                        
+                        # 1トレードあたりの許容リスク (2%)
+                        risk_amount = total_equity * MAX_RISK_PER_TRADE
+                        current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+                        risk_per_share = atr * current_sl_mult
+                        
+                        # リスクベースの理想株数
+                        ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+                        
+                        # 1銘柄あたりの投資上限 (30% or 最低保証額)
+                        max_inv = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                        max_shares_inv = int(max_inv // buy_price)
+                        max_shares_cash = int(account['cash'] // buy_price)
+                        
+                        raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash)
+                        shares_to_buy = (raw_shares // 100) * 100
+                        cost = buy_price * shares_to_buy
+                        
+                        if shares_to_buy >= 100 and account['cash'] >= cost:
+                            broker.execute_market_order(best['code'], shares_to_buy, "buy", price=buy_price)
+                            portfolio.append({
+                                "code": best['code'], "name": best['name'],
+                                "buy_price": buy_price, "shares": shares_to_buy,
+                                "buy_time": current_time, "atr": atr
+                            })
+                            account['cash'] -= cost
+                            print(f"[{current_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy} shares @ {buy_price:.1f} (Regime:{regime})")
+                        else:
+                            # 資金不足で買えない場合のデバッグログ
+                            if current_time.minute == 0:
+                                reason = "Cash Short" if account['cash'] < buy_price * 100 else "Risk/Alloc Limit"
+                                print(f"  [Scan Debug] {current_time.strftime('%m/%d %H:%M')} {best['code']} skip ({reason}: Need {buy_price*100:,.0f} for 100sh)")
 
-    # 5. バックテスト結果のサマリー
+    # 5. バックテスト結果サマリー
     print("\n" + "="*40)
     print("Backtest Result Summary")
     print("="*40)
-    final_stock_value = sum([p.get('current_price', p['buy_price']) * p['shares'] for p in portfolio])
+    final_stock_value = 0
+    for p in portfolio:
+        code = p['code']
+        if code in mock_buffers:
+            p['current_price'] = float(mock_buffers[code].df.iloc[-1]['Close'])
+            final_stock_value += p['current_price'] * p['shares']
+            
     total_assets = account['cash'] + final_stock_value
-    profit_total = total_assets - INITIAL_CASH
-    profit_pct = (profit_total / INITIAL_CASH) * 100
+    profit_total = total_assets - initial_cash_val
+    profit_pct = (profit_total / initial_cash_val) * 100
 
-    print(f"Initial Cash: {INITIAL_CASH:,.0f}")
-    print(f"Final Assets: {total_assets:,.0f}")
+    print(f"Initial Cash: {initial_cash_val:,.0f}")
+    print(f"Final Assets: {total_assets:,.0f} (Cash: {account['cash']:,.0f}, Stocks: {final_stock_value:,.0f})")
     print(f"Net Profit:   {profit_total:+.0f} ({profit_pct:+.2f}%)")
     print(f"Total Trades: {len(trade_history)}")
     
@@ -131,7 +161,9 @@ def run_backtest(target_codes, period="30d", interval="15m"):
     print("="*40)
 
 if __name__ == "__main__":
-    # 初期検証セット: 日本を代表する流動性の高い銘柄
-    test_universe = ["7203", "8306", "9984", "8035", "9101", "6758", "4063", "8058"]
-    # 実行 (15分足の最大期間 60d 以内を推奨)
-    run_backtest(target_codes=test_universe, period="20d", interval="15m")
+    # 現実に即したユニバース（100万円で買いやすい1500円以下の銘柄も追加）
+    test_universe = ["8306", "7203", "9101", "8058", "6758", "4063"] # 元の銘柄
+    test_universe += ["9501", "6723", "7201", "8411", "9503"] # 100万円で買いやすい銘柄 (東電, ルネサス, 日産, みずほ, 関電)
+    
+    # 100万円で実行
+    run_backtest(target_codes=test_universe, initial_cash_val=1000000, period="20d", interval="15m")

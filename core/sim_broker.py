@@ -61,13 +61,13 @@ class SimulationBroker(BaseBroker):
         actions = summary_record['actions']
         
         print("\n" + "="*50)
-        print(f" 📊 実行サマリー (レジーム: {summary_record['regime']})")
+        print(f" [Summary] 実行サマリー (レジーム: {summary_record['regime']})")
         print("="*50)
         print("\n【今回のアクション】")
         
         if actions:
             for act in actions:
-                print(f" ✔ {act}")
+                print(f" * {act}")
         else:
             print(" - アクションなし (保有維持 / 新規見送り)")
             
@@ -77,14 +77,14 @@ class SimulationBroker(BaseBroker):
                 cp = float(p.get('current_price', p['buy_price']))
                 val = cp * int(p['shares'])
                 profit_pct = (cp - float(p['buy_price'])) / float(p['buy_price']) * 100 if float(p['buy_price']) > 0 else 0
-                print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
+                print(f" - {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
         else:
             print(" - 保有なし")
             
         print("\n【口座ステータス】")
-        print(f" 💰 現金残高:   {summary_record['cash_yen']:>10,.0f}円")
-        print(f" 📈 株式評価額: {summary_record['stock_value_yen']:>10,.0f}円")
-        print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
+        print(f" [Cash] 現金残高:   {summary_record['cash_yen']:>10,.0f}円")
+        print(f" [Stocks] 株式評価額: {summary_record['stock_value_yen']:>10,.0f}円")
+        print(f" [Total] 合計資産額: {total_assets:>10,.0f}円")
         print("="*50 + "\n")
         
         # CSVへの記録作成

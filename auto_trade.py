@@ -482,27 +482,27 @@ def _main_exec():
                                 chunk_df.columns = pd.MultiIndex.from_product([[chunk[0]], chunk_df.columns])
                                 data_dfs.append(chunk_df)
                     except Exception as e:
-                        print(f"[WARNING] データ取得中にエラーが発生しました: {e}")
+                        print(f"[WARNING] An error occurred during data acquisition: {e}")
                         err_msg = str(e).lower()
                         if "possibly delisted" in err_msg or "not found" in err_msg:
-                            # [AI修正] チャンク全体ではなく、エラー文に含まれる特定の銘柄を抽出してブラックリストに入れる
-                            # 例: "['1949.T']: possibly delisted" から '1949' を抽出
+                            # [AI Correction] Extract specific symbols from error message, not the entire chunk, and add to blacklist
+                            # Example: Extract '1949' from "['1949.T']: possibly delisted"
                             found_codes = re.findall(r"(\d{4})\.T", err_msg, re.IGNORECASE)
                             if found_codes:
-                                print(f"🚫 以下の銘柄が無効または上場廃止の可能性があるためブラックリストに登録します: {found_codes}")
+                                print(f"EXCLUDE: The following symbols may be invalid or delisted, adding to blacklist: {found_codes}")
                                 invalid_tickers.update(found_codes)
                                 save_invalid_tickers(invalid_tickers)
                             else:
-                                # 銘柄が特定できない場合は、念のため chunk の個別再試行を行うか、警告に留める
-                                # ここではリミットを考慮し、ブラックリスト入りは特定の銘柄が明示されている時のみとする
+                                # If symbol cannot be identified, either retry individual chunk or just warn
+                                # Here, considering limits, only blacklist if specific symbol is explicit
                                 pass
                     finally:
-                        # [OK] エラーが起きても起きなくても必ずスリープし、IPブロックを防ぐ
+                        # [OK] Always sleep whether error occurs or not to prevent IP block
                         time.sleep(random.uniform(1.0, 2.5))
 
                 if not data_dfs:
-                    print("[WARNING] データの取得に完全に失敗しました。")
-                    send_discord_notify("[WARNING] 【エラー】データ取得に完全に失敗しました。APIレートリミットまたはネットワーク障害の可能性があります。")
+                    print("[WARNING] Data acquisition completely failed.")
+                    send_discord_notify("[WARNING] [Error] Data acquisition completely failed. Possible API rate limit or network failure.")
                     should_continue_scan = False
 
             if should_continue_scan:
@@ -514,37 +514,37 @@ def _main_exec():
                     
                     age = calculate_effective_age(last_update, datetime.now(JST))
                     if is_morning_scan:
-                        # [Expert Refinement] 朝の日足スキャン時は秒数ではなく「日付」で判定
+                        # [Expert Refinement] For morning daily scan, judge by "date" not seconds
                         prev_biz_day = get_previous_business_day(datetime.now(JST))
                         if last_update.date() < prev_biz_day:
-                            msg = f"🚨 【致命的遅延】yfinanceの日足データが前営業日({prev_biz_day})より古いです(最新: {last_update.date()})。提供元の異常と判断し、本日の運用を停止します。"
+                            msg = f"ALERT: [Critical Delay] yfinance daily data is older than previous business day ({prev_biz_day}) (latest: {last_update.date()}). Assuming provider anomaly, stopping today's operation."
                             print(msg)
                             send_discord_notify(msg)
                             should_continue_scan = False
                     elif age > 3600: 
-                        msg = f"[WARNING] 【データ遅延警告】取得された価格データが古すぎます（実効遅延: {age/60:.0f}分）。安全のため買付を見送ります。"
+                        msg = f"[WARNING] [Data Delay Warning] Acquired price data is too old (effective delay: {age/60:.0f} minutes). For safety, skipping purchase."
                         print(msg)
                         send_discord_notify(msg)
                         should_continue_scan = False
                 except Exception as e:
-                    print(f"[WARNING] 鮮度チェック中にエラー（警告のみ）: {e}")
+                    print(f"[WARNING] Error during freshness check (warning only): {e}")
 
             if should_continue_scan:
-                print("[OK] データ取得完了。評価アルゴリズムを実行します...")
-                # [Professional Audit] 二重買付防止：既に保有している銘柄をスキャンの対象から外す
+                print("[OK] Data acquisition complete. Executing evaluation algorithm...")
+                # [Professional Audit] Prevent duplicate purchases: Exclude already held symbols from scan targets
                 held_codes = set(str(p['code']) for p in portfolio)
                 targets = [t for t in targets if str(t) not in held_codes]
                 
                 top_candidates = select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=realtime_buffers)
                 
                 if is_morning_scan:
-                    # 朝のスキャンの場合は選定銘柄をウォッチリストに登録
+                    # For morning scan, register selected symbols to watchlist
                     max_watchlist = max(5, 50 - len(portfolio) - 2) 
                     watchlist = [c['code'] for c in top_candidates[:max_watchlist]]
                     has_morning_scanned = True
-                    print(f"📋 【ウォッチリスト確定】本日監視する {len(watchlist)} 銘柄を登録しました。")
+                    print(f"INFO: [Watchlist Confirmed] Registered {len(watchlist)} symbols for today's monitoring.")
                     
-                    # --- [Phase 2] バッファの初期化 ---
+                    # --- [Phase 2] Buffer Initialization ---
                     realtime_buffers = {}
                     for code in watchlist:
                         realtime_buffers[code] = RealtimeBuffer(code, data_df)
@@ -552,34 +552,40 @@ def _main_exec():
                         c = str(p['code'])
                         if c not in realtime_buffers:
                             realtime_buffers[c] = RealtimeBuffer(c, data_df)
-                    # レジーム判定用の1321も初期化
+                    # Initialize 1321 for regime determination
                     if '1321' not in realtime_buffers:
                         try:
                             df_1321 = yf.download('1321.T', period='1mo', interval='15m', progress=False)
                             realtime_buffers['1321'] = RealtimeBuffer('1321', df_1321)
                         except: pass
 
-                    # APIへの登録 (BrokerがKabucomなら)
+                    # Register to API (if Broker is Kabucom)
                     if not is_sim:
                         broker.unregister_all()
                         reg_targets = watchlist + held_codes
                         broker.register_symbols(reg_targets[:50])
                     
-                    should_continue_scan = False # 朝は買うわけではないのでここで終了
+                    should_continue_scan = False # Morning scan doesn't buy, so terminate here
                 
                 elif not top_candidates:
-                    print(f"💡 現在のレジーム({regime})で優位性のある銘柄は見つかりませんでした。無駄な売買を見送ります。")
+                    print(f"INFO: No advantageous symbols found for current regime ({regime}). Skipping unnecessary trades.")
                     should_continue_scan = False
 
-            if should_continue_scan:
-                print(f"\n--- 🤖 AI定性フィルターチェック (対象: 最上位1銘柄のみ) ---")
-                # [Hybrid Path] 日中はウォッチリストのみを精査対象にする
-                # 朝のスキャンで抽出された銘柄リスト（上位500件程度を対象にしても良い）から、
-                # リアルタイム価格で再度上位を絞り込む
+            if should_continue_scan and regime in ["BULL", "RANGE"]:
+                print(f"\n--- AI Qualitative Filter Check (Target: Top 1 symbol only) ---")
+                # [Hybrid Path] During intraday, only scrutinize watchlist
+                # From the list of symbols extracted in the morning scan (can target up to 500),
+                # narrow down the top ones again with real-time prices
                 scan_targets = top_candidates[:5] if not watchlist else [c for c in top_candidates if c['code'] in watchlist][:10]
                 
+                # [Professional Audit] Optimization for small capital operations like 1 million yen
+                # Scrutinize all candidates in order, and select one with the highest score within budget (can buy 1 unit) to execute.
                 best_target = None
-                
+                shares_to_buy = 0
+                buy_price = 0
+                cost = 0
+                final_atr = 0 # Initialize final_atr here
+
                 for item in scan_targets:
                     # --- [Extra Phase] Gap & Special Quote Check (Expert Refinement) ---
                     if not is_sim and hasattr(broker, 'get_board_data'):
@@ -587,186 +593,134 @@ def _main_exec():
                         b_info = board.get(str(item['code']))
                         if b_info:
                             c_price = b_info.get('price')
-                            p_close = b_info.get('prev_close', item['price']) # カブコム由来の前日終値を優先
+                            p_close = b_info.get('prev_close', item['price']) # Prioritize previous day's closing price from Kabucom
                             
-                            # 9:00直後の特別気配（0円/None）をガード
+                            # Guard against special quotes (0 yen/None) immediately after 9:00
                             if not c_price or c_price == 0:
-                                print(f"⏳ {item['code']} は現在特別気配中または価格未決定です。値がつくまで待機（次ループへ）します。")
-                                continue # 除外はせず、単にこのターンの判定を飛ばす
+                                print(f"WAIT: {item['code']} is currently under special quote or price undecided. Waiting for price to be set (to next loop).")
+                                continue # Do not exclude, just skip this turn's judgment
                                 
-                            # [Professional Audit] レジーム連動型・動的ギャップフィルター
+                            # [Professional Audit] Regime-linked dynamic gap filter
                             gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
                             gap_threshold = 0.05 if regime == "BULL" else 0.02
-                            is_gap_up = gap_pct > gap_threshold
-                            is_gap_down = gap_pct < -gap_threshold
                             
                             should_exclude = False
                             if regime == "BULL":
-                                if gap_pct < -0.02: # BULL(上昇相場)でも下窓2%以上は「腰折れ」の兆候として警戒
+                                if gap_pct < -0.02: # Even in BULL (uptrend), a downward gap of 2% or more is a sign of "weakness" and should be cautious
                                     should_exclude = True
-                                # 上窓は gap_threshold (0.05) 以内なら許容
-                            else: # RANGE/BEAR等
-                                if abs(gap_pct) > gap_threshold: # 2%以上の窓開けは一律除外
+                                # Upward gap is allowed within gap_threshold (0.05)
+                            else: # RANGE/BEAR etc.
+                                if abs(gap_pct) > gap_threshold: # Exclude all gaps of 2% or more
                                     should_exclude = True
                             
                             if should_exclude:
-                                print(f"[WARNING] {item['code']} 窓開け検知 ({gap_pct*100:+.1f}%, Regime:{regime})。リスク回避のため本日の監視から除外します。")
+                                print(f"[WARNING] {item['code']} Gap detected ({gap_pct*100:+.1f}%, Regime:{regime}). Excluding from today's monitoring to avoid risk.")
                                 if watchlist and item['code'] in watchlist:
                                     watchlist.remove(item['code'])
                                 continue
                             
-                            # 現在値を最新化
+                            # Update current price
                             item['price'] = c_price
 
-                    print(f"審査中: {item['code']} {item['name']} (スコア: {item['score']:.1f})")
+                    print(f"Reviewing: {item['code']} {item['name']} (Score: {item['score']:.1f})")
                     news = get_recent_news(item['code'], item['name'])
                     
                     if not news or news == "ニュースなし":
-                        print("  -> ニュースなし(問題なしと判断)")
-                        best_target = item
-                        break
-                        
-                    is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
-                    if is_safe:
-                        print(f"  -> [OK] 合格 (悪材料なし)")
-                        best_target = item
-                        break
+                        print("  -> No news (judged as no problem)")
+                        # If no news, proceed to capital management
                     else:
-                        print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
+                        is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
+                        if not is_safe:
+                            print(f"  -> ALERT: Rejection detected: {reason} (Skipping)")
+                            continue # Skip this item if AI filter rejects it
+                        else:
+                            print(f"  -> [OK] Passed (no negative news)")
 
-                if best_target:
-                    raw_price = float(best_target['price'])
-                    atr = float(best_target['atr'])
-                    # [AI修正] ATRの値そのものよりも、投資価格に対するATR比率（ボラティリティ）を重視してチェック
-                    atr_pct = (atr / raw_price) if raw_price > 0 else 0
-                    if pd.isna(raw_price) or pd.isna(atr) or raw_price <= 0 or atr <= 0:
-                        print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={raw_price}, atr={atr})")
-                        send_discord_notify(f"[WARNING] 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
+                    # Capital management
+                    p = float(item['price'])
+                    a = float(item['atr'])
+                    if p <= 0 or a <= 0:
+                        print(f"  -> [Skip] {item['code']} - Invalid price or ATR (price={p}, atr={a})")
+                        continue
+                    
+                    # [AI Correction] Check ATR ratio (volatility) against investment price, rather than ATR value itself
+                    atr_pct = (a / p) if p > 0 else 0
+                    if pd.isna(p) or pd.isna(a) or p <= 0 or a <= 0:
+                        print(f"\nINFO: Detected abnormal price/ATR data, safety device activated and purchase forcibly cancelled. (price={p}, atr={a})")
+                        send_discord_notify(f"[WARNING] [Safety Device Activated] Abnormal price/ATR data detected for {item['code']} {item['name']}. Purchase forcibly cancelled.")
                         last_scan_time = loop_start_time
                         should_continue_scan = False
-                    elif atr_pct > 0.10: # 例: 15分足ベースのATRが株価の10%を超えるような超激動銘柄は避ける
-                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 異常なボラティリティ検知(ATR比率:{atr_pct*100:.1f}%)。ギャンブル性が高いため見送ります。"
+                        break # Exit the loop if safety device activates
+                    elif atr_pct > 0.10: # E.g., avoid highly volatile stocks where 15-min ATR exceeds 10% of stock price
+                        msg = f"INFO: [Skipping] {item['code']} {item['name']} - Abnormal volatility detected (ATR ratio:{atr_pct*100:.1f}%). High gambling nature, skipping."
                         print(f"\n{msg}")
                         send_discord_notify(msg)
-                        should_continue_scan = False
-                else:
-                    print("\n💡 AI定性フィルターにより、全ての候補がリジェクトされました（または対象なし）。安全のため見送ります。")
-                    send_discord_notify("💡 【見送り】AI定性フィルターにより全候補がリジェクトされました。安全のため見送ります。")
+                        continue # Skip this item if volatility is too high
+
+                    tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
+                    te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                    ra = te * MAX_RISK_PER_TRADE
+                    sm = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+                    rps = a * sm
+                    is_sh = int(ra // rps) if rps > 0 else 100
+                    ma = max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                    ms_a = int(ma // tp)
+                    ms_c = int((account['cash'] / 1.0001) // tp)
+                    ts = (min(is_sh, ms_a, ms_c) // 100) * 100
+                    
+                    if ts >= 100:
+                        best_target, shares_to_buy, buy_price, cost, final_atr = item, ts, tp, tp * ts, a
+                        print(f"  -> [OK] Selected: {code} ({ts} shares)")
+                        break
+                    else:
+                        print(f"  -> [Skip] {code} - Budget Short (Needs {tp*100:,.0f} / Cash {account['cash']:,.0f})")
+
+                if not best_target:
+                    print("\n[Scan] No passing candidate found.")
                     should_continue_scan = False
 
             if should_continue_scan and best_target:
-                # ATRベースのスリッページを加味し、呼値（Tick Size）に合わせて正規化（不利な方向に丸めて約定優先）
-                buy_price = normalize_tick_size(raw_price + (atr * 0.1), is_buy=True)
-                
-                
-                total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-                risk_amount = total_equity * MAX_RISK_PER_TRADE
-                
-                current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-                risk_per_share = atr * current_sl_mult
-                
-                ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
-                
-                max_investment_amount = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
-                max_shares_by_allocation = int(max_investment_amount // buy_price)
-
-                # 手数料完全無料前提だが、float演算誤差による資金不足判定を防ぐ極小のバッファ
-                COMMISSION_BUFFER = 1.0001  
-
-
-                max_shares_by_cash = int((account['cash'] / COMMISSION_BUFFER) // buy_price)
-                raw_shares = min(ideal_shares, max_shares_by_allocation, max_shares_by_cash)
-                
-                shares_to_buy = (raw_shares // 100) * 100
-                cost = buy_price * shares_to_buy
-                
-                # [Professional Audit] 同一銘柄の「反対注文」衝突回避 (Wash Trade防止)
-                # 買付前に、同じ銘柄の売り注文が出ていないか確認する
                 if not is_sim:
-                    active_orders_for_code = [o for o in broker.get_active_orders() if str(o.get('Symbol')) == str(best_target['code'])]
-                    sell_orders = [o for o in active_orders_for_code if o.get('Side') == '1'] # 1:売
-                    if sell_orders:
-                        print(f"🛡️ {best_target['code']} に有効な売り注文を検出しました。仮装売買防止のため、このターンの買い付けを見送ります。")
-                        continue 
-                
-                if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
+                    active_o = [o for o in broker.get_active_orders() if str(o.get('Symbol')) == str(best_target['code'])]
+                    if [o for o in active_o if o.get('Side') == '1']:
+                        print(f"🛡️ {best_target['code']} has active sell order. Skip.")
+                        should_continue_scan = False
+
+                if should_continue_scan:
                     if is_sim:
-                        print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
-                        print(f"[BUY] 買付価格: {buy_price:,.1f}円 | 数量: {shares_to_buy}株 | 代金: {cost:,.0f}円")
-                        notify_msg = f"🏆 **【新規買付(SIM)】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 価格: {buy_price:,.1f}円 × {shares_to_buy}株 (代金: {cost:,.0f}円)\n[STAT] AI判定: 問題なし"
-                        send_discord_notify(notify_msg)
-                        actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {shares_to_buy}株 ({cost:,.0f}円)")
-                        
-                        # [OK] 手数料ゼロ化に伴い、代金分のみを現金から引く
+                        print(f"\n[BUY SIM] {best_target['code']} {best_target['name']} | {buy_price:,.1f} x {shares_to_buy}")
+                        send_discord_notify(f"BUY SIM: {best_target['code']} {best_target['name']} | {buy_price:,.1f} x {shares_to_buy}")
                         account['cash'] -= cost
-                        # [Professional Audit] 資金管理の原子性（二重使用防止）のため、即座に保存
-                        if hasattr(broker, 'save_account'): broker.save_account(account)
-                        
                         portfolio.append({
                             "code": best_target['code'], "name": best_target['name'],
                             "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                             "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
                             "current_price": round(buy_price, 1), "shares": shares_to_buy
                         })
-                        # [Professional Audit] 買付後はウォッチリストから除外して監視を卒業させる（永続化含む）
                         if best_target['code'] in watchlist:
                             watchlist.remove(best_target['code'])
-                            save_watchlist(watchlist)
                         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         if hasattr(broker, 'save_account'): broker.save_account(account)
                     else:
-                        print(f"🛡️ 【OMS発動】追従型指値注文（Chase Order）で買い付けを開始します")
-                        # 買付時は `shares_to_buy` と `atr` を渡して追従発注
-                        details = broker.execute_chase_order(best_target['code'], shares_to_buy, side="2", atr=atr)
-                        
-                        # [Professional Audit Round 3] 部分約定 (State=7) を受容し、データの欠落を防ぐ
+                        print(f"[OMS] Chase Order: {best_target['code']}")
+                        details = broker.execute_chase_order(best_target['code'], shares_to_buy, side="2", atr=final_atr)
                         state = details.get('State') if details else None
                         actual_qty = int(details.get('Qty', 0)) if details else 0
-                        
                         if details and state in [6, 7] and actual_qty > 0:
-                            exec_price = float(details.get('Price', 0))
-                            if exec_price == 0:
-                                exec_price = buy_price
-                                exec_details = details.get('Details', [])
-                                if exec_details:
-                                    total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
-                                    total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
-                                    if total_qty > 0:
-                                        exec_price = total_val / total_qty
-                            
-                            exec_cost = exec_price * actual_qty
-                            
-                            print(f"[OK] 注文完了（追従済）: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円")
-                            notify_msg = f"🏆 **【新規買付・約定】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株\n[STAT] OMS: 追従完了"
-                            send_discord_notify(notify_msg)
-                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
+                            exec_p = float(details.get('Price', 0)) or buy_price
+                            print(f"[OK] Buy Done: {best_target['code']} {actual_qty} @ {exec_p:,.1f}")
+                            send_discord_notify(f"BUY EXEC: {best_target['code']} | {exec_p:,.1f} x {actual_qty}")
                             portfolio.append({
                                 "code": best_target['code'], "name": best_target['name'],
                                 "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
-                                "current_price": round(exec_price, 1), "shares": actual_qty
+                                "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1),
+                                "current_price": round(exec_p, 1), "shares": actual_qty
                             })
-                            # [Professional Audit] 買付後はウォッチリストから除外して監視を卒業させる（永続化含む）
                             if best_target['code'] in watchlist:
                                 watchlist.remove(best_target['code'])
-                                save_watchlist(watchlist)
                             if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         else:
-                            msg = f"[WARNING] 【注文未約定/エラー】{best_target['code']} の追従発注が完了しませんでした。次サイクルで再試行します。"
-                            print(msg)
-                            send_discord_notify(msg)
-                else:
-                    if shares_to_buy < 100:
-                        # [AI修正] 指摘の通り、「ATR 18.9」などが異常なのではなく、100株単位の制約とリスク許容度のミスマッチであることを明示
-                        target_risk_yen = risk_amount
-                        required_risk_for_100_shares = (atr * current_sl_mult) * 100
-                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 資金管理上の制限。1単元(100株)のリスク量({required_risk_for_100_shares:,.0f}円)が、許容上限({target_risk_yen:,.0f}円/トレード)を超えています。"
-                        print(f"\n{msg}")
-                        send_discord_notify(msg)
-                    else:
-                        msg = f"💡 【見送り】{best_target['code']} {best_target['name']} — 現金不足 ({cost:,.0f}円必要 / 残高{account['cash']:,.0f}円)。"
-                        print(f"\n{msg}")
-                        send_discord_notify(msg)
+                            print(f"[WARNING] Order rejected/failed for {best_target['code']}")
 
         summary_record = {
             "time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
@@ -780,18 +734,16 @@ def _main_exec():
         if hasattr(broker, 'log_execution_summary'):
             broker.log_execution_summary(summary_record)
 
-        # --- [Phase 11-13] キャッシュ清掃・GC・リソース保護 ---
-        # 1時間に1回、非アクティブなバッファを解放する (GC)
         if int(time.time()) % 3600 < 30:
             active_codes = set([str(p['code']) for p in portfolio] + watchlist + ['1321'])
             inactive_codes = [c for c in realtime_buffers if c not in active_codes]
             for c in inactive_codes:
-                print(f"🧹 [GC] 非アクティブなバッファ {c} をメモリ解放します。")
+                print(f"[GC] Clearing {c}")
                 del realtime_buffers[c]
 
         elapsed = time.time() - loop_start_time
-        sleep_time = max(5.0, MONITOR_INTERVAL_SEC - elapsed)
-        print(f"\n💤 次の監視({MONITOR_INTERVAL_SEC}秒周期)まで待機します...")
+        sleep_time = max( MONITOR_INTERVAL_SEC - elapsed, 5.0)
+        print(f"\nNext loop in {sleep_time:.1f}s...")
         time.sleep(sleep_time)
 
 if __name__ == "__main__":

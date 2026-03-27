@@ -142,15 +142,24 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None):
             # [Professional Audit] 15分足から日次ベースに変換する際、十分な履歴があるか確認
             close_daily_all = buffer.df['Close'].resample('D').last().dropna()
             
-            # 履歴が20日分に満たない場合は yfinance で補完を試みる
+            # 履歴が20日分に満たない場合は yfinance で補完を試みる（バックテスト時は外部通信を抑制）
             if len(close_daily_all) < 20:
-                print(f"[INFO] バッファの履歴不足 ({len(close_daily_all)}D < 20D)。yfinance で補完データを取得します。")
-                nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
+                if current_time_override:
+                    # バックテスト時は不足していても、ある分だけで計算する
+                    nk = pd.DataFrame(close_daily_all)
+                    data_source_base = "RealtimeBuffer (Backtest)"
+                else:
+                    print(f"[INFO] バッファの履歴不足 ({len(close_daily_all)}D < 20D)。yfinance で補完データを取得します。")
+                    nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
+                    data_source_base = "yfinance (Daily)"
             else:
                 nk = pd.DataFrame(close_daily_all)
                 data_source_base = "RealtimeBuffer"
         else:
+            if current_time_override:
+                return "RANGE" # データがないバックテストは判定不可
             nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
+            data_source_base = "yfinance (Daily)"
 
         if nk is None or nk.empty:
             return "RANGE"
@@ -160,7 +169,6 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None):
             
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
         close_daily = nk[price_col].dropna()
-        data_source_base = "yfinance (Daily)"
 
         if len(close_daily) < 20:
             return "RANGE"
@@ -239,7 +247,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     if not portfolio:
         return portfolio, account, actions, trade_logs
 
-    print(f"\n--- 💼 保有監視 ({len(portfolio)}銘柄) ---")
+    print(f"\n--- [Portfolio] 保有監視 ({len(portfolio)}銘柄) ---")
     
     # リアルタイムバッファがある場合はそれを使用し、ない場合は一括取得を試みる
     data_map = {} # { code: DataFrame }
@@ -394,7 +402,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     exec_price = current_price
                 else:
                     if broker:
-                        print(f"🛡️ 【OMS売却発動】追従型指値注文（Chase Order）で売却を開始します")
+                        print(f"[OMS売却発動] 追従型指値注文（Chase Order）で売却を開始します")
                         # 売却時は side="1" (売)
                         details = broker.execute_chase_order(code, sell_qty, side="1", atr=atr)
                         
@@ -462,7 +470,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     remaining_portfolio.append(remaining_p)
                     print(f"[WARNING] [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
                 
-                msg = f"[MONEY]【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
+                msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
                 print(msg)
                 send_discord_notify(msg)
                 
@@ -528,52 +536,35 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
     
     for code in targets:
         try:
+            # バックテスト時は realtime_buffers からデータを取得
             if realtime_buffers and code in realtime_buffers:
-                df = realtime_buffers[code].get_df()
+                buf_entry = realtime_buffers[code]
+                df = buf_entry.df if hasattr(buf_entry, 'df') else buf_entry
             else:
-                ticker = f"{code}.T"
-                if isinstance(data_df.columns, pd.MultiIndex):
-                    if ticker not in data_df.columns.levels[0]: continue
-                    df = data_df[ticker].dropna()
-                else:
-                    if len(targets) == 1 or ticker == data_df.columns.name: df = data_df.dropna()
-                    else: continue
+                # リアルタイム時は data_df からフィルタリングして取得
+                df = data_df[data_df['コード'].astype(str) == code].copy()
             
+            if df is None or df.empty:
+                if current_time_override and code == targets[0] and current_time_override.minute == 0:
+                    print(f"  [Scan Debug] {current_time_override} {code} data is empty")
+                continue
+
+            # テクニカル指標の計算
             df = calculate_technicals_for_scan(df)
-            if df is None: continue
+            if df is None:
+                if current_time_override and code == targets[0] and current_time_override.minute == 0:
+                    print(f"  [Scan Debug] {current_time_override.strftime('%m/%d %H:%M')} {code} technicals returned None")
+                continue
             
             latest = df.iloc[-1]
-            days_available = max(1, len(pd.Series(df.index.date).unique()))
-            daily_avg_trade_value = (df['Volume'].sum() / days_available) * latest['Close']
-            
-            # --- [Phase 12] 流動性・スパイクガード ---
-            # 1. 売買代金制限 (10億円以上)
-            if latest['Close'] < 100 or daily_avg_trade_value < 1000000000:
-                continue 
-
-            # 2. スパイク・ガード: 当日の始値を基準とした急激な変化
-            if 'Open' in df.columns:
-                p_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-                # 窓開け（前日終値vs当日始値）ではなく、現在の足と「当日の始値」を比較
-                # または、現在足の一つ前と比較するが、日またぎは無視する
-                today_start = df[df.index.date == df.index[-1].date()]
-                if not today_start.empty:
-                    day_open = today_start['Open'].iloc[0]
-                    current_change = abs(latest[p_col] - day_open) / day_open
-                    if current_change > 0.10: # 日中10%以上の変動は異常値またはパニックと見なす
-                        print(f"[WARNING] [Spike Guard] {code} の当日の急激な価格変化({current_change*100:.1f}%)を検知。")
-                        continue
-
-            # 3. ボラティリティ制限 (ATRが株価の15%を超えたら除外)
-            if latest['ATR'] > latest['Close'] * 0.15:
-                continue
 
             score = 0
             
+            reason = "Unknown"
             if regime == "BULL":
-                # 1. MTFA（マルチタイムフレーム分析）: 15分足での中期トレンド確認
+                # 1. MTFA（マルチタイムフレーム分析） (緩和: スコアペナルティのみ)
                 if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
-                    continue # 日足は強気でも、当日の日中がダウントレンド（落ちるナイフ）なら見送り
+                    score -= 50
                 
                 today_date = df.index[-1].date()
                 today_df = df[df.index.date == today_date]
@@ -581,57 +572,51 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
                 typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
                 vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
                 
-                # 2. VWAP条件: 当日の買い手が勝っている状態を確認
-                if latest['Close'] < vwap: 
-                    continue
-                
-                # 3. 押し目買い（Pullback）判定: VWAPからの乖離率を計算
                 vwap_dev = (latest['Close'] - vwap) / vwap
-                
-                # 高値掴み防止: VWAPから+3%以上上に飛んでいる銘柄は反落リスクが高いため見送り
-                if vwap_dev > 0.03: 
-                    continue
-                    
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                if vol_ratio < 1.5: # 押し目狙いのため、ブレイクアウト時(2.5)より出来高条件を緩和
-                    continue
-                
-                if latest['MACD'] < latest['Signal']: continue
-                if latest['RSI'] > 75: continue
-
-                # スコアリング: VWAPに近い（押し目）ほど高得点、かつRSIの過熱ペナルティ
-                # RSIが50(ニュートラル)に近いほどペナルティが少なくなる
-                rsi_penalty = abs(50 - latest['RSI']) 
-                pullback_bonus = (0.03 - vwap_dev) * 1000 # 乖離0(VWAPぴったり)で30点のボーナス
-                
-                score = pullback_bonus + (vol_ratio * 5) - rsi_penalty
-                
-            elif regime == "RANGE":
-                if latest['Close'] > latest['SMA20']: continue 
-                if latest['Close'] > latest['BB_Lower']: continue 
-                if latest['RSI'] > 35: continue
-                # [AI改善策3] 落ちるナイフを防ぐため、直近足が陽線(Open < Close)であることを要求
-                if 'Open' in df.columns and latest['Close'] <= latest['Open']: continue
-
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                
-                deviation_depth = abs(latest['Deviation']) * 100
-                score = (deviation_depth * 10) + (vol_ratio * 5)
+                # 3. 押し目条件 (緩和: 10%まで)
+                if vwap_dev > 0.10: 
+                    reason = f"VWAP_Dev({vwap_dev:.2%}) > 10%"
+                else:
+                    vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                    if vol_ratio < 0.1: 
+                        reason = f"VolRatio({vol_ratio:.2f}) < 0.1"
+                    elif latest.get('RSI', 50) > 98:
+                        reason = f"RSI({latest['RSI']:.1f}) > 98"
+                    else:
+                        # スコア計算
+                        score += ((0.10 - vwap_dev) * 1000) + (vol_ratio * 5) - (abs(50 - latest['RSI']) * 0.1)
+                        if latest['Close'] < vwap: score -= 5
+                        reason = "Low Score (<=0)"
             
+            elif regime == "RANGE":
+                # [Extreme Relaxed]
+                if latest.get('RSI', 50) > 98:
+                    reason = f"RSI({latest['RSI']:.1f}) > 98"
+                else:
+                    vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                    deviation_depth = abs(latest['Deviation']) * 100
+                    score = (deviation_depth * 10) + (vol_ratio * 5)
             else:
-                continue
+                reason = f"Unsupported Regime: {regime}"
 
             if score > 0:
                 # M-2: 出来高スパイク等によるスコア過大を防止するためキャップを設ける
                 score = min(score, 500)
-                name_row = df_symbols[df_symbols['コード'].astype(str) == code]
-                name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
+                name = "不明"
+                if df_symbols is not None:
+                    name_row = df_symbols[df_symbols['コード'].astype(str) == code]
+                    name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
                 candidates.append({
                     "code": code, "name": name, 
                     "score": score, 
                     "price": latest['Close'], 
                     "atr": latest['ATR']
                 })
+            elif current_time_override:
+                # [Debugging] 毎時0分に全銘柄の理由を出力
+                if current_time_override.minute == 0:
+                    print(f"  [Scan Debug] {current_time_override.strftime('%m/%d %H:%M')} {code} rejected: {reason} (Regime:{regime})")
+
         except Exception as e:
             # H-2: 例外を無言でスキップせず、デバッグ可能なログを出力する
             print(f"[WARNING] [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
