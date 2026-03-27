@@ -17,6 +17,9 @@ if GROQ_API_KEY:
 else:
     groq_client = None
 
+# [Professional Audit] スレッドプールをグローバルに保持し、呼び出しごとの生成・破棄オーバーヘッドを削減
+ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
 def clean_text_for_ai(text):
     if not isinstance(text, str): return ""
     text = re.sub(r'[\r\n\t]+', ' ', text)
@@ -95,13 +98,13 @@ def _ai_qualitative_filter_core(code, name, news_text):
 def ai_qualitative_filter(code, name, news_text, timeout=10):
     """V2-M2: APIやネットワークのスタックを防ぐため、安全にAI判定を実行する"""
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_ai_qualitative_filter_core, code, name, news_text)
-            return future.result(timeout=timeout)
+        future = ai_executor.submit(_ai_qualitative_filter_core, code, name, news_text)
+        return future.result(timeout=timeout)
     except concurrent.futures.TimeoutError:
-        print(f"⚠️ {code} のAI判定が{timeout}秒以内に応答しませんでした。機会損失を防ぐため一時承認します。")
-        return True, "AI判定タイムアウトのため一時承認"
+        msg = f"⚠️ {code} のAI判定が{timeout}秒以内に応答しませんでした。リスク許容範囲として一時承認します。"
+        print(msg)
+        return True, msg
     except Exception as e:
-        # 万が一クライアント内で長引いてエラーを吐いた場合の最後のセーフティネット
-        print(f"⚠️ {code} のAI判定中に予期せぬエラーが発生しました。機会損失を防ぐため一時承認します: {e}")
+        msg = f"⚠️ {code} のAI判定中に予期せぬエラーが発生しました: {e}"
+        print(msg)
         return True, "AI判定エラー回避(一時承認)"

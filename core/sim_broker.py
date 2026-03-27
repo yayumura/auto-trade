@@ -42,6 +42,10 @@ class SimulationBroker(BaseBroker):
         import time
         return f"SIM-{int(time.time())}"
 
+    def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> str:
+        """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
+        return self.execute_market_order(code, shares, side)
+
     def cancel_order(self, order_id: str) -> bool:
         """ シミュレーションでは即キャンセル成功とする """
         return True
@@ -86,12 +90,19 @@ class SimulationBroker(BaseBroker):
         # CSVへの記録作成
         write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
         actions_str = " | ".join(actions) if actions else "アクションなし"
+        
+        # [Professional Audit] ログ出力用のデータフレームを作成
         df_log = pd.DataFrame([{
-            "time": summary_record['time'], 
-            "actions": actions_str, 
-            "portfolio_count": len(summary_record['portfolio']), 
-            "stock_value_yen": summary_record['stock_value_yen'], 
-            "cash_yen": summary_record['cash_yen'], 
-            "total_assets_yen": total_assets
+            "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "regime": summary_record.get('regime', 'UNKNOWN'),
+            "total_assets": total_assets,
+            "cash": summary_record.get('cash_yen', 0),
+            "stock_value": summary_record.get('stock_value_yen', 0),
+            "actions": actions_str
         }])
+        
         df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+        
+        # [Professional Audit] 実行ログの肥大化防止（ローテーション）
+        from core.file_io import rotate_csv_if_large
+        rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=5)

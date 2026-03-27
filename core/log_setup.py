@@ -57,17 +57,41 @@ def setup_logging():
             except: pass
         atexit.register(safe_close, tee_out)
         atexit.register(safe_close, tee_err)
+        # [Professional Audit] 終了時に通知スレッドの完了を待機する
+        atexit.register(flush_notifications)
     # H-7: clean_old_logsをモジュールロード時ではなくここで呼ぶ（副作用を局所化）
     clean_old_logs()
 
+_notify_threads = []
+
 def send_discord_notify(message):
+    """
+    Discordへ通知を送信する。
+    [Professional Audit] ネットワーク遅延をメインから切り離しつつ、終了時の未送信を防止する。
+    """
     if not DISCORD_WEBHOOK_URL:
         return
-    try:
-        # L-1: timeoutを指定してDiscordサーバー障害時にメインループをブロックしないよう修正
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=5)
-    except Exception as e:
-        print(f"⚠️ Discord通知エラー: {e}")
+    
+    global _notify_threads
+    import threading
+    def _send():
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
+        except Exception:
+            pass
+    
+    t = threading.Thread(target=_send)
+    t.start()
+    _notify_threads.append(t)
+    # 古いスレッドをクリーンアップ
+    _notify_threads = [th for th in _notify_threads if th.is_alive()]
+
+def flush_notifications():
+    """終了時に未送信の通知が完了するのを待機する"""
+    for t in _notify_threads:
+        if t.is_alive():
+            t.join(timeout=5)
+# setup_logging内で atexit.register(flush_notifications) を呼び出すように変更
 
 def clean_old_logs(days=30):
     """古いログファイルを自動的に削除し、ディスク容量を保護します。"""

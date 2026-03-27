@@ -10,6 +10,87 @@ from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE,
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
 from core.utils import calculate_effective_age
+from collections import deque
+
+# --- [Phase 2] リアルタイム・データバッファ管理 ---
+class RealtimeBuffer:
+    """
+    yfinance の過去データ(15分足等)に、カブコムのリアルタイムTickを
+    シームレスに結合して最新のOHLCVを生成・保持するバッファ。
+    """
+    def __init__(self, code, history_df, interval_mins=15):
+        self.code = code
+        self.interval_mins = interval_mins
+        # 過去データを保持
+        if isinstance(history_df.columns, pd.MultiIndex):
+            ticker = f"{code}.T"
+            self.df = history_df[ticker].dropna().copy() if ticker in history_df.columns.levels[0] else pd.DataFrame()
+        else:
+            self.df = history_df.copy()
+            
+        # インデックスをJSTに統一
+        if not self.df.empty and self.df.index.tzinfo is None:
+            self.df.index = self.df.index.map(lambda x: x.replace(tzinfo=JST) if x.tzinfo is None else x)
+            
+        self.last_tick_time = None
+        self.last_total_volume = None # カブコム由来の当日累積出来高の前回値を保持
+        self.last_update_time = None # [Professional Audit] 鮮度監視用
+
+    def update(self, price, total_volume, timestamp):
+        """ カブコムAPIの現在値(Tick)でバッファを更新または新規行追加 """
+        self.last_update_time = datetime.now(JST) # 更新時刻を記録
+        if price is None or price <= 0: return self.df
+        
+        # 出来高の増分（デルタ）を計算
+        delta_volume = 0
+        if self.last_total_volume is not None:
+            if total_volume >= self.last_total_volume:
+                delta_volume = total_volume - self.last_total_volume
+            else:
+                # [Professional Audit] ボリュームのリセット（日付変更等）を検知
+                delta_volume = total_volume
+        self.last_total_volume = total_volume
+
+        # タイムスタンプをインターバルの開始時刻に切り捨てる
+        current_dt = timestamp
+        minute_offset = current_dt.minute % self.interval_mins
+        bar_start = current_dt.replace(minute=current_dt.minute - minute_offset, second=0, microsecond=0)
+        
+        if self.df.empty:
+            new_row = pd.DataFrame([{
+                'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': delta_volume
+            }], index=[bar_start])
+            self.df = new_row
+            return self.df
+        
+        # [Professional Audit] OS時刻の揺らぎ（NTP同期等）によるインデックス逆転を防止
+        bar_start = max(bar_start, self.df.index[-1])
+
+        if bar_start in self.df.index:
+            # 既存の最新足を更新
+            idx = bar_start
+            self.df.at[idx, 'High'] = max(self.df.at[idx, 'High'], price)
+            self.df.at[idx, 'Low'] = min(self.df.at[idx, 'Low'], price)
+            self.df.at[idx, 'Close'] = price
+            self.df.at[idx, 'Volume'] += delta_volume # 増分を加算
+        else:
+            # 新しい足を追加
+            new_row = pd.DataFrame([{
+                'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': delta_volume
+            }], index=[bar_start])
+            self.df = pd.concat([self.df, new_row])
+            if len(self.df) > 200:
+                self.df = self.df.iloc[-200:]
+                
+        return self.df
+
+    def get_df(self):
+        return self.df
+
+    def is_stale(self, max_seconds=3600):
+        """ [Professional Audit] データの鮮度を確認。一定時間更新がない場合は True """
+        if not self.last_update_time: return True
+        return (datetime.now(JST) - self.last_update_time).total_seconds() > max_seconds
 
 def normalize_tick_size(price: float, is_buy: bool) -> int:
     """
@@ -18,19 +99,25 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
     （買付なら上、売却なら下）の有効な呼値に丸めます。
     """
     p = float(price)
+    
+    # [Professional Audit] 2024年現在の東証標準呼値（非TOPIX100銘柄用）に基づく厳格な丸め
     if p <= 3000:
-        tick = 1
+        tick = 1.0
     elif p <= 5000:
-        tick = 5
+        tick = 5.0
     elif p <= 10000:
-        tick = 10
+        tick = 10.0
     elif p <= 30000:
-        tick = 50
+        tick = 50.0
     elif p <= 50000:
-        tick = 100
+        tick = 100.0
+    elif p <= 100000:
+        tick = 500.0
+    elif p <= 1000000:
+        tick = 1000.0
     else:
-        tick = 100 # 簡易版
-
+        tick = 5000.0
+    
     if is_buy:
         # 買付：指定価格以上の最小の呼値（切り上げ）
         return int((p + tick - 0.0001) // tick * tick)
@@ -39,49 +126,84 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
         return int(p // tick * tick)
 
 # --- 【中核1】レジーム（地合い）認識 ---
-def detect_market_regime():
+def detect_market_regime(broker=None, buffer=None):
     """
-    日経平均の過去1ヶ月のデータから現在の相場環境（レジーム）を判定する。
-    戻り値: "BULL"(強気), "RANGE"(揉み合い), "BEAR"(弱気/パニック)
+    市場の地合い（Regime）を推定する。
+    buffer が提供されている場合は、yfinance の代わりにリアルタイムバッファを使用する。
     """
+    etf_ticker = '1321.T'
     try:
-        nk = yf.download('^N225', period="1mo", interval="1d", threads=False, progress=False)
-        if nk.empty or len(nk) < 20:
+        # ヒストリカルデータ（日足）を取得してSMA20を計算
+        if buffer is not None and not buffer.df.empty:
+            # [Professional Audit] 15分足から日次ベースに変換する際、十分な履歴があるか確認
+            close_daily_all = buffer.df['Close'].resample('D').last().dropna()
+            
+            # 履歴が20日分に満たない場合は yfinance で補完を試みる
+            if len(close_daily_all) < 20:
+                print(f"ℹ️  バッファの履歴不足 ({len(close_daily_all)}D < 20D)。yfinance で補完データを取得します。")
+                nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
+            else:
+                nk = pd.DataFrame(close_daily_all)
+                data_source_base = "RealtimeBuffer"
+        else:
+            nk = yf.download(etf_ticker, period="1mo", interval="1d", threads=False, progress=False)
+
+        if nk is None or nk.empty:
             return "RANGE"
-        
-        # 【修正】朝イチの誤作動を防ぐため、安易な日付比較によるHOLIDAY判定を削除しました
-        
-        # yfinance v0.2.31以降はMultiIndex列を返すため、フラット化
+            
         if isinstance(nk.columns, pd.MultiIndex):
             nk.columns = nk.columns.droplevel('Ticker')
-        
+            
         price_col = 'Adj Close' if 'Adj Close' in nk.columns else 'Close'
-        close = nk[price_col].dropna()
-        sma20 = float(close.rolling(window=20).mean().iloc[-1])
-        
-        current = float(close.iloc[-1])
-        volatility = float(close.pct_change().dropna().std()) * np.sqrt(252)
-        
-        print(f"  📈 N225: 現在値={current:.0f} SMA20={sma20:.0f} Vol={volatility:.2f}")
-        
-        # --- [Phase 13] データの鮮度チェック ---
-        last_date_time = close.index[-1]
-        if last_date_time.tzinfo is None:
-            last_date_time = JST.localize(last_date_time)
-        
-        effective_age = calculate_effective_age(last_date_time, datetime.now(JST))
-        if effective_age > 3600:
-             print(f"⚠️ [Data Stale] 指数データが古すぎます(実効遅延: {effective_age/60:.1f}分)。レジーム判定が不正確な可能性があります。")
+        close_daily = nk[price_col].dropna()
+        data_source_base = "yfinance (Daily)"
 
+        if len(close_daily) < 20:
+            return "RANGE"
+        
+        sma20 = float(close_daily.rolling(window=20).mean().iloc[-1])
+        
+        # --- [Phase 1.1] リアルタイム価格の取得 (Hybrid) ---
+        current = float(close_daily.iloc[-1])
+        data_source = data_source_base
+
+        if broker and hasattr(broker, 'get_board_data'):
+            # カブコムAPIから1321（ETF）の最良気配/現在値を取得
+            board = broker.get_board_data(['1321'])
+            b_info = board.get('1321')
+            if b_info and b_info.get('price') and b_info.get('price') > 0:
+                current = float(b_info['price'])
+                data_source = "Kabucom API (Real-time)"
+            elif b_info and b_info.get('bid') and b_info.get('ask'):
+                # 現在値が0（寄付前など）の場合は、気配の仲値を採用
+                current = (float(b_info['bid']) + float(b_info['ask'])) / 2
+                data_source = "Kabucom API (Mid)"
+
+        # ボラティリティ（日次ベースの年率換算）
+        # --- [Phase 1.2] 当日価格を結合してボラティリティの精度を向上 ---
+        temp_close = close_daily.copy()
+        if "Kabucom" in data_source:
+            today_date = datetime.now(JST).date()
+            if temp_close.index[-1].date() < today_date:
+                temp_close[pd.Timestamp(today_date)] = current
+            else:
+                temp_close.iloc[-1] = current
+        
+        volatility = float(temp_close.pct_change().dropna().std()) * np.sqrt(252)
+
+        print(f"  📈 {etf_ticker}: 現在値={current:.1f} ({data_source}) SMA20={sma20:.1f} Vol={volatility:.2f}")
+
+        # レジーム判定ロジック（パーセンテージベースでスケール不変）
         if current < sma20 * 0.95 and volatility > 0.30:
             return "BEAR" 
         elif current > sma20:
             return "BULL"
         else:
             return "RANGE"
+
     except Exception as e:
         print(f"⚠️ レジーム判定エラー: {e}")
-        raise ConnectionError(f"日経平均データの取得に失敗しました: {e}")
+        return "RANGE"
 
 # --- 【補助】無効銘柄キャッシュ管理 ---
 def load_invalid_tickers():
@@ -94,10 +216,10 @@ def save_invalid_tickers(invalid_set):
         print(f"⚠️ キャッシュ保存エラー: {e}")
 
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True):
+def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None):
     """
     保有株式の利確・損切・タイムストップを判定し、売却処理を行う。
-    is_simulation = False の場合は broker.execute_market_order() を叩いて実際の売り注文を出す。
+    realtime_buffers: { code: RealtimeBuffer } の辞書。存在すれば yfinance 通信を回避する。
     """
     actions = []
     trade_logs = []
@@ -106,20 +228,34 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
         return portfolio, account, actions, trade_logs
 
     print(f"\n--- 💼 保有監視 ({len(portfolio)}銘柄) ---")
-    tickers = [f"{p['code']}.T" for p in portfolio]
     
-    # ✅ try-exceptで囲み、一時的な通信エラーでBOTが落ちるのを防ぐ
-    data = None
-    for retry in range(3):
-        try:
-            data = yf.download(tickers, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
-            break
-        except Exception as e:
-            print(f"⚠️ 保有銘柄のデータ取得に一時的なエラー ({retry+1}/3): {e}")
-            time.sleep(2)
+    # リアルタイムバッファがある場合はそれを使用し、ない場合は一括取得を試みる
+    data_map = {} # { code: DataFrame }
+    
+    tickers_to_download = []
+    for p in portfolio:
+        code = str(p['code'])
+        if realtime_buffers and code in realtime_buffers:
+            data_map[code] = realtime_buffers[code].get_df()
+        else:
+            tickers_to_download.append(f"{code}.T")
 
-    if data is None or data.empty:
-        print("⚠️ 規定回数リトライしましたがデータが取得できませんでした(次回リトライへ持ち越し)")
+    if tickers_to_download:
+        # ✅ 足りない分だけ一括取得
+        try:
+            downloaded = yf.download(tickers_to_download, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
+            if not downloaded.empty:
+                for t in tickers_to_download:
+                    code = t.replace(".T", "")
+                    if isinstance(downloaded.columns, pd.MultiIndex):
+                        data_map[code] = downloaded[t].dropna()
+                    else:
+                        data_map[code] = downloaded.dropna()
+        except Exception as e:
+            print(f"⚠️ 保有銘柄のデータ取得に失敗: {e}")
+
+    if not data_map:
+        print("⚠️ 判定用のデータが取得できませんでした(次回リトライへ持ち越し)")
         return portfolio, account, actions, trade_logs
 
     remaining_portfolio = []
@@ -130,23 +266,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
     for p in portfolio:
         code = str(p['code'])
-        ticker = f"{code}.T"
         try:
-            if isinstance(data.columns, pd.MultiIndex):
-                if ticker not in data.columns.levels[0]:
-                    remaining_portfolio.append(p)
-                    continue
-                df = data[ticker].dropna()
-            else:
-                # yfinanceが単一銘柄でMultiIndexでなくFlatなDFを返すケース
-                # H-1: columns.nameはNoneのことが多いため、len(portfolio)==1のみで判定する
-                if len(portfolio) == 1:
-                    df = data.dropna()
-                else:
-                    # 複数銘柄なのにMultiIndexでない = 想定外のデータ形式。安全に保持継続
-                    print(f"⚠️ [{code}] 想定外のデータ形式(non-MultiIndex with multiple positions)。保持継続。")
-                    remaining_portfolio.append(p)
-                    continue
+            if code not in data_map:
+                remaining_portfolio.append(p)
+                continue
+            df = data_map[code]
             
             if df.empty or len(df) < 14: 
                 remaining_portfolio.append(p)
@@ -214,11 +338,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif current_price <= buy_price - (atr * current_stop_loss_mult):
                 sell_reason = f"ボラティリティ損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif current_price <= highest_price_db - (atr * current_trail_mult) and highest_price_db > buy_price:
-                if current_price > buy_price * 1.005: 
+            elif highest_price_db > buy_price and current_price <= highest_price_db - (atr * current_trail_mult):
+                # 利益が出ている状態から反落した場合
+                if current_price > buy_price * 1.01: # 1%以上の利益があれば「トレール利確」
                     sell_reason = f"トレール利確 (Trailing Stop from {highest_price_db:.1f})"
                 else:
-                    sell_reason = "建値撤退 (Break Even)"
+                    sell_reason = "建値撤退 (Break Even / Minimal Profit)"
             # --- 【新規】分割利確ロジック ---
             elif not is_partial_sold and current_price >= buy_price + (atr * 1.5):
                 # 利益がATRの1.5倍に乗ったら、確実な利益ロックのために半分だけ利確する
@@ -255,19 +380,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     exec_price = current_price
                 else:
                     if broker:
-                        # [V2-M2] 決済時にもスリッページを制限した指値（Marketable Limit Order）を使用
-                        # ATRの半分(0.5)を下限価格として設定し、それより下では絶対に売らない防波堤を作る
-                        limit_sell_price = normalize_tick_size(current_price_raw - (atr * 0.5), is_buy=False)
-                        order_id = broker.execute_market_order(code, sell_qty, side="1", price=limit_sell_price) # 【修正】sell_qty を指定
-                        if not order_id:
-                            print(f"⚠️ {code} の売却注文が証券会社APIで拒否・失敗しました。")
-                            remaining_portfolio.append(p)
-                            continue
+                        print(f"🛡️ 【OMS売却発動】追従型指値注文（Chase Order）で売却を開始します")
+                        # 売却時は side="1" (売)
+                        details = broker.execute_chase_order(code, sell_qty, side="1", atr=atr)
                         
-                        # 決済時は確実に約定を確認 (Phase 11)
-                        details = broker.wait_for_execution(order_id)
                         if not details or details.get('State') != 6:
-                            print(f"⚠️ {code} の約定が確認できませんでした。手動確認が必要です。")
+                            print(f"⚠️ {code} の売却が完了しませんでした。次サイクルで再試行または手動確認が必要です。")
                             remaining_portfolio.append(p)
                             continue
                             
@@ -282,7 +400,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                                 if total_qty > 0:
                                     exec_price = total_val / total_qty
                         
-                        actual_qty = int(details.get('Qty', sell_qty)) # 【修正】sell_qty をデフォルトに
+                        actual_qty = int(details.get('Qty', sell_qty))
                         
                     else:
                         print(f"⚠️ エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
@@ -355,10 +473,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 def calculate_technicals_for_scan(df):
     if len(df) < 50:
         return None
-    df['Avg_Vol_15m'] = df['Volume'].rolling(window=100, min_periods=20).mean().replace(0, 1) 
     
     price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-    df['SMA20'] = df[price_col].rolling(window=20).mean()
+    if price_col not in df.columns or df[price_col].isnull().all():
+        return None
+    df['SMA20'] = df[price_col].rolling(window=20).mean().replace(0, np.nan)
     df['SMA50'] = df[price_col].rolling(window=50).mean() # 【新規】MTFA用の50期間線を追加
     df['STD20'] = df[price_col].rolling(window=20).std()
     df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
@@ -380,21 +499,27 @@ def calculate_technicals_for_scan(df):
     df['MACD'] = df[price_col].ewm(span=12, adjust=False).mean() - df[price_col].ewm(span=26, adjust=False).mean()
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
+    # --- [Phase 12] ボリューム解析の追加 ---
+    df['Avg_Vol_15m'] = df['Volume'].rolling(window=20).mean()
+    
     return df
 
-def select_best_candidates(data_df, targets, df_symbols, regime):
+def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=None):
     """ 地合い(レジーム)に応じた数学的スコアリングを行い、トップ候補を抽出 """
     candidates = []
     
     for code in targets:
-        ticker = f"{code}.T"
         try:
-            if isinstance(data_df.columns, pd.MultiIndex):
-                if ticker not in data_df.columns.levels[0]: continue
-                df = data_df[ticker].dropna()
+            if realtime_buffers and code in realtime_buffers:
+                df = realtime_buffers[code].get_df()
             else:
-                if len(targets) == 1 or ticker == data_df.columns.name: df = data_df.dropna()
-                else: continue
+                ticker = f"{code}.T"
+                if isinstance(data_df.columns, pd.MultiIndex):
+                    if ticker not in data_df.columns.levels[0]: continue
+                    df = data_df[ticker].dropna()
+                else:
+                    if len(targets) == 1 or ticker == data_df.columns.name: df = data_df.dropna()
+                    else: continue
             
             df = calculate_technicals_for_scan(df)
             if df is None: continue

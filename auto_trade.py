@@ -99,7 +99,8 @@ def release_lock():
 
 from core.logic import (
     detect_market_regime, manage_positions, select_best_candidates, 
-    load_invalid_tickers, save_invalid_tickers, normalize_tick_size
+    load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
+    RealtimeBuffer
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -188,6 +189,7 @@ def _main_exec():
     
     # --- [Hybrid Monitoring State] ---
     watchlist = []
+    realtime_buffers = {} # { "code": RealtimeBuffer_instance }
     has_morning_scanned = False
     registered_count = 0
 
@@ -195,6 +197,13 @@ def _main_exec():
     canceled_orders = {}
 
     while True:
+        # [Phase 15] ファイルベース・ソフトストップ
+        if os.path.exists("stop.txt"):
+            print("🛑 stop.txt を検出しました。安全に停止します。")
+            try: os.remove("stop.txt")
+            except: pass
+            break
+
         loop_start_time = time.time()
         # --- [Phase 14] Server Time Sync ---
         server_datetime = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.now(JST)
@@ -208,6 +217,13 @@ def _main_exec():
             send_discord_notify("🏁 【業務終了】15:30（大引け）を過ぎたため、自動運用を終了しました。")
             if not is_sim:
                 broker.unregister_all() # [Expert Refinement] 終了時に登録解除
+                # [Professional Audit] 未約定注文があれば全て強制的にキャンセル（翌日への持ち越し防止）
+                active_orders_final = broker.get_active_orders()
+                for o in active_orders_final:
+                    oid = o.get('ID')
+                    if oid:
+                        print(f"🧹 [Closing Cleanup] 未約定注文 {oid} を取り消します...")
+                        broker.cancel_order(oid)
             break
 
         if not DEBUG_MODE:
@@ -247,6 +263,11 @@ def _main_exec():
                                 duration_mins = (datetime.now(JST) - order_time).total_seconds() / 60
                                 
                                 if duration_mins >= 5.0:
+                                    # [Phase 11] 注文キャッシュの定期清掃 (1000件超で古い順に削除)
+                                    if len(canceled_orders) > 1000:
+                                        oldest_keys = sorted(canceled_orders.keys())[:100]
+                                        for k in oldest_keys: canceled_orders.pop(k, None)
+
                                     cancel_count = canceled_orders.get(order_id, 0)
                                     if cancel_count >= 3:
                                         # 【修正】通知は「ちょうど3回目」の時だけ送る（スパム防止）
@@ -300,15 +321,53 @@ def _main_exec():
         actions_taken = []
         trade_logs = [] 
 
-        # --- 1. 相場環境（レジーム）判定 ---
+        # --- 1. [Phase 4] 銘柄登録・バッファ同期ロジック ---
         try:
-            regime = detect_market_regime()
+            current_targets = set(watchlist + [str(p['code']) for p in portfolio] + ['1321'])
+            already_tracked = set(realtime_buffers.keys())
+            
+            new_codes = current_targets - already_tracked
+            removed_codes = (already_tracked - current_targets) - {'1321'}
+            
+            if not is_sim:
+                if new_codes:
+                    broker.register_symbols(list(new_codes))
+                if removed_codes:
+                    broker.unregister_symbols(list(removed_codes))
+            
+            # 新規銘柄の初期化（yfinanceからのシードデータ取得）
+            for code in new_codes:
+                print(f"🆕 新規銘柄をバッファに追加: {code}")
+                # 5日分の15分足を初期データとして取得
+                hist = yf.download(str(code)+".T", period="5d", interval="15m", progress=False, threads=False)
+                realtime_buffers[code] = RealtimeBuffer(code=code, interval_mins=15, history_df=hist)
+            
+            # 監視対象外のパージ（メモリリーク防止）
+            for code in removed_codes:
+                print(f"🗑️ 監視対象外のバッファを削除: {code}")
+                realtime_buffers.pop(code, None)
+
+            # --- [Phase 2] 板情報によるバッファ更新 ---
+            if not is_sim:
+                boards = broker.get_board_data(list(current_targets))
+                for code, b_info in boards.items():
+                    price = b_info.get('price')
+                    vol = b_info.get('volume', 0)
+                    if code in realtime_buffers:
+                        realtime_buffers[code].update(price, vol, server_datetime)
         except Exception as e:
-            msg = f"⚠️ 【警告】レジーム判定（日経平均取得）に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
+            print(f"⚠️ リアルタイムバッファ・同期エラー: {e}")
+
+        # --- 2. 相場環境（レジーム）判定 (Phase 1) ---
+        try:
+            # バッファを渡すことで、日内での yf.download の重複を排除
+            regime = detect_market_regime(broker=broker, buffer=realtime_buffers.get("1321"))
+        except Exception as e:
+            msg = f"⚠️ 【警告】レジーム判定に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
             print(msg)
             send_discord_notify(msg)
             regime = "RANGE"
-            last_scan_time = loop_start_time  # 新規スキャンをスキップ
+            last_scan_time = loop_start_time
 
         print(f"📊 現在のレジーム: 【{regime}】")
         
@@ -316,8 +375,14 @@ def _main_exec():
             print("🏖️ 本日は市場休業日です。処理を終了します。")
             break
 
+        # (旧 Buffer Update 位置 - 現在は上部に移動済み)
+
         # --- 2. 保有ポジション管理 ---
-        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(portfolio, account, broker=broker, regime=regime, is_simulation=is_sim)
+        # manage_positions に realtime_buffers を渡し、最新データで判定できるようにする
+        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(
+            portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
+            realtime_buffers=realtime_buffers
+        )
         
         actions_taken.extend(sell_actions)
         for log in trade_logs_from_manage:
@@ -392,11 +457,15 @@ def _main_exec():
                 print(f"📡 データ取得開始 (全 {len(tickers)} 銘柄) - サーバー負荷分散のため分割取得します...")
                 for i in range(0, len(tickers), chunk_size):
                     chunk = tickers[i:i + chunk_size]
+                    # [Professional Audit] 規則的なアクセスによる外部検知を回避するため、0.5〜1.5秒の揺らぎ（Jitter）を付与
+                    if i > 0: time.sleep(random.uniform(0.5, 1.5))
                     try:
                         # モーニングスキャンなら日足、日中なら15分足
                         dl_period = "3mo" if is_morning_scan else "5d"
                         dl_interval = "1d" if is_morning_scan else "15m"
-                        chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', threads=False, progress=False)
+                        # [Professional Audit] auto_adjust=False を明示し、Tickデータ（未調整価格）との整合性を 100% 保証する
+                        chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', 
+                                               auto_adjust=False, threads=False, progress=False)
                         if chunk_df is not None and not chunk_df.empty:
                             if isinstance(chunk_df.columns, pd.MultiIndex):
                                 data_dfs.append(chunk_df)
@@ -433,7 +502,7 @@ def _main_exec():
                 try:
                     last_update = data_df.index[-1]
                     if last_update.tzinfo is None:
-                        last_update = JST.localize(last_update)
+                        last_update = last_update.replace(tzinfo=JST)
                     
                     age = calculate_effective_age(last_update, datetime.now(JST))
                     if is_morning_scan:
@@ -454,16 +523,34 @@ def _main_exec():
 
             if should_continue_scan:
                 print("✅ データ取得完了。評価アルゴリズムを実行します...")
-                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
+                # [Professional Audit] 二重買付防止：既に保有している銘柄をスキャンの対象から外す
+                held_codes = set(str(p['code']) for p in portfolio)
+                targets = [t for t in targets if str(t) not in held_codes]
+                
+                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=realtime_buffers)
                 
                 if is_morning_scan:
                     # 朝のスキャンの場合は選定銘柄をウォッチリストに登録
-                    # API上限50に配慮し、保有数を差し引いた枠（最大40）に絞る
                     max_watchlist = max(5, 50 - len(portfolio) - 2) 
                     watchlist = [c['code'] for c in top_candidates[:max_watchlist]]
                     has_morning_scanned = True
                     print(f"📋 【ウォッチリスト確定】本日監視する {len(watchlist)} 銘柄を登録しました。")
                     
+                    # --- [Phase 2] バッファの初期化 ---
+                    realtime_buffers = {}
+                    for code in watchlist:
+                        realtime_buffers[code] = RealtimeBuffer(code, data_df)
+                    for p in portfolio:
+                        c = str(p['code'])
+                        if c not in realtime_buffers:
+                            realtime_buffers[c] = RealtimeBuffer(c, data_df)
+                    # レジーム判定用の1321も初期化
+                    if '1321' not in realtime_buffers:
+                        try:
+                            df_1321 = yf.download('1321.T', period='1mo', interval='15m', progress=False)
+                            realtime_buffers['1321'] = RealtimeBuffer('1321', df_1321)
+                        except: pass
+
                     # APIへの登録 (BrokerがKabucomなら)
                     if not is_sim:
                         broker.unregister_all()
@@ -499,17 +586,19 @@ def _main_exec():
                                 print(f"⏳ {item['code']} は現在特別気配中または価格未決定です。値がつくまで待機（次ループへ）します。")
                                 continue # 除外はせず、単にこのターンの判定を飛ばす
                                 
-                            # 窓開け判定
-                            gap_pct = (c_price - p_close) / p_close
-                            is_gap_up = gap_pct > 0.03
-                            is_gap_down = gap_pct < -0.03
+                            # [Professional Audit] レジーム連動型・動的ギャップフィルター
+                            gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
+                            gap_threshold = 0.05 if regime == "BULL" else 0.02
+                            is_gap_up = gap_pct > gap_threshold
+                            is_gap_down = gap_pct < -gap_threshold
                             
                             should_exclude = False
                             if regime == "BULL":
-                                if is_gap_down: # BULLでも下窓は危険
+                                if gap_pct < -0.02: # BULL(上昇相場)でも下窓2%以上は「腰折れ」の兆候として警戒
                                     should_exclude = True
+                                # 上窓は gap_threshold (0.05) 以内なら許容
                             else: # RANGE/BEAR等
-                                if is_gap_up or is_gap_down:
+                                if abs(gap_pct) > gap_threshold: # 2%以上の窓開けは一律除外
                                     should_exclude = True
                             
                             if should_exclude:
@@ -583,6 +672,15 @@ def _main_exec():
                 shares_to_buy = (raw_shares // 100) * 100
                 cost = buy_price * shares_to_buy
                 
+                # [Professional Audit] 同一銘柄の「反対注文」衝突回避 (Wash Trade防止)
+                # 買付前に、同じ銘柄の売り注文が出ていないか確認する
+                if not is_sim:
+                    active_orders_for_code = [o for o in broker.get_active_orders() if str(o.get('Symbol')) == str(best_target['code'])]
+                    sell_orders = [o for o in active_orders_for_code if o.get('Side') == '1'] # 1:売
+                    if sell_orders:
+                        print(f"🛡️ {best_target['code']} に有効な売り注文を検出しました。仮装売買防止のため、このターンの買い付けを見送ります。")
+                        continue 
+                
                 if shares_to_buy >= 100 and cost * COMMISSION_BUFFER <= account['cash']:
                     if is_sim:
                         print(f"\n🏆 【シグナル点灯】{regime}戦略に基づく最適銘柄: {best_target['code']} {best_target['name']}")
@@ -593,53 +691,57 @@ def _main_exec():
                         
                         # ✅ 手数料ゼロ化に伴い、代金分のみを現金から引く
                         account['cash'] -= cost
+                        # [Professional Audit] 資金管理の原子性（二重使用防止）のため、即座に保存
+                        if hasattr(broker, 'save_account'): broker.save_account(account)
+                        
                         portfolio.append({
                             "code": best_target['code'], "name": best_target['name'],
                             "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                             "buy_price": round(buy_price, 1), "highest_price": round(buy_price, 1),
                             "current_price": round(buy_price, 1), "shares": shares_to_buy
                         })
+                        # [Professional Audit] 買付後はウォッチリストから除外して監視を卒業させる（永続化含む）
+                        if best_target['code'] in watchlist:
+                            watchlist.remove(best_target['code'])
+                            save_watchlist(watchlist)
                         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         if hasattr(broker, 'save_account'): broker.save_account(account)
                     else:
-                        print(f"🛡️ 【安全機構】スリッページ上限価格（{buy_price:.1f}円）を伴う指値注文で買い付けます")
-                        order_id = broker.execute_market_order(best_target['code'], shares_to_buy, side="2", price=buy_price)
-                        if order_id:
-                            print(f"\n🏆 【注文送信】{regime}戦略: {best_target['code']} {best_target['name']} — 約定確認待ち...")
-                            send_discord_notify(f"⏳ 【注文送信】{best_target['code']} {best_target['name']} {shares_to_buy}株 — 約定確認中 (ID: {order_id})")
-                            details = broker.wait_for_execution(order_id)
-                            if details and details.get('State') == 6:
-                                exec_price = float(details.get('Price', 0))
-                                if exec_price == 0:
-                                    exec_price = buy_price
-                                    exec_details = details.get('Details', [])
-                                    if exec_details:
-                                        total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
-                                        total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
-                                        if total_qty > 0:
-                                            exec_price = total_val / total_qty
-                                
-                                actual_qty = int(details.get('Qty', shares_to_buy))
-                                exec_cost = exec_price * actual_qty
-                                
-                                print(f"✅ 約定完了: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円 (代金: {exec_cost:,.0f}円)")
-                                notify_msg = f"🏆 **【新規買付・約定確認済】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株 (代金: {exec_cost:,.0f}円)\n📊 AI判定: 問題なし"
-                                send_discord_notify(notify_msg)
-                                actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
-                                portfolio.append({
-                                    "code": best_target['code'], "name": best_target['name'],
-                                    "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                    "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
-                                    "current_price": round(exec_price, 1), "shares": actual_qty
-                                })
-                                if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
-                            else:
-                                state_val = details.get('State') if details else 'timeout'
-                                msg = f"⚠️ 【注文未約定】{best_target['code']}の買付注文が約定しませんでした (State: {state_val})。次サイクルで再確認します。"
-                                print(msg)
-                                send_discord_notify(msg)
+                        print(f"🛡️ 【OMS発動】追従型指値注文（Chase Order）で買い付けを開始します")
+                        # 買付時は `shares_to_buy` と `atr` を渡して追従発注
+                        details = broker.execute_chase_order(best_target['code'], shares_to_buy, side="2", atr=atr)
+                        
+                        if details and details.get('State') == 6:
+                            exec_price = float(details.get('Price', 0))
+                            if exec_price == 0:
+                                exec_price = buy_price
+                                exec_details = details.get('Details', [])
+                                if exec_details:
+                                    total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
+                                    total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
+                                    if total_qty > 0:
+                                        exec_price = total_val / total_qty
+                            
+                            actual_qty = int(details.get('Qty', shares_to_buy))
+                            exec_cost = exec_price * actual_qty
+                            
+                            print(f"✅ 注文完了（追従済）: {best_target['code']} {actual_qty}株 @ {exec_price:,.1f}円")
+                            notify_msg = f"🏆 **【新規買付・約定】{best_target['code']} {best_target['name']}**\n戦略: {regime} | 約定価格: {exec_price:,.1f}円 × {actual_qty}株\n📊 OMS: 追従完了"
+                            send_discord_notify(notify_msg)
+                            actions_taken.append(f"買付: {best_target['code']} {best_target['name']} {actual_qty}株 ({exec_cost:,.0f}円)")
+                            portfolio.append({
+                                "code": best_target['code'], "name": best_target['name'],
+                                "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                "buy_price": round(exec_price, 1), "highest_price": round(exec_price, 1),
+                                "current_price": round(exec_price, 1), "shares": actual_qty
+                            })
+                            # [Professional Audit] 買付後はウォッチリストから除外して監視を卒業させる（永続化含む）
+                            if best_target['code'] in watchlist:
+                                watchlist.remove(best_target['code'])
+                                save_watchlist(watchlist)
+                            if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                         else:
-                            msg = f"⚠️ 【注文エラー】{best_target['code']}の買付注文が証券会社APIで受付拒否されました。"
+                            msg = f"⚠️ 【注文未約定/エラー】{best_target['code']} の追従発注が完了しませんでした。次サイクルで再試行します。"
                             print(msg)
                             send_discord_notify(msg)
                 else:
@@ -666,7 +768,16 @@ def _main_exec():
         }
         if hasattr(broker, 'log_execution_summary'):
             broker.log_execution_summary(summary_record)
-            
+
+        # --- [Phase 11-13] キャッシュ清掃・GC・リソース保護 ---
+        # 1時間に1回、非アクティブなバッファを解放する (GC)
+        if int(time.time()) % 3600 < 30:
+            active_codes = set([str(p['code']) for p in portfolio] + watchlist)
+            inactive_codes = [c for c in realtime_buffers if c not in active_codes]
+            for c in inactive_codes:
+                print(f"🧹 [GC] 非アクティブなバッファ {c} をメモリ解放します。")
+                del realtime_buffers[c]
+
         elapsed = time.time() - loop_start_time
         sleep_time = max(5.0, MONITOR_INTERVAL_SEC - elapsed)
         print(f"\n💤 次の監視({MONITOR_INTERVAL_SEC}秒周期)まで待機します...")

@@ -40,6 +40,11 @@ def calculate_effective_age(last_update, current_time):
     
     # 1分ずつ進める
     step = timedelta(minutes=1)
+    
+    # [Professional Audit] 過去すぎるデータによる無限ループ・低速化を防止
+    max_lookback = current_time - timedelta(days=7) # カレンダー日で7日（約5営業日相当）
+    temp_time = max(temp_time, max_lookback)
+    
     limit_time = current_time
     
     while temp_time < limit_time:

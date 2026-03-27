@@ -3,6 +3,7 @@ import json
 import pandas as pd
 from datetime import datetime
 import time
+import threading
 from core.broker import BaseBroker
 from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE
 from core.log_setup import send_discord_notify
@@ -21,6 +22,13 @@ class KabucomBroker(BaseBroker):
         self.base_url = f"http://localhost:{self.port}/kabusapi"
         self.password = KABUCOM_API_PASSWORD
         self.token = None
+        # [Professional Audit] マルチスレッド環境での認証競合を防ぐためのロック
+        self._auth_lock = threading.Lock()
+        # [Professional Audit] Sessionを永続化し、HTTP Keep-Aliveを有効にして遅延を最小化する
+        self.session = requests.Session()
+        # [Professional Audit] API予算管理 (1時間5000回を上限の目安とする)
+        self.request_count = 0
+        self.last_reset_time = time.time()
         
         env_name = "【本番API】" if is_production else "【検証API】"
         if not self.password:
@@ -30,20 +38,21 @@ class KabucomBroker(BaseBroker):
 
     def _authenticate(self):
         """ kabuステーションAPIからトークンを取得する """
-        url = f"{self.base_url}/token"
-        headers = {'Content-Type': 'application/json'}
-        data = {'APIPassword': self.password}
-        
-        try:
-            res = requests.post(url, headers=headers, json=data, timeout=10)
-            if res.status_code == 200:
-                self.token = res.json().get('Token')
-                print(f"✅ auカブコムAPI 認証成功 (Port:{self.port})")
-            else:
-                print(f"⚠️ 認証失敗: {res.status_code} {res.text}")
-        except Exception as e:
-            env_name = "本番" if self.is_production else "検証用"
-            print(f"⚠️ kabuステーション({env_name})に接続できません。アプリが起動し、APIが有効化されているか確認してください。({e})")
+        with self._auth_lock:
+            url = f"{self.base_url}/token"
+            headers = {'Content-Type': 'application/json'}
+            data = {'APIPassword': self.password}
+            
+            try:
+                res = self.session.post(url, headers=headers, json=data, timeout=10)
+                if res.status_code == 200:
+                    self.token = res.json().get('Token')
+                    print(f"✅ auカブコムAPI 認証成功 (Port:{self.port})")
+                else:
+                    print(f"⚠️ 認証失敗: {res.status_code} {res.text}")
+            except Exception as e:
+                env_name = "本番" if self.is_production else "検証用"
+                print(f"⚠️ kabuステーション({env_name})に接続できません。アプリが起動し、APIが有効化されているか確認してください。({e})")
 
     def _get_headers(self, force_refresh=False):
         if not self.token or force_refresh:
@@ -53,15 +62,56 @@ class KabucomBroker(BaseBroker):
             'X-API-KEY': self.token
         }
 
+    def _api_request(self, method, endpoint, **kwargs):
+        """
+        [Professional Audit] APIリクエストの共通ラッパー。
+        認証切れ(401)時の自動リトライ機能を備え、DRY原則に基づき通信処理を一元化する。
+        """
+        url = f"{self.base_url}/{endpoint}" if not endpoint.startswith("http") else endpoint
+        # [Professional Audit] API予算管理と自動スロットリング
+        now = time.time()
+        if now - self.last_reset_time > 3600:
+            self.request_count = 0
+            self.last_reset_time = now
+        self.request_count += 1
+        if self.request_count > 4800:
+            print(f"⚠️ API Request Budget Alert: {self.request_count} requests/hr. Throttling...")
+            time.sleep(0.5)
+
+        for retry in [False, True]:
+            headers = self._get_headers(force_refresh=retry)
+            # [Professional Audit] 指数バックオフによるサーバー側エラー(5xx)への耐性強化
+            for delay in [0, 1, 2, 4]:
+                if delay > 0: time.sleep(delay)
+                try:
+                    res = self.session.request(method, url, headers=headers, **kwargs)
+                    if res.status_code == 200:
+                        return res
+                    elif res.status_code == 401 and not retry:
+                        break # 内側のループを抜けて、認証をリフレッシュしてリトライ
+                    elif res.status_code in [500, 502, 503, 504]:
+                        print(f"⚠️ API Server Error ({res.status_code}). Retrying in {delay*2 if delay>0 else 1}s...")
+                        continue
+                    else:
+                        return res
+                except Exception as e:
+                    if delay == 4:
+                        # [Professional Audit] ログ出力時に機密情報をマスクする
+                        masked_headers = {k: ('********' if k.upper() == 'X-API-KEY' else v) for k, v in headers.items()}
+                        print(f"❌ API Request Fatal Error: {method} {url} | Headers: {masked_headers} | Error: {e}")
+                        raise e
+                    continue
+        return None
+
     def get_server_time(self) -> datetime:
         """ 取引所（証券会社側）の現在時刻を取得する """
         from core.config import JST
         fallback = datetime.now(JST)  # H-6: JST aware datetimeを常に返すよう修正
         if not self.token: return fallback
-        url = f"{self.base_url}/symbol/7203@1" # トヨタの時価情報から時刻を拝借
         try:
-            res = requests.get(url, headers=self._get_headers(), timeout=5)
-            if res.status_code == 200:
+            # [Professional Audit] 共通ラッパーを使用して認証・リトライの恩恵を受ける
+            res = self._api_request("GET", "symbol/7203@1", timeout=5)
+            if res and res.status_code == 200:
                 # サーバーの現在時刻はレスポンスの 'TradingDate' ではなく、本来はAPIのリファレンスから
                 # 明示的な「サーバー時刻」エンドポイントを叩くべきだが、多くのAPIではレスポンスヘッダや
                 # 時価情報の更新時刻が基準となる。ここでは簡易的にトヨタの時価時刻を基準とする。
@@ -79,10 +129,10 @@ class KabucomBroker(BaseBroker):
     def get_active_orders(self) -> list:
         """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
         if not self.token: return []
-        url = f"{self.base_url}/orders"
         try:
-            res = requests.get(url, headers=self._get_headers(), timeout=10)
-            if res.status_code == 200:
+            # [Professional Audit] 共通ラッパーを使用して認証・リトライの恩恵を受ける
+            res = self._api_request("GET", "orders", timeout=10)
+            if res and res.status_code == 200:
                 orders = res.json()
                 # State 3:受付, 4:受付済, 5:執行中 のものを抽出
                 active = [o for o in orders if o.get('State') in [3, 4, 5]]
@@ -95,22 +145,13 @@ class KabucomBroker(BaseBroker):
         """ 現金残高（買付余力）の取得 """
         if not self.token: return {"cash": 0}
         
-        url = f"{self.base_url}/wallet/cash"
-        for retry in [False, True]: # 401時のリトライ用
-            try:
-                res = requests.get(url, headers=self._get_headers(force_refresh=retry), timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    cash = data.get('StockAccountWallet', 0)
-                    return {"cash": float(cash)}
-                elif res.status_code == 401 and not retry:
-                    continue
-                else:
-                    print(f"⚠️ 余力取得エラー: {res.text}")
-                    return {"cash": 0}
-            except Exception as e:
-                print(f"⚠️ 余力取得通信エラー: {e}")
-                return {"cash": 0}
+        res = self._api_request("GET", "wallet/cash", timeout=10)
+        if res and res.status_code == 200:
+            data = res.json()
+            cash = data.get('StockAccountWallet', 0)
+            return {"cash": float(cash)}
+        
+        print(f"⚠️ 余力取得エラー: {res.text if res else 'No Response'}")
         return {"cash": 0}
 
     def get_positions(self) -> list:
@@ -124,20 +165,11 @@ class KabucomBroker(BaseBroker):
         # 1. APIから最新の信用ポジションを取得 (デイトレード信用対応)
         url = f"{self.base_url}/positions?product=2" # 2: 信用
 
-        api_positions = None
-        for retry in [False, True]:
-            try:
-                res = requests.get(url, headers=self._get_headers(force_refresh=retry), timeout=10)
-                if res.status_code == 200:
-                    api_positions = res.json()
-                    break
-                elif res.status_code == 401 and not retry:
-                    continue
-                else:
-                    raise Exception(f"API Error: {res.status_code} {res.text}")
-            except Exception as e:
-                if retry: raise e # リトライ後も失敗なら上位へ投げる
-                continue
+        res = self._api_request("GET", f"positions?product=2", timeout=10)
+        if res and res.status_code == 200:
+            api_positions = res.json()
+        else:
+            raise Exception(f"API Error: {res.status_code if res else 'No Response'}")
 
         # 2. ローカルデータマージ (中身は以前と同じ)
         from core.config import PORTFOLIO_FILE
@@ -205,39 +237,25 @@ class KabucomBroker(BaseBroker):
             "CashMargin": cash_margin,
             "MarginTradeType": 3,
             "DelivType": 0,
-            "AccountType": 4,   # 4: 特定口座
+            "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),   # 4: 特定口座 (デフォルト)
             "Qty": shares,
             "FrontOrderType": front_order_type,
             "Price": int(price),
             "ExpireDay": 0      # 当日限り
         }
 
-        url = f"{self.base_url}/sendorder"
-        
-        for retry in [False, True]:
-            try:
-                res = requests.post(url, headers=self._get_headers(force_refresh=retry), json=data, timeout=10)
-                if res.status_code == 200:
-                    order_res = res.json()
-                    if order_res.get('Result') == 0:
-                        order_id = order_res.get('OrderId')
-                        env = "【本番】" if self.is_production else "【検証API】"
-                        act = "買い" if side == "2" else "売り"
-                        otype = "指値" if price > 0 else "成行"
-                        print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
-                        return order_id
-                    else:
-                        print(f"⚠️ 注文拒否: {order_res}")
-                        return None
-                elif res.status_code == 401 and not retry:
-                    print("🔄 [API] トークン期限切れ(401)を検知。再認証して注文をリトライします...")
-                    continue
-                else:
-                    print(f"⚠️ 注文HTTPエラー: {res.status_code} {res.text}")
-                    return None
-            except Exception as e:
-                print(f"⚠️ 注文通信エラー: {e}")
-                return None
+        res = self._api_request("POST", "sendorder", json=data, timeout=10)
+        if res and res.status_code == 200:
+            order_res = res.json()
+            if order_res.get('Result') == 0:
+                order_id = order_res.get('OrderId')
+                env = "【本番】" if self.is_production else "【検証API】"
+                act = "買い" if side == "2" else "売り"
+                otype = "指値" if price > 0 else "成行"
+                print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
+                return order_id
+            else:
+                print(f"⚠️ 注文拒否: {order_res}")
         return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -246,38 +264,21 @@ class KabucomBroker(BaseBroker):
         cancel_url = f"{self.base_url}/cancelorder"
         cancel_data = {"OrderId": order_id, "Password": self.password}
         
-        for retry in [False, True]:
-            try:
-                res = requests.put(cancel_url, headers=self._get_headers(force_refresh=retry), json=cancel_data, timeout=10)
-                if res.status_code == 200:
-                    order_res = res.json()
-                    if order_res.get('Result') == 0:
-                        return True
-                    else:
-                        print(f"⚠️ 取消要求失敗: {order_res}")
-                        return False
-                elif res.status_code == 401 and not retry:
-                    continue
-                else:
-                    return False
-            except Exception as e:
-                print(f"⚠️ 取消要求通信エラー: {e}")
-                return False
+        res = self._api_request("PUT", "cancelorder", json=cancel_data, timeout=10)
+        if res and res.status_code == 200:
+            order_res = res.json()
+            return order_res.get('Result') == 0
         return False
 
     def get_order_details(self, order_id: str) -> dict:
         """ 注文詳細（ステータス・約定単価等）を取得する """
         if not self.token or not order_id: return None
-        url = f"{self.base_url}/orders?id={order_id}"
-        try:
-            res = requests.get(url, headers=self._get_headers(), timeout=10)
-            if res.status_code == 200:
-                orders = res.json()
-                if orders and len(orders) > 0:
-                    return orders[0]
-            return None
-        except Exception:
-            return None
+        res = self._api_request("GET", f"orders?id={order_id}", timeout=10)
+        if res and res.status_code == 200:
+            orders = res.json()
+            if orders and len(orders) > 0:
+                return orders[0]
+        return None
 
     # --- [New] リアルタイム監視用の銘柄登録・解除・板情報取得 ---
     def register_symbols(self, symbols: list):
@@ -289,59 +290,198 @@ class KabucomBroker(BaseBroker):
         url = f"{self.base_url}/register"
         
         # yfinance形式 (7203.T) -> カブコム形式 (7203)
-        codes = [str(s).replace(".T", "") for s in symbols]
+        # [Professional Audit] 重複登録を排除してAPIの負荷とエラーを防ぐ
+        codes = sorted(list(set(str(s).replace(".T", "") for s in symbols)))
         
         chunk_size = 50
         for i in range(0, len(codes), chunk_size):
             chunk = codes[i:i + chunk_size]
             reg_list = [{"Symbol": c, "Exchange": 1} for c in chunk]
             data = {"Symbols": reg_list}
-            try:
-                res = requests.put(url, headers=self._get_headers(), json=data, timeout=10)
-                if res.status_code == 200:
-                    print(f"✅ API銘柄登録完了 ({i+1}〜{i+len(chunk)}銘柄目)")
-                else:
-                    print(f"⚠️ 銘柄登録エラー ({i+1}〜): {res.text}")
-            except Exception as e:
-                print(f"⚠️ 銘柄登録通信エラー: {e}")
+            res = self._api_request("PUT", "register", json=data, timeout=10)
+            if res and res.status_code == 200:
+                print(f"✅ API銘柄登録完了 ({i+1}〜{i+len(chunk)}銘柄目)")
+            else:
+                print(f"⚠️ 銘柄登録エラー ({i+1}〜): {res.text if res else 'No Response'}")
+                return False
+        return True
+
+    def unregister_symbols(self, symbols: list):
+        """ 監視対象から外れた銘柄を解除する（2000銘柄の上限管理） """
+        if not self.token or not symbols: return False
+        url = f"{self.base_url}/unregister"
+        
+        # [Professional Audit] 重複解除を排除してリソースを最適化
+        codes = sorted(list(set(str(s).replace(".T", "") for s in symbols)))
+        chunk_size = 50
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i:i + chunk_size]
+            unreg_list = [{"Symbol": c, "Exchange": 1} for c in chunk]
+            data = {"Symbols": unreg_list}
+            res = self._api_request("PUT", "unregister", json=data, timeout=10)
+            if res and res.status_code == 200:
+                print(f"✅ API銘柄登録解除完了 ({i+1}〜{i+len(chunk)}銘柄目)")
+            else:
+                print(f"⚠️ 銘柄解除エラー: {res.text if res else 'No Response'}")
                 return False
         return True
 
     def unregister_all(self):
         """ 登録済みの全銘柄を解除する（上限管理のため） """
         if not self.token: return False
-        url = f"{self.base_url}/unregister/all"
-        try:
-            res = requests.put(url, headers=self._get_headers(), timeout=10)
-            return res.status_code == 200
-        except:
-            return False
+        res = self._api_request("PUT", "unregister/all", timeout=10)
+        if res and res.status_code == 200:
+             print("🧹 [API] 全銘柄の監視登録を解除しました。")
+             return True
+        return False
 
     def get_board_data(self, symbols: list) -> dict:
-        """ 
-        登録済み銘柄の時価情報（board）を取得する。
-        戻り値: { "7203": {"price": 1234, "status": "気配"}, ... }
-        """
+        """ [Professional Audit] 制限値幅を含めた板時価情報を取得する """
         results = {}
         if not self.token: return results
         
         for s in symbols:
             code = str(s).replace(".T", "")
-            url = f"{self.base_url}/board/{code}@1"
-            try:
-                res = requests.get(url, headers=self._get_headers(), timeout=5)
-                if res.status_code == 200:
-                    data = res.json()
-                    results[code] = {
-                        "price": data.get('CurrentPrice'),
-                        "prev_close": data.get('PreviousClose'), # [Expert Refinement] 前日終値を追加
-                        "status": data.get('CurrentPriceStatus'),
-                        "bid": data.get('BidPrice'),
-                        "ask": data.get('AskPrice')
-                    }
-            except Exception:
-                continue
+            res = self._api_request("GET", f"board/{code}@1", timeout=5)
+            # [Professional Audit] 連続リクエストによる API サーバーへの瞬間負荷 (Burst) を抑制する
+            time.sleep(0.1)
+            if res and res.status_code == 200:
+                data = res.json()
+                results[code] = {
+                    "price": data.get('CurrentPrice'),
+                    "prev_close": data.get('PreviousClose'),
+                    "status": data.get('CurrentPriceStatus'),
+                    "bid": data.get('BidPrice'),
+                    "ask": data.get('AskPrice'),
+                    "upper_limit": data.get('UpperLimit'),
+                    "lower_limit": data.get('LowerLimit')
+                }
         return results
+
+    def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> dict:
+        """
+        指値を最良気配に追従（Chase）させながら発注し、一定時間で強制執行するOMS機能。
+        一部約定時には残数のみを次サイクルで発注する。
+        """
+        print(f"🚀 【追従発注開始】{code} {shares}株 (Side:{side})")
+        
+        remaining_shares = shares
+        final_details = None
+        
+        for attempt in range(1, 4):
+            if remaining_shares <= 0: break
+            
+            # [Professional Audit] 繰り返し発注によるレート制限（IP BAN）回避
+            time.sleep(0.2)
+            
+            board = self.get_board_data([code])
+            b_info = board.get(str(code).replace(".T", ""))
+            if not b_info: break
+            
+            c_price = b_info.get('price', 0)
+            # [Professional Audit] ストップ高・安（張り付き）の検知ガード
+            if side == "2" and c_price >= b_info.get('upper_limit', 999999):
+                print(f"🚨 {code} はストップ高に達しているため、買い注文を中止します。")
+                break
+            if side == "1" and c_price <= b_info.get('lower_limit', 0):
+                print(f"🚨 {code} はストップ安に達しているため、売り注文を中止します。")
+                break
+
+            if side == "2":
+                limit_price = b_info.get('bid') or ((b_info.get('ask', 0) + b_info.get('price', 0))/2)
+                # [Professional Audit] 最新の板価格に基づき呼値を動的に正規化（価格帯跨ぎ対応）
+                limit_price = normalize_tick_size(limit_price, is_buy=True)
+            else:
+                limit_price = b_info.get('ask') or ((b_info.get('bid', 0) + b_info.get('price', 0))/2)
+                limit_price = normalize_tick_size(limit_price, is_buy=False)
+            
+            if not limit_price or limit_price <= 0:
+                 # 気配値が取れない場合は、直近の出来値（price）を試す
+                 limit_price = b_info.get('price', 0)
+            
+            # [Professional Audit] 指値 0円 はAPIエラーの原因となるため、最終ガード
+            if not limit_price or limit_price <= 0:
+                print(f"⚠️ {code} の有効な価格が取得できないため（{limit_price}円）、このサイクルの発注を見送ります。")
+                break
+            
+            if not limit_price or limit_price == 0:
+                print(f"⚠️ {code} の有効な価格が板情報から取得できないため（気配・現在値ともに0）、追従を中断します。")
+                break
+
+            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price)
+            if not order_id: break
+            
+            print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
+            start_wait = time.time()
+            current_order_filled = False
+            
+            while time.time() - start_wait < 10:
+                details = self.get_order_details(order_id)
+                if details:
+                    state = details.get('State')
+                    if state == 6: # 全部約定
+                        print(f"✨ 注文 ID: {order_id} が全部約定しました。")
+                        remaining_shares = 0
+                        final_details = details
+                        current_order_filled = True
+                        break
+                time.sleep(2)
+            
+            if current_order_filled: break
+            
+            # 10秒経過または未約定ならキャンセルして状況確認
+            print(f"⏰ 10秒経過。注文 ID: {order_id} を一度取り消して残数を確認します。")
+            if self.cancel_order(order_id):
+                # [Professional Audit] 取消完了が元帳に反映されるまで僅かに待機
+                time.sleep(0.5)
+                # 取消完了を待って約定数（CumQty）を確認
+                for _ in range(5):
+                    d = self.get_order_details(order_id)
+                    if d and d.get('State') in [8, 9, 10, 6]:
+                        cum_qty = int(d.get('CumQty', 0))
+                        # 追従ループ用の残数を更新
+                        if cum_qty > 0:
+                            print(f"⚠️ 注文 ID: {order_id} は一部約定（{cum_qty}株）していました。")
+                        remaining_shares -= cum_qty
+                        final_details = d # 最後の注文情報を保持
+                        break
+                    time.sleep(1)
+            else:
+                # [Professional Audit] キャンセル失敗時、既に約定済みかを確認して復旧を図る
+                d = self.get_order_details(order_id)
+                if d and d.get('State') == 6: # 6:全約定
+                    print(f"✨ 注文 ID: {order_id} の取消には失敗しましたが、既に全約定していました。")
+                    remaining_shares = 0
+                    final_details = d
+                    break
+                else:
+                    print(f"⛔ 注文 ID: {order_id} の取消に失敗し、約定も確認できないため安全のため追従を中断します。")
+                    break
+
+        # --- 最終手段: 強制執行 (Marketable Limit Order) ---
+        if remaining_shares > 0:
+            print(f"🔥 【強制執行】残数 {remaining_shares}株 をマージン付の価格で即時約定させます。")
+            board = self.get_board_data([code])
+            b_info = board.get(str(code).replace(".T", ""))
+            current_price = b_info.get('price') or b_info.get('bid', 0)
+            
+            from core.logic import normalize_tick_size
+            if side == "2":
+                force_price = normalize_tick_size(current_price + (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=True)
+            else:
+                force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
+                
+            print(f"🛒 強制執行価格: {force_price:.1f}")
+            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price)
+            if order_id:
+                final_details = self.wait_for_execution(order_id, timeout_sec=20)
+                if final_details:
+                    # 全体の株数と最終ステータスを整合させる（上位 logic.py 用）
+                    total_filled = shares - remaining_shares + int(final_details.get('CumQty', 0))
+                    final_details['Qty'] = total_filled
+                    final_details['State'] = 6 if total_filled >= shares else 7
+            
+        return final_details
 
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
         """ 注文が約定（または失敗）するまで待機する """
@@ -453,12 +593,19 @@ class KabucomBroker(BaseBroker):
         
         write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
         actions_str = " | ".join(actions) if actions else "アクションなし"
+        
+        # [Professional Audit] ログ出力用のデータフレームを作成
         df_log = pd.DataFrame([{
-            "time": summary_record['time'], 
-            "actions": actions_str, 
-            "portfolio_count": len(summary_record['portfolio']), 
-            "stock_value_yen": summary_record['stock_value_yen'], 
-            "cash_yen": summary_record['cash_yen'], 
-            "total_assets_yen": total_assets
+            "time": summary_record.get('time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            "regime": summary_record.get('regime', 'UNKNOWN'),
+            "total_assets": total_assets,
+            "cash": summary_record.get('cash_yen', 0),
+            "stock_value": summary_record.get('stock_value_yen', 0),
+            "actions": actions_str
         }])
+        
         df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+        
+        # [Professional Audit] 実行ログの肥大化防止（ローテーション）
+        from core.file_io import rotate_csv_if_large
+        rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=5)
