@@ -130,7 +130,7 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
         return int(p // tick * tick)
 
 # --- 【中核1】レジーム（地合い）認識 ---
-def detect_market_regime(broker=None, buffer=None, current_time_override=None):
+def detect_market_regime(broker=None, buffer=None, current_time_override=None, verbose=True):
     """
     市場の地合い（Regime）を推定する。
     buffer が提供されている場合は、yfinance の代わりにリアルタイムバッファを使用する。
@@ -211,7 +211,8 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None):
         
         volatility = float(temp_close.pct_change().dropna().std()) * np.sqrt(252)
 
-        print(f"  [Regime] {etf_ticker}: 現在値={current:.1f} ({data_source}) SMA20={sma20:.1f} Vol={volatility:.2f}")
+        if verbose:
+            print(f"  [Regime] {etf_ticker}: 現在値={current:.1f} ({data_source}) SMA20={sma20:.1f} Vol={volatility:.2f}")
 
         # レジーム判定ロジック（パーセンテージベースでスケール不変）
         if current < sma20 * 0.95 and volatility > 0.30:
@@ -222,7 +223,8 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None):
             return "RANGE"
 
     except Exception as e:
-        print(f"[Error] レジーム判定エラー: {e}")
+        if verbose:
+            print(f"[RE-C-ERR] 地合い認識中にエラー: {e}")
         return "RANGE"
 
 # --- 【補助】無効銘柄キャッシュ管理 ---
@@ -236,7 +238,7 @@ def save_invalid_tickers(invalid_set):
         print(f"[Error] キャッシュ保存エラー: {e}")
 
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None):
+def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True):
     """
     保有株式の利確・損切・タイムストップを判定し、売却処理を行う。
     realtime_buffers: { code: RealtimeBuffer } の辞書。存在すれば yfinance 通信を回避する。
@@ -247,7 +249,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     if not portfolio:
         return portfolio, account, actions, trade_logs
 
-    print(f"\n--- [Portfolio] 保有監視 ({len(portfolio)}銘柄) ---")
+    if verbose:
+        print(f"\n--- [Portfolio] 保有監視 ({len(portfolio)}銘柄) ---")
     
     # リアルタイムバッファがある場合はそれを使用し、ない場合は一括取得を試みる
     data_map = {} # { code: DataFrame }
@@ -272,10 +275,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     else:
                         data_map[code] = downloaded.dropna()
         except Exception as e:
-            print(f"[WARNING] 保有銘柄のデータ取得に失敗: {e}")
+            if verbose:
+                print(f"[WARNING] 保有銘柄のデータ取得に失敗: {e}")
 
     if not data_map:
-        print("[WARNING] 判定用のデータが取得できませんでした(次回リトライへ持ち越し)")
+        if verbose:
+            print("[WARNING] 判定用のデータが取得できませんでした(次回リトライへ持ち越し)")
         return portfolio, account, actions, trade_logs
 
     remaining_portfolio = []
@@ -304,15 +309,19 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 split_ratio = float(df['Adj Close'].iloc[0]) / float(df['Close'].iloc[0])
                 if split_ratio > 1.0: split_ratio = 1.0 
 
-            # ポジション情報の復元と分割補正
-            buy_price = float(p.get('buy_price', 0)) * split_ratio
-            highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
-
-            # 【AI指摘対応】株式分割時に保有株数も逆数で補正する
-            if split_ratio < 0.99:
+            # 【修正】株式分割補正 ( compounded growth 防止のため、in-place ではなく local で扱うか、フラグ管理する )
+            # 実際には p['shares'] は整数であるべきなので、補正が必要な場合のみ一度だけ適用するロジックにする
+            if split_ratio < 0.99 and not p.get('split_adjusted'):
                 original_shares = int(p.get('shares', 0))
                 p['shares'] = int(original_shares / split_ratio)
-                print(f"🔄 [{code}] 株式分割を検知: {original_shares}株 -> {p['shares']}株 に価格と共に補正しました。")
+                p['split_adjusted'] = True # 二重適用防止フラグ
+                if verbose:
+                    print(f"🔄 [{code}] 株式分割を検知: {original_shares}株 -> {p['shares']}株 に価格と共に補正しました。")
+
+            # 以降の計算で使う内部変数
+            current_shares = int(p['shares'])
+            buy_price = float(p.get('buy_price', 0)) * split_ratio
+            highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
 
             # --- [Phase 13] 価格入力の階層化 (Price Input Hierarchy) ---
             # 証券会社API由来のリアルタイム価格(p['current_price'])がある場合は、yfinanceの遅延データより優先する
@@ -354,7 +363,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
             
             # 売却株数の決定（デフォルトは全株）
-            sell_qty = int(p['shares'])
+            sell_qty = current_shares
             
             if is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
@@ -371,11 +380,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 # 利益がATRの1.5倍に乗ったら、確実な利益ロックのために半分だけ利確する
                 sell_reason = f"分割利確 (Scale-out TP at ATRx1.5)"
                 # 100株単位に丸める。最低100株。
-                half_qty = (int(p['shares']) // 2 // 100) * 100
+                half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
                     sell_qty = half_qty
                 else:
-                    sell_qty = int(p['shares']) # 100株しか持っていない場合は全決済
+                    sell_qty = current_shares # 100株しか持っていない場合は全決済
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -390,10 +399,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
             profit_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0
             split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
-            print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
+            if verbose:
+                print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
 
             if sell_reason:
-                if is_volume_zero:
+                if is_volume_zero and verbose:
                     print(f"[WARNING] [{code}] 出来高0(特別気配等)ですが、{sell_reason} のため決済注文を強行します。")
 
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
@@ -402,7 +412,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     exec_price = current_price
                 else:
                     if broker:
-                        print(f"[OMS売却発動] 追従型指値注文（Chase Order）で売却を開始します")
+                        if verbose:
+                            print(f"[OMS売却発動] 追従型指値注文（Chase Order）で売却を開始します")
                         # 売却時は side="1" (売)
                         details = broker.execute_chase_order(code, sell_qty, side="1", atr=atr)
                         
@@ -411,7 +422,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         actual_qty = int(details.get('Qty', 0)) if details else 0
                         
                         if not details or state not in [6, 7] or actual_qty == 0:
-                            print(f"[WARNING] {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
+                            if verbose:
+                                print(f"[WARNING] {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
                             remaining_portfolio.append(p)
                             continue
                             
@@ -429,7 +441,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         actual_qty = int(details.get('Qty', sell_qty))
                         
                     else:
-                        print(f"[WARNING] エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
+                        if verbose:
+                            print(f"[WARNING] エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
                         remaining_portfolio.append(p)
                         continue
 
@@ -454,43 +467,45 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 if is_simulation:
                     account['cash'] += sale_proceeds
                 else:
-                    # 本番APIの場合は broker.get_account_balance() が最新を反映するので本来不要だが、
-                    # 同一ループ内の計算のためにローカル変数も一応更新しておく
                     account['cash'] += sale_proceeds
 
-                # 一部約定（または分割利確）のケースでの残存株の扱い
-                if actual_qty < int(p['shares']):
+                # [Robust Update] Once cash is updated, we MUST ensure the portfolio is updated correctly
+                if actual_qty < current_shares:
                     remaining_p = p.copy()
-                    remaining_p['shares'] = int(p['shares']) - actual_qty
-                    
-                    # 【新規】スケールアウト成功の場合、残りのポジションにフラグを立てる
+                    remaining_p['shares'] = current_shares - actual_qty
                     if "分割利確" in sell_reason:
                         remaining_p['partial_sold'] = True
-                        
                     remaining_portfolio.append(remaining_p)
-                    print(f"[WARNING] [{code}] 一部約定 ({actual_qty}株売却済, {remaining_p['shares']}株残存)。残りは継続保有します。")
                 
-                msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})\n   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+.0f}円 | 税引後: {net_profit:+.0f}円"
-                print(msg)
-                send_discord_notify(msg)
-                
-                act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
-                actions.append(act_str)
-                
-                actual_profit_pct = (exec_price - buy_price) / buy_price if buy_price > 0 else 0
-                
-                trade_record = {
-                    "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
-                    "buy_price": buy_price, "sell_price": exec_price, "highest_price_reached": highest_price,
-                    "shares": actual_qty, "gross_profit": gross_profit, "tax_amount": tax_amount, 
-                    "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason
-                }
-                trade_logs.append(trade_record)
+                # Notification and Logging (should not block the state update)
+                try:
+                    log_msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})"
+                    details_msg = f"   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+d}円 | 税引後: {net_profit:+d}円"
+                    if verbose:
+                        print(log_msg)
+                        print(details_msg)
+                    send_discord_notify(log_msg + "\n" + details_msg)
+                    
+                    act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
+                    actions.append(act_str)
+                    
+                    actual_profit_pct = (exec_price - buy_price) / buy_price if buy_price > 0 else 0
+                    trade_record = {
+                        "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
+                        "buy_price": buy_price, "sell_price": exec_price, "highest_price_reached": highest_price,
+                        "shares": actual_qty, "gross_profit": gross_profit, "tax_amount": tax_amount, 
+                        "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason
+                    }
+                    trade_logs.append(trade_record)
+                except Exception as log_err:
+                    if verbose:
+                        print(f"[ERROR] ログ記録/通知中にエラー（取引自体は実行済）: {log_err}")
             else:
                 remaining_portfolio.append(p)
                 
         except Exception as e: 
-            print(f"[WARNING] {code} 監視エラー: {e}")
+            if verbose:
+                print(f"[WARNING] {code} 監視エラー: {e}")
             remaining_portfolio.append(p)
 
     return remaining_portfolio, account, actions, trade_logs
@@ -530,7 +545,7 @@ def calculate_technicals_for_scan(df):
     
     return df
 
-def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None):
+def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None, verbose=True):
     """ 地合い(レジーム)に応じた数学的スコアリングを行い、トップ候補を抽出 """
     candidates = []
     
@@ -614,12 +629,13 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
                 })
             elif current_time_override:
                 # [Debugging] 毎時0分に全銘柄の理由を出力
-                if current_time_override.minute == 0:
+                if current_time_override.minute == 0 and verbose:
                     print(f"  [Scan Debug] {current_time_override.strftime('%m/%d %H:%M')} {code} rejected: {reason} (Regime:{regime})")
 
         except Exception as e:
             # H-2: 例外を無言でスキップせず、デバッグ可能なログを出力する
-            print(f"[WARNING] [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
+            if verbose:
+                print(f"[WARNING] [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
             continue
             
     return sorted(candidates, key=lambda x: x['score'], reverse=True)[:3]
