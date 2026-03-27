@@ -338,8 +338,6 @@ def _main_exec():
         elif now_time >= datetime.strptime("14:00", "%H:%M").time():
             should_scan = False
 
-        else:
-                should_scan = False
         
         # --- 2.5 朝の銘柄選定 (Hybrid Path) ---
         if phase == MarketPhase.PRE_MARKET and now_time >= datetime.strptime("08:30", "%H:%M").time() and not has_morning_scanned:
@@ -476,6 +474,8 @@ def _main_exec():
                 # リアルタイム価格で再度上位を絞り込む
                 scan_targets = top_candidates[:5] if not watchlist else [c for c in top_candidates if c['code'] in watchlist][:10]
                 
+                best_target = None
+                
                 for item in scan_targets:
                     # --- [Extra Phase] Gap & Special Quote Check (Expert Refinement) ---
                     if not is_sim and hasattr(broker, 'get_board_data'):
@@ -529,10 +529,12 @@ def _main_exec():
                         print(f"  -> 🚨 リジェクト検知: {reason} (見送り)")
 
                 if best_target:
+                    raw_price = float(best_target['price'])
+                    atr = float(best_target['atr'])
                     # [AI修正] ATRの値そのものよりも、投資価格に対するATR比率（ボラティリティ）を重視してチェック
                     atr_pct = (atr / raw_price) if raw_price > 0 else 0
                     if pd.isna(raw_price) or pd.isna(atr) or raw_price <= 0 or atr <= 0:
-                        print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={best_target['price']}, atr={best_target['atr']})")
+                        print(f"\n💡 異常な価格/ATRデータを検知したため、安全装置が作動し買付を強制キャンセルしました。(price={raw_price}, atr={atr})")
                         send_discord_notify(f"⚠️ 【安全装置作動】{best_target['code']} {best_target['name']} の価格/ATRデータに異常を検知。買付を強制キャンセルしました。")
                         last_scan_time = loop_start_time
                         should_continue_scan = False
@@ -547,8 +549,6 @@ def _main_exec():
                     should_continue_scan = False
 
             if should_continue_scan and best_target:
-                raw_price = float(best_target['price'])
-                atr = float(best_target['atr'])
                 # ATRベースのスリッページを加味し、呼値（Tick Size）に合わせて正規化（不利な方向に丸めて約定優先）
                 buy_price = normalize_tick_size(raw_price + (atr * 0.1), is_buy=True)
                 
