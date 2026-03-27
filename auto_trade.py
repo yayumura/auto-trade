@@ -221,7 +221,7 @@ def _main_exec():
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
                 # 寄り前のみスキャンを実行 (朝8:30以降)
-                if phase == MarketPhase.PRE_MARKET and now_time >= time(8, 30) and not has_morning_scanned:
+                if phase == MarketPhase.PRE_MARKET and now_time >= datetime.strptime("08:30", "%H:%M").time() and not has_morning_scanned:
                     print(f"🌅 【朝のスキャン】監視銘柄の選定を開始します...")
                     # ここでダミーの should_scan をバイパスして強制実行
                     pass 
@@ -342,7 +342,7 @@ def _main_exec():
                 should_scan = False
         
         # --- 2.5 朝の銘柄選定 (Hybrid Path) ---
-        if phase == MarketPhase.PRE_MARKET and now_time >= time(8, 30) and not has_morning_scanned:
+        if phase == MarketPhase.PRE_MARKET and now_time >= datetime.strptime("08:30", "%H:%M").time() and not has_morning_scanned:
              should_scan = True
              is_morning_scan = True
         else:
