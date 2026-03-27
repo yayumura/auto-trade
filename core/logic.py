@@ -140,7 +140,8 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None, v
         # ヒストリカルデータ（日足）を取得してSMA20を計算
         if buffer is not None and not buffer.df.empty:
             # [Professional Audit] 15分足から日次ベースに変換する際、十分な履歴があるか確認
-            close_daily_all = buffer.df['Close'].resample('D').last().dropna()
+            # 不要時不要日(土日祝日)の欠欠を正しく補完するために、「'B'」(営業日のみ)リサンプリングを使用しffillする
+            close_daily_all = buffer.df['Close'].resample('B').last().ffill().dropna()
             
             # 履歴が20日分に満たない場合は yfinance で補完を試みる（バックテスト時は外部通信を抑制）
             if len(close_daily_all) < 20:
@@ -346,13 +347,17 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             if pd.isna(atr) or atr == 0:
                 atr = current_price_raw * 0.02
                 
-            # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの3%をスリッページとする)
+            # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの1%をスリッページとする)
+            # Strategy 2.0: 0.03 から 0.01 に緩和 (1 tick程度の実勢に合わせる)
             if is_simulation:
-                slippage = atr * 0.03 # 0.1 から 0.03 に緩和
+                slippage = atr * 0.01 
                 current_price = max(0.1, current_price_raw - slippage)
             else:
                 current_price = current_price_raw
             
+            # 【修正】profit_pct をここで定義（後の sell_reason で参照するため）
+            profit_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0
+
             # 【新規】分割利確（スケールアウト）のステータス確認
             is_partial_sold = p.get('partial_sold', False)
             
@@ -382,26 +387,43 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 buy_dt = buy_dt.to_pydatetime()
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
-            # --- 【最終安定化】状態記憶バグの修正 ---
-            # 一度でも +1.5% に到達したら勝ち確定モードをロック（highest_price_dbを使用）
-            is_winning_trade = highest_price_db > (buy_price * 1.015)
+            # --- 決済ロジック: 優先度順に展隈 ---
+
+            # 1.絶対ハードストップ（大暴落時の命綱）
+            hard_stop_price = buy_price * 0.96  
+
+            # 2. 初期固定ストップ：ポジションが倸益にオンになるまでは -2% 固定損切りを使用する
+            # 高値が買値の+1%超えたらトレールモードに移行する
+            is_in_profit_mode = highest_price_db >= buy_price * 1.01  # +1%超えたらトレールモード
+            if is_in_profit_mode:
+                # トレールモード: 最高値からATR 2.5倍の下落
+                chandelier_stop = highest_price_db - (atr * 2.5)
+            else:
+                # 初期固定ストップ: Strategy 3.0: -1.0% に調整
+                chandelier_stop = buy_price * 0.99
 
             if current_price <= hard_stop_price:
-                sell_reason = "絶対損切 (-4.0% Hard Stop / Catastrophe)"
+                sell_reason = "絶対損切 (-4.0% Hard Stop)"
+            elif current_price <= chandelier_stop:
+                if current_price > buy_price:
+                    sell_reason = f"シャンデリア・トレール利確 (Trail Stop from {highest_price_db:.1f})"
+                else:
+                    sell_reason = f"初期ストップ損切 (Initial Stop: {chandelier_stop:.1f})"
+            elif current_price >= buy_price * 1.01:
+                # 【利確ターゲット】Strategy 3.0: 1.5% -> 1.0% に調整（大型株の15分足現実に合わせる）
+                sell_reason = f"利確ターゲット達成 (+1.0% Take Profit)"
             elif hold_days > 3.0: 
-                # 【安定化】タイムストップは無条件3日に戻す（資金効率優先）
-                sell_reason = "タイムストップ (Held > 3 days)"
+                # 【Strategy 3.0】時間切れ決済を対称化（3日経ったら収益に関わらず一旦仕切り直し）
+                # これにより「微益」を逃さず勝率に反映させる
+                if current_price >= buy_price:
+                    sell_reason = f"三日時間切れ利確 (Held > 3 days & Profit {profit_pct*100:+.2f}%)"
+                else:
+                    sell_reason = f"三日時間切れ損切 (Held > 3 days & Loss {profit_pct*100:+.2f}%)"
             elif is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
-            elif not is_winning_trade and current_price <= buy_price - (atr * current_stop_loss_mult):
-                # 通常の損切り
-                sell_reason = f"ボラティリティ初期損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif is_winning_trade and current_price <= highest_price_db - (atr * 3.5):
-                # 【安定化】トレール幅を ATR 3.5倍にして、ノイズを許容しつつ利益を確保（建値撤退は廃止）
-                sell_reason = f"追従型トレール利確 (Trailing Stop from {highest_price_db:.1f})"
-            elif not is_partial_sold and current_price >= buy_price + (atr * 10.0):
-                # ATR 10倍で半分利確
-                sell_reason = f"分割利確 (Scale-out TP at ATRx10.0)"
+            elif not is_partial_sold and current_price >= buy_price + (atr * 8.0):
+                # ATR 8倍で半分利確（大幅上昇时のボーナス利確）
+                sell_reason = f"分割利確 (Scale-out TP at ATRx8.0)"
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
                     sell_qty = half_qty
@@ -418,8 +440,6 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             # [AI改善策2] +0.00%固定化バグの修正: ポートフォリオの現在値をライブデータで常時更新する
             p['current_price'] = round(current_price_raw / split_ratio if split_ratio > 0 else current_price_raw, 1)
 
-
-            profit_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0
             split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
             if verbose:
                 print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
@@ -566,6 +586,9 @@ def calculate_technicals_for_scan(df):
     # --- [Phase 12] ボリューム解析の追加 ---
     df['Avg_Vol_15m'] = df['Volume'].rolling(window=20).mean()
     
+    # VWAP (Volume Weighted Average Price) の簡易計算
+    df['VWAP'] = (df[price_col] * df['Volume']).cumsum() / df['Volume'].cumsum()
+    
     return df
 
 def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None, verbose=True):
@@ -581,6 +604,9 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             else:
                 # リアルタイム時は yfinance から取得
                 df = yf.download(f"{code}.T", period="5d", interval="15m", progress=False, threads=False)
+                # [FIX] yfinance の MultiIndex 対策：Ticker レベルを削除してフラットにする
+                if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel('Ticker')
             
             if df is None or df.empty:
                 continue
@@ -596,50 +622,71 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             reason = "Unknown"
             if regime == "BULL":
-                # 【順張り戦略】究極の押し目買い（VWAP Pullback）
-                
-                # 当日のVWAPを計算
-                today_date = df.index[-1].date()
-                today_df = df[df.index.date == today_date]
-                vwap = latest['Close']
-                if not today_df.empty:
-                    vwap_vol = today_df['Volume'].sum()
-                    typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
-                    vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
+                # 【SMA20押し目買い戦略 (Strategy 2.0)】
+                # 「強い銘柄が少し休んだところを確実に拾う」
 
-                is_yang_sen = latest['Close'] > latest['Open'] # 陽線（反発した）
+                if len(df) < 50:
+                    reason = "Not enough data for SMA20 check"
+                    continue
+
+                # 各種テクニカル
+                vwap = latest.get('VWAP', latest['Close']) # すでに計算済みのものを優先
+                sma20 = latest['SMA20']
+                sma5 = df['Close'].rolling(window=5).mean().iloc[-1]
                 rsi = latest.get('RSI', 50)
                 
-                if latest['Close'] < vwap:
-                    reason = "Below VWAP (Intraday trend is dead)"
-                elif latest['Close'] > latest['SMA20']:
-                    reason = "Above SMA20 (Wait for pullback)"
-                elif rsi > 45:
-                    reason = f"RSI({rsi:.1f}) > 45 (Not oversold enough)"
+                # モメンタム（50本前からの変化率）
+                momentum_50 = (latest['Close'] - df['Close'].iloc[-50]) / df['Close'].iloc[-50]
+
+                # --- BULL 判定ロジック ---
+                dist_sma20 = (latest['Close'] - sma20) / sma20
+                is_yang_sen = latest['Close'] > latest['Open']
+
+                if momentum_50 < 0:
+                    reason = f"Negative Momentum ({momentum_50:.2%})"
+                elif latest['Close'] < vwap:
+                    reason = "Below VWAP (Intraday weak)"
+                elif rsi > 65:
+                    reason = f"RSI Too High ({rsi:.0f} > 65, wait for cooling)"
+                elif dist_sma20 > 0.025:
+                    reason = f"Too far from SMA20 ({dist_sma20:.2%}, wait for pullback)"
                 elif not is_yang_sen:
-                    reason = "Not bouncing (Yin-sen)"
+                    reason = "Wait for bounce (Yin-sen)"
                 else:
-                    vwap_distance = (latest['Close'] - vwap) / vwap
-                    score = ( (0.02 - vwap_distance) * 2000 ) + (latest['Volume'] / latest['Avg_Vol_15m'] * 10)
-                    reason = "VWAP Pullback (Perfect Dip Buy)"
+                    # 【合格】
+                    # 1) VWAPの上（基本トレンド維持）
+                    # 2) RSIが過熱していない（押し目中）
+                    # 3) SMA20から1.5%以内の「近傍」
+                    # 4) 陽線で反発を確認
+                    score = (momentum_50 * 5000) + ((0.02 - abs(dist_sma20)) * 1000)
+                    reason = "SMA20 Pullback Bounce"
 
             elif regime == "RANGE":
-                # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
-                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                deviation = latest['Deviation'] 
+                # 【RSI平均回帰戦略 (Strategy 2.0)】
+                # 「売られすぎた優良銘柄の自律反発を狙う」
+
+                if len(df) < 20: 
+                    reason = "Not enough data"
+                    continue
+
+                rsi = latest.get('RSI', 50)
+                sma20 = latest['SMA20']
+                is_yang_sen = latest['Close'] > latest['Open']
                 
-                is_bouncing = (latest['Close'] > latest['Open']) and (latest['Close'] > df['Close'].iloc[-2])
-                
-                if latest.get('RSI', 50) > 40:
-                    reason = f"RSI({latest['RSI']:.1f}) is not oversold"
-                elif deviation >= -0.015:
-                    reason = f"Deviation({deviation:.2%}) is not deep enough"
-                elif not is_bouncing:
-                    reason = "Falling Knife (No Bounce Confirmed)"
+                # モメンタム
+                momentum_50 = (latest['Close'] - df['Close'].iloc[-50]) / df['Close'].iloc[-50] if len(df) >= 50 else 0
+
+                if rsi > 35:
+                    reason = f"RSI({rsi:.1f}) not oversold enough"
+                elif latest['Close'] >= sma20:
+                    reason = "Above SMA20 (No mean reversion room)"
+                elif not is_yang_sen:
+                    reason = f"Falling (Yin-sen, wait for confirmation)"
                 else:
-                    deviation_depth = abs(deviation) * 100
-                    score = (deviation_depth * 20) + (vol_ratio * 5)
-                    reason = "Mean Reversion (Bounce)"
+                    # 【合格】レンジ相場でRSI35以下まで売られ、陽線で反発を開始した銘柄
+                    # スコアは売られすぎているほど高くする
+                    score = (35 - rsi) * 20 + abs(momentum_50) * 1000
+                    reason = "RSI Mean Reversion (Bounce)"
             else:
                 reason = f"Unsupported Regime: {regime}"
 

@@ -109,6 +109,13 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                         
                         raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash)
                         shares_to_buy = (raw_shares // 100) * 100
+                        
+                        # 【欠陥④修正】ポジションサイズが0になる場合のフォールバック
+                        # リスクベース計算が0に丸められた場合、最低投資額(MIN_ALLOCATION_AMOUNT)で強制購入を試みる
+                        if shares_to_buy == 0 and account['cash'] >= buy_price * 100:
+                            fallback_shares = int(min(MIN_ALLOCATION_AMOUNT, account['cash'] * 0.3) // buy_price)
+                            shares_to_buy = (fallback_shares // 100) * 100
+                        
                         cost = buy_price * shares_to_buy
                         
                         if shares_to_buy >= 100 and account['cash'] >= cost:
