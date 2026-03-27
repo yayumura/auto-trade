@@ -49,10 +49,6 @@ def run_backtest(target_codes, period="30d", interval="15m"):
 
     # 4. タイムマシン・ループ（過去から未来へ1ステップずつ進む）
     for current_time in timeline:
-        # 15:00以降（大引け間際以降）は新規イベントが発生しないためスキップ（デイトレード仕様）
-        if current_time.time() >= datetime.strptime("15:00", "%H:%M").time():
-            continue
-
         # --- A. データのスライス（未来のデータを隠す / Look-ahead Biasの排除） ---
         sliced_data = full_data.loc[:current_time]
         
