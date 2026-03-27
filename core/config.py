@@ -86,6 +86,6 @@ def load_insider_exclusion_codes() -> set:
         return set()
 
 # --- Target Exits ---
-ATR_STOP_LOSS = 1.0       # 損切りを早くする(ATRの1倍) - BULL用
-RANGE_ATR_STOP_LOSS = 1.5 # レンジ相場でも1.5倍で切る
-ATR_TRAIL = 2.0           # トレール幅を広げてトレンドに長く乗る(最高値からATRの2倍)
+ATR_STOP_LOSS = 5.0       # 15分足ATRの5倍（日足の約1ATR相当）のゆとりを持たせる
+RANGE_ATR_STOP_LOSS = 6.0 # レンジ相場は少し広めに
+ATR_TRAIL = 8.0           # トレンドに長く乗るため、最高値からATR8倍の下落で利確

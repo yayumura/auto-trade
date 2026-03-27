@@ -319,7 +319,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 if verbose:
                     print(f"🔄 [{code}] 株式分割を検知: {original_shares}株 -> {p['shares']}株 に価格と共に補正しました。")
 
-            # 以降の計算で使う内部変数
+            # 以共の計算で使う内部変数
             current_shares = int(p['shares'])
             buy_price = float(p.get('buy_price', 0)) * split_ratio
             highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
@@ -400,9 +400,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 else:
                     sell_reason = "建値撤退 (Break Even / Minimal Profit)"
             # --- 【新規】分割利確ロジック ---
-            elif not is_partial_sold and current_price >= buy_price + (atr * 2.0):
-                # 利益がATRの2.0倍に乗ったら、確実な利益ロックのために半分だけ利確する
-                sell_reason = f"分割利確 (Scale-out TP at ATRx2.0)"
+            elif not is_partial_sold and current_price >= buy_price + (atr * 8.0):
+                # 利益がATRの8.0倍（十分なトレンド）に乗ったら半分利確
+                sell_reason = f"分割利確 (Scale-out TP at ATRx8.0)"
                 # 100株単位に丸める。最低100株。
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
@@ -602,34 +602,40 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             reason = "Unknown"
             if regime == "BULL":
-                # 【順張り戦略】上昇トレンドの勢い（モメンタム）に乗る
+                # 【順張り戦略】上昇トレンドの「押し目」や「初動」を狙う
                 if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
+                    reason = "Below SMA50 (Macro trend is down)"
                     score -= 50
                 
                 vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                if vol_ratio < 0.5: # 出来高が死んでいる銘柄は避ける（0.1から0.5に引き上げ）
+                if vol_ratio < 0.5:
                     reason = f"VolRatio({vol_ratio:.2f}) < 0.5"
-                elif latest.get('RSI', 50) > 85: # 85以上は短期的な買われすぎ
-                    reason = f"RSI({latest['RSI']:.1f}) > 85"
-                elif latest['MACD'] < latest['Signal']:
-                    # MACDがシグナルを下回っている（調整局面）は避ける
-                    reason = "MACD < Signal"
+                elif latest.get('RSI', 50) > 70: 
+                    # 【重要】RSIが70以上（短期的な買われすぎ・急騰直後）は高値掴みになるので避ける
+                    reason = f"RSI({latest['RSI']:.1f}) > 70 (Overbought)"
+                elif latest['Close'] < latest['SMA20']:
+                    reason = "Below SMA20 (Short term momentum is weak)"
                 else:
-                    # MACDの乖離幅（勢い）と、出来高の増加をスコア化
-                    macd_divergence = latest['MACD'] - latest['Signal']
-                    score += (macd_divergence * 100) + (vol_ratio * 10)
+                    # SMA20より上にあるが、離れすぎていない（安全なエントリーポイント）
+                    deviation_from_sma20 = abs(latest['Deviation']) 
+                    macd_hist = latest['MACD'] - latest['Signal']
                     
-                    # 終値がVWAPより上にある（その日強い）銘柄を加点
-                    today_date = df.index[-1].date()
-                    today_df = df[df.index.date == today_date]
-                    if not today_df.empty:
-                        vwap_vol = today_df['Volume'].sum()
-                        typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
-                        vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
-                        if latest['Close'] > vwap:
-                            score += 20
-                            
-                    reason = "Trend Following Score"
+                    if macd_hist < 0:
+                        reason = "MACD Histogram is negative" # 下落モメンタム中は買わない
+                    else:
+                        # 乖離が少ない（SMA20に近い）ほど安全として高く評価し、出来高も加味する
+                        score += ( (0.02 - deviation_from_sma20) * 1000 ) + (vol_ratio * 10)
+                        
+                        # [Bonus] 終値がVWAPより上にある（その日強い）銘柄を加点
+                        today_date = df.index[-1].date()
+                        today_df = df[df.index.date == today_date]
+                        if not today_df.empty:
+                            vwap_vol = today_df['Volume'].sum()
+                            typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
+                            vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
+                            if latest['Close'] > vwap:
+                                score += 20
+                        reason = "Pullback / Breakout Setup"
 
             elif regime == "RANGE":
                 # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
