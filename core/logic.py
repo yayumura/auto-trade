@@ -49,6 +49,9 @@ class RealtimeBuffer:
             else:
                 # [Professional Audit] ボリュームのリセット（日付変更等）を検知
                 delta_volume = total_volume
+        else:
+            # [Professional Audit] 初期化直後は現在値をそのまま増分とする（寄付き対応）
+            delta_volume = total_volume
         self.last_total_volume = total_volume
 
         # タイムスタンプをインターバルの開始時刻に切り捨てる

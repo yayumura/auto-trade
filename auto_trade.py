@@ -772,7 +772,7 @@ def _main_exec():
         # --- [Phase 11-13] キャッシュ清掃・GC・リソース保護 ---
         # 1時間に1回、非アクティブなバッファを解放する (GC)
         if int(time.time()) % 3600 < 30:
-            active_codes = set([str(p['code']) for p in portfolio] + watchlist)
+            active_codes = set([str(p['code']) for p in portfolio] + watchlist + ['1321'])
             inactive_codes = [c for c in realtime_buffers if c not in active_codes]
             for c in inactive_codes:
                 print(f"🧹 [GC] 非アクティブなバッファ {c} をメモリ解放します。")

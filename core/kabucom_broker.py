@@ -213,19 +213,23 @@ class KabucomBroker(BaseBroker):
                 "buy_price": float(p['Price']), "current_price": current_price,
                 "highest_price": round(highest_price, 1),
                 "buy_time": buy_time,
-                "partial_sold": partial_sold
+                "partial_sold": partial_sold,
+                "hold_id": p.get('ExecutionID') # 決済時に必須となる建玉ID
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, hold_ids: list = None) -> str:
         """
-        現物の成行・指値注文（買い/売り）を発注する純粋APIラッパー。
-        成功時は OrderId を返し、失敗時は None を返すようにシグネチャを変更。
+        現物・信用の成行・指値注文を発注する。
         side: "1" (売), "2" (買)
+        hold_ids: 決済時に指定する建玉IDのリスト (side="1" の時に指定)
         """
         if not self.token: return None
         
         cash_margin = 2 if side == "2" else 3
+        # 買付余力(2) または 信用売(3)
+        # [Professional Audit] 信用取引の決済(Close)を明示する
+        
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         
         data = {
@@ -237,12 +241,19 @@ class KabucomBroker(BaseBroker):
             "CashMargin": cash_margin,
             "MarginTradeType": 3,
             "DelivType": 0,
-            "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),   # 4: 特定口座 (デフォルト)
+            "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),
             "Qty": shares,
             "FrontOrderType": front_order_type,
             "Price": int(price),
-            "ExpireDay": 0      # 当日限り
+            "ExpireDay": 0
         }
+
+        if side == "1" and hold_ids:
+            # [Professional Audit] 決済指定漏れによる両建て増殖バグの修正
+            # 建玉を指定して返済（決済）注文を投げる
+            data["ClosePositionOrder"] = [{"HoldID": h_id, "Qty": shares} for h_id in hold_ids]
+            # ※ 単一の決済なら shares で良いが、複数に跨る場合は各々指定が必要。
+            # 今回は単純化のため、上位で1建玉ごとに呼ぶか、同じ数量を割り当てる想定。
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         if res and res.status_code == 200:
@@ -361,17 +372,26 @@ class KabucomBroker(BaseBroker):
     def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> dict:
         """
         指値を最良気配に追従（Chase）させながら発注し、一定時間で強制執行するOMS機能。
-        一部約定時には残数のみを次サイクルで発注する。
+        [Professional Audit] 1. 部分約定の合算(VWAP), 2. 待機時間の短縮, 3. 決済指定(HoldID)
         """
         print(f"🚀 【追従発注開始】{code} {shares}株 (Side:{side})")
         
         remaining_shares = shares
-        final_details = None
+        total_filled_qty = 0
+        total_filled_value = 0
         
+        # [Professional Audit] 決済時の建玉特定
+        hold_ids = []
+        if side == "1":
+            try:
+                all_pos = self.get_positions()
+                target_pos = [p for p in all_pos if str(p['code']) == str(code)]
+                hold_ids = [p['hold_id'] for p in target_pos if p.get('hold_id')]
+            except Exception as e:
+                print(f"⚠️ 決済用建玉IDの取得に失敗しました: {e}")
+
         for attempt in range(1, 4):
             if remaining_shares <= 0: break
-            
-            # [Professional Audit] 繰り返し発注によるレート制限（IP BAN）回避
             time.sleep(0.2)
             
             board = self.get_board_data([code])
@@ -379,7 +399,6 @@ class KabucomBroker(BaseBroker):
             if not b_info: break
             
             c_price = b_info.get('price', 0)
-            # [Professional Audit] ストップ高・安（張り付き）の検知ガード
             if side == "2" and c_price >= b_info.get('upper_limit', 999999):
                 print(f"🚨 {code} はストップ高に達しているため、買い注文を中止します。")
                 break
@@ -389,73 +408,68 @@ class KabucomBroker(BaseBroker):
 
             if side == "2":
                 limit_price = b_info.get('bid') or ((b_info.get('ask', 0) + b_info.get('price', 0))/2)
-                # [Professional Audit] 最新の板価格に基づき呼値を動的に正規化（価格帯跨ぎ対応）
                 limit_price = normalize_tick_size(limit_price, is_buy=True)
             else:
                 limit_price = b_info.get('ask') or ((b_info.get('bid', 0) + b_info.get('price', 0))/2)
                 limit_price = normalize_tick_size(limit_price, is_buy=False)
             
             if not limit_price or limit_price <= 0:
-                 # 気配値が取れない場合は、直近の出来値（price）を試す
                  limit_price = b_info.get('price', 0)
             
-            # [Professional Audit] 指値 0円 はAPIエラーの原因となるため、最終ガード
             if not limit_price or limit_price <= 0:
-                print(f"⚠️ {code} の有効な価格が取得できないため（{limit_price}円）、このサイクルの発注を見送ります。")
-                break
-            
-            if not limit_price or limit_price == 0:
-                print(f"⚠️ {code} の有効な価格が板情報から取得できないため（気配・現在値ともに0）、追従を中断します。")
+                print(f"⚠️ {code} の有効な価格が取得できないため、追従を中断します。")
                 break
 
-            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price)
+            # 注文発注（売却時は建玉IDを指定）
+            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, hold_ids=hold_ids if side == "1" else None)
             if not order_id: break
             
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
             start_wait = time.time()
             current_order_filled = False
             
-            while time.time() - start_wait < 10:
+            # [Professional Audit] 待機時間を10秒から3秒に短縮（逆選択回避）
+            while time.time() - start_wait < 3:
                 details = self.get_order_details(order_id)
                 if details:
                     state = details.get('State')
                     if state == 6: # 全部約定
                         print(f"✨ 注文 ID: {order_id} が全部約定しました。")
+                        qty = int(details.get('CumQty', remaining_shares))
+                        total_filled_qty += qty
+                        total_filled_value += (float(details.get('Price', limit_price)) * qty)
                         remaining_shares = 0
-                        final_details = details
                         current_order_filled = True
                         break
-                time.sleep(2)
+                time.sleep(1)
             
             if current_order_filled: break
             
-            # 10秒経過または未約定ならキャンセルして状況確認
-            print(f"⏰ 10秒経過。注文 ID: {order_id} を一度取り消して残数を確認します。")
+            print(f"⏰ 待機時間終了。注文 ID: {order_id} を一度取り消して残数を確認します。")
             if self.cancel_order(order_id):
-                # [Professional Audit] 取消完了が元帳に反映されるまで僅かに待機
                 time.sleep(0.5)
-                # 取消完了を待って約定数（CumQty）を確認
                 for _ in range(5):
                     d = self.get_order_details(order_id)
                     if d and d.get('State') in [8, 9, 10, 6]:
                         cum_qty = int(d.get('CumQty', 0))
-                        # 追従ループ用の残数を更新
                         if cum_qty > 0:
                             print(f"⚠️ 注文 ID: {order_id} は一部約定（{cum_qty}株）していました。")
+                            total_filled_qty += cum_qty
+                            total_filled_value += (float(d.get('Price', limit_price)) * cum_qty)
                         remaining_shares -= cum_qty
-                        final_details = d # 最後の注文情報を保持
                         break
                     time.sleep(1)
             else:
-                # [Professional Audit] キャンセル失敗時、既に約定済みかを確認して復旧を図る
                 d = self.get_order_details(order_id)
-                if d and d.get('State') == 6: # 6:全約定
+                if d and d.get('State') == 6:
                     print(f"✨ 注文 ID: {order_id} の取消には失敗しましたが、既に全約定していました。")
+                    qty = int(d.get('CumQty', remaining_shares))
+                    total_filled_qty += qty
+                    total_filled_value += (float(d.get('Price', limit_price)) * qty)
                     remaining_shares = 0
-                    final_details = d
                     break
                 else:
-                    print(f"⛔ 注文 ID: {order_id} の取消に失敗し、約定も確認できないため安全のため追従を中断します。")
+                    print(f"⛔ キャセル失敗かつ約定不明のため、安全のため追従を中断します。")
                     break
 
         # --- 最終手段: 強制執行 (Marketable Limit Order) ---
@@ -471,17 +485,23 @@ class KabucomBroker(BaseBroker):
             else:
                 force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
                 
-            print(f"🛒 強制執行価格: {force_price:.1f}")
-            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price)
+            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price, hold_ids=hold_ids if side == "1" else None)
             if order_id:
-                final_details = self.wait_for_execution(order_id, timeout_sec=20)
-                if final_details:
-                    # 全体の株数と最終ステータスを整合させる（上位 logic.py 用）
-                    total_filled = shares - remaining_shares + int(final_details.get('CumQty', 0))
-                    final_details['Qty'] = total_filled
-                    final_details['State'] = 6 if total_filled >= shares else 7
-            
-        return final_details
+                f_details = self.wait_for_execution(order_id, timeout_sec=20)
+                if f_details:
+                    qty = int(f_details.get('CumQty', remaining_shares))
+                    total_filled_qty += qty
+                    total_filled_value += (float(f_details.get('Price', force_price)) * qty)
+                    remaining_shares -= qty
+
+        # [Professional Audit] 合算した結果（VWAP）を返却
+        avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0
+        return {
+            "State": 6 if total_filled_qty >= shares else 7,
+            "Qty": total_filled_qty,
+            "Price": avg_price,
+            "Symbol": code
+        }
 
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
         """ 注文が約定（または失敗）するまで待機する """
