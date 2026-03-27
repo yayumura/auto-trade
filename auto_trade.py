@@ -15,6 +15,7 @@ import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
+from core.kabu_launcher import ensure_kabu_station_running
 from core.utils import calculate_effective_age, get_previous_business_day
 
 class MarketPhase(Enum):
@@ -135,6 +136,13 @@ def main():
         release_lock()
 
 def _main_exec():
+    # --- 【新規】kabuステーションの自動起動・ログイン ---
+    if TRADE_MODE in ["KABUCOM_LIVE", "KABUCOM_TEST"]:
+        if not ensure_kabu_station_running():
+            print("❌ kabuステーションの準備が整わなかったため、システムを終了します。")
+            return
+
+    # 既存のプレフライトチェック
     if not pre_flight_check():
         print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
         return
@@ -152,11 +160,11 @@ def _main_exec():
     
     try:
         if TRADE_MODE == "KABUCOM_LIVE":
-            print("[LIVE] 【本番モード】auカブコム証券 本番API (Port 8080) に接続します")
+            print("[LIVE] 【本番モード】auカブコム証券 本番API (Port 18080) に接続します")
             broker = KabucomBroker(is_production=True)
             is_sim = False
         elif TRADE_MODE == "KABUCOM_TEST":
-            print("[TEST] 【テストモード】auカブコム証券 検証用API (Port 8081) に接続します")
+            print("[TEST] 【テストモード】auカブコム証券 検証用API (Port 18081) に接続します")
             broker = KabucomBroker(is_production=False)
             is_sim = False
         else:

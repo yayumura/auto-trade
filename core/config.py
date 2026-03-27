@@ -45,6 +45,7 @@ INSIDER_EXCLUSION_FILE = os.path.join(BASE_DIR, 'insider_exclusion.json')
 
 # --- API Keys & Webhooks ---
 KABUCOM_API_PASSWORD = os.environ.get("KABUCOM_API_PASSWORD")
+KABUCOM_LOGIN_PASSWORD = os.environ.get("KABUCOM_LOGIN_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")

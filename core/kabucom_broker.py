@@ -12,13 +12,13 @@ from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv
 class KabucomBroker(BaseBroker):
     """
     auカブコム証券（kabuステーションAPI）と通信するBrokerクラス。
-    is_production = False の場合は検証環境（ポート8081）を使用し、
-    True の場合は本番環境（ポート8080）を使用してリアルマネーで売買を行う。
+    is_production = False の場合は検証環境（ポート18081）を使用し、
+    True の場合は本番環境（ポート18080）を使用してリアルマネーで売買を行う。
     """
     
     def __init__(self, is_production=False):
         self.is_production = is_production
-        self.port = 8080 if is_production else 8081
+        self.port = 18080 if is_production else 18081
         self.base_url = f"http://localhost:{self.port}/kabusapi"
         self.password = KABUCOM_API_PASSWORD
         self.token = None
