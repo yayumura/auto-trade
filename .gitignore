@@ -9,6 +9,7 @@ account.json
 virtual_portfolio.csv
 trade_history.csv
 execution_log.csv
+.bot_sim.lock
 logs/
 
 # Python
