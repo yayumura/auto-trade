@@ -160,8 +160,15 @@ def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days
     results = []
 
     # window_days ごとに分割して実行
-    for i in range(0, len(dates), window_days):
-        window_dates = dates[i : i + window_days]
+    warmup_days = 10
+    if len(dates) <= warmup_days:
+        print(f"  [Error] Data too short for warmup ({len(dates)} days)")
+        return
+        
+    evaluation_dates = dates[warmup_days:]
+
+    for i in range(0, len(evaluation_dates), window_days):
+        window_dates = evaluation_dates[i : i + window_days]
         if len(window_dates) < window_days and i > 0: # 最後の端数が少なすぎる場合はスキップ
             continue
             
@@ -207,7 +214,7 @@ if __name__ == "__main__":
         all_times = df_1321_full.index.unique().sort_values()
         test_start_idx = max(0, len(all_times) - 500) 
         timeline = all_times[test_start_idx:]
-        res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=False)
+        res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=True)
         
         print("\n" + "="*40)
         print("Backtest Result Summary")

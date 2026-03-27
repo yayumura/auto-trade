@@ -480,7 +480,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 # Notification and Logging (should not block the state update)
                 try:
                     log_msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})"
-                    details_msg = f"   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {gross_profit:+d}円 | 税引後: {net_profit:+d}円"
+                    details_msg = f"   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {int(gross_profit):+d}円 | 税引後: {int(net_profit):+d}円"
                     if verbose:
                         print(log_msg)
                         print(details_msg)
@@ -577,40 +577,50 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             reason = "Unknown"
             if regime == "BULL":
-                # 1. MTFA（マルチタイムフレーム分析） (緩和: スコアペナルティのみ)
+                # 【順張り戦略】上昇トレンドの勢い（モメンタム）に乗る
                 if 'SMA50' in df.columns and latest['Close'] < latest['SMA50']: 
                     score -= 50
                 
-                today_date = df.index[-1].date()
-                today_df = df[df.index.date == today_date]
-                vwap_vol = today_df['Volume'].sum()
-                typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
-                vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
-                
-                vwap_dev = (latest['Close'] - vwap) / vwap
-                # 3. 押し目条件 (緩和: 10%まで)
-                if vwap_dev > 0.10: 
-                    reason = f"VWAP_Dev({vwap_dev:.2%}) > 10%"
+                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                if vol_ratio < 0.5: # 出来高が死んでいる銘柄は避ける（0.1から0.5に引き上げ）
+                    reason = f"VolRatio({vol_ratio:.2f}) < 0.5"
+                elif latest.get('RSI', 50) > 85: # 85以上は短期的な買われすぎ
+                    reason = f"RSI({latest['RSI']:.1f}) > 85"
+                elif latest['MACD'] < latest['Signal']:
+                    # MACDがシグナルを下回っている（調整局面）は避ける
+                    reason = "MACD < Signal"
                 else:
-                    vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                    if vol_ratio < 0.1: 
-                        reason = f"VolRatio({vol_ratio:.2f}) < 0.1"
-                    elif latest.get('RSI', 50) > 98:
-                        reason = f"RSI({latest['RSI']:.1f}) > 98"
-                    else:
-                        # スコア計算
-                        score += ((0.10 - vwap_dev) * 1000) + (vol_ratio * 5) - (abs(50 - latest['RSI']) * 0.1)
-                        if latest['Close'] < vwap: score -= 5
-                        reason = "Low Score (<=0)"
-            
+                    # MACDの乖離幅（勢い）と、出来高の増加をスコア化
+                    macd_divergence = latest['MACD'] - latest['Signal']
+                    score += (macd_divergence * 100) + (vol_ratio * 10)
+                    
+                    # 終値がVWAPより上にある（その日強い）銘柄を加点
+                    today_date = df.index[-1].date()
+                    today_df = df[df.index.date == today_date]
+                    if not today_df.empty:
+                        vwap_vol = today_df['Volume'].sum()
+                        typical_price = (today_df['High'] + today_df['Low'] + today_df['Close']) / 3
+                        vwap = (typical_price * today_df['Volume']).sum() / vwap_vol if vwap_vol > 0 else latest['Close']
+                        if latest['Close'] > vwap:
+                            score += 20
+                            
+                    reason = "Trend Following Score"
+
             elif regime == "RANGE":
-                # [Extreme Relaxed]
-                if latest.get('RSI', 50) > 98:
-                    reason = f"RSI({latest['RSI']:.1f}) > 98"
+                # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
+                vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
+                # 乖離率(Deviation)は SMA20 からの乖離
+                deviation = latest['Deviation'] 
+                
+                if latest.get('RSI', 50) > 40:
+                    reason = f"RSI({latest['RSI']:.1f}) is not oversold"
+                elif deviation >= -0.015:
+                    reason = f"Deviation({deviation:.2%}) is not deep enough" # SMA20から1.5%以上下落していない
                 else:
-                    vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                    deviation_depth = abs(latest['Deviation']) * 100
-                    score = (deviation_depth * 10) + (vol_ratio * 5)
+                    # マイナス乖離が深いほど高スコア（下落からのリバウンド狙い）
+                    deviation_depth = abs(deviation) * 100
+                    score = (deviation_depth * 20) + (vol_ratio * 5)
+                    reason = "Mean Reversion Score"
             else:
                 reason = f"Unsupported Regime: {regime}"
 
