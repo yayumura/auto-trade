@@ -382,23 +382,25 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 buy_dt = buy_dt.to_pydatetime()
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
-            # 【修正2】勝ち確定ラインを +1.5% に早める
-            is_winning_trade = current_price > (buy_price * 1.015)
+            # --- 【最終安定化】状態記憶バグの修正 ---
+            # 一度でも +1.5% に到達したら勝ち確定モードをロック（highest_price_dbを使用）
+            is_winning_trade = highest_price_db > (buy_price * 1.015)
 
             if current_price <= hard_stop_price:
                 sell_reason = "絶対損切 (-4.0% Hard Stop / Catastrophe)"
-            elif hold_days > 3.0: # 資金効率を上げるため3日で切る
+            elif hold_days > 3.0: 
+                # 【安定化】タイムストップは無条件3日に戻す（資金効率優先）
                 sell_reason = "タイムストップ (Held > 3 days)"
             elif is_closing_time:
                 sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
             elif not is_winning_trade and current_price <= buy_price - (atr * current_stop_loss_mult):
-                # 通常の損切り（ATRベースで約1.5〜2%程度の適切な幅になる）
+                # 通常の損切り
                 sell_reason = f"ボラティリティ初期損切 (Stop Loss ATR:{current_stop_loss_mult})"
-            elif is_winning_trade and current_price <= highest_price_db - (atr * 3.0):
-                # 利益が1.5%乗ったら、トレール幅をATR3倍にギュッと縮めて利益を確保する
+            elif is_winning_trade and current_price <= highest_price_db - (atr * 3.5):
+                # 【安定化】トレール幅を ATR 3.5倍にして、ノイズを許容しつつ利益を確保（建値撤退は廃止）
                 sell_reason = f"追従型トレール利確 (Trailing Stop from {highest_price_db:.1f})"
             elif not is_partial_sold and current_price >= buy_price + (atr * 10.0):
-                # ATR10倍（約2〜3%）で半分利確し、残りはトレールで無限の利益を追う
+                # ATR 10倍で半分利確
                 sell_reason = f"分割利確 (Scale-out TP at ATRx10.0)"
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
@@ -577,19 +579,15 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 buf_entry = realtime_buffers[code]
                 df = buf_entry.df if hasattr(buf_entry, 'df') else buf_entry
             else:
-                # リアルタイム時は data_df からフィルタリングして取得
-                df = data_df[data_df['コード'].astype(str) == code].copy()
+                # リアルタイム時は yfinance から取得
+                df = yf.download(f"{code}.T", period="5d", interval="15m", progress=False, threads=False)
             
             if df is None or df.empty:
-                if current_time_override and code == targets[0] and current_time_override.minute == 0:
-                    print(f"  [Scan Debug] {current_time_override} {code} data is empty")
                 continue
 
             # テクニカル指標の計算
             df = calculate_technicals_for_scan(df)
             if df is None:
-                if current_time_override and code == targets[0] and current_time_override.minute == 0:
-                    print(f"  [Scan Debug] {current_time_override.strftime('%m/%d %H:%M')} {code} technicals returned None")
                 continue
             
             latest = df.iloc[-1]
@@ -599,7 +597,6 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             reason = "Unknown"
             if regime == "BULL":
                 # 【順張り戦略】究極の押し目買い（VWAP Pullback）
-                # マクロは上昇トレンドだが、短期的に売られ、VWAP付近で反発した安全なポイントだけを狙う
                 
                 # 当日のVWAPを計算
                 today_date = df.index[-1].date()
@@ -614,20 +611,14 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 rsi = latest.get('RSI', 50)
                 
                 if latest['Close'] < vwap:
-                    # VWAPより下は、その日のトレンドが完全に死んでいるので買わない
                     reason = "Below VWAP (Intraday trend is dead)"
                 elif latest['Close'] > latest['SMA20']:
-                    # 移動平均より上にある＝すでに上がりすぎ。押し目（下落）が来るまで待つ
                     reason = "Above SMA20 (Wait for pullback)"
                 elif rsi > 45:
-                    # 短期的に十分に売られていない
                     reason = f"RSI({rsi:.1f}) > 45 (Not oversold enough)"
                 elif not is_yang_sen:
-                    # まだ下落中（陰線）なので落ちるナイフ
                     reason = "Not bouncing (Yin-sen)"
                 else:
-                    # 【合格】VWAPの上で、SMA20より下に沈み込み、陽線で反発した「完璧な押し目」
-                    # VWAPに近い（リスクが極めて低い）ほど高スコアにする
                     vwap_distance = (latest['Close'] - vwap) / vwap
                     score = ( (0.02 - vwap_distance) * 2000 ) + (latest['Volume'] / latest['Avg_Vol_15m'] * 10)
                     reason = "VWAP Pullback (Perfect Dip Buy)"
@@ -635,20 +626,17 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             elif regime == "RANGE":
                 # 【逆張り戦略】下落の行き過ぎ（売られすぎ）からの反発を狙う
                 vol_ratio = latest['Volume'] / latest['Avg_Vol_15m']
-                # 乖離率(Deviation)は SMA20 からの乖離
                 deviation = latest['Deviation'] 
                 
-                # --- 追加: 反発の確認（陽線であり、直近の足より上昇していること） ---
                 is_bouncing = (latest['Close'] > latest['Open']) and (latest['Close'] > df['Close'].iloc[-2])
                 
                 if latest.get('RSI', 50) > 40:
                     reason = f"RSI({latest['RSI']:.1f}) is not oversold"
                 elif deviation >= -0.015:
-                    reason = f"Deviation({deviation:.2%}) is not deep enough" # SMA20から1.5%以上下落していない
+                    reason = f"Deviation({deviation:.2%}) is not deep enough"
                 elif not is_bouncing:
-                    reason = "Falling Knife (No Bounce Confirmed)" # 反発未確認はスキップ
+                    reason = "Falling Knife (No Bounce Confirmed)"
                 else:
-                    # マイナス乖離が深いほど高スコア（下落からのリバウンド狙い）
                     deviation_depth = abs(deviation) * 100
                     score = (deviation_depth * 20) + (vol_ratio * 5)
                     reason = "Mean Reversion (Bounce)"
@@ -656,7 +644,6 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 reason = f"Unsupported Regime: {regime}"
 
             if score > 0:
-                # M-2: 出来高スパイク等によるスコア過大を防止するためキャップを設ける
                 score = min(score, 500)
                 name = "不明"
                 if df_symbols is not None:
@@ -668,13 +655,8 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                     "price": latest['Close'], 
                     "atr": latest['ATR']
                 })
-            elif current_time_override:
-                # [Debugging] 毎時0分に全銘柄の理由を出力
-                if current_time_override.minute == 0 and verbose:
-                    print(f"  [Scan Debug] {current_time_override.strftime('%m/%d %H:%M')} {code} rejected: {reason} (Regime:{regime})")
 
         except Exception as e:
-            # H-2: 例外を無言でスキップせず、デバッグ可能なログを出力する
             if verbose:
                 print(f"[WARNING] [Scan] {code} の評価中にエラーが発生しスキップします: {type(e).__name__}: {e}")
             continue
