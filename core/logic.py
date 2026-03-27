@@ -387,8 +387,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         # 売却時は side="1" (売)
                         details = broker.execute_chase_order(code, sell_qty, side="1", atr=atr)
                         
-                        if not details or details.get('State') != 6:
-                            print(f"⚠️ {code} の売却が完了しませんでした。次サイクルで再試行または手動確認が必要です。")
+                        # [Professional Audit Round 2] 部分約定 (State=7) を受容し、データ不整合を防ぐ
+                        state = details.get('State') if details else None
+                        actual_qty = int(details.get('Qty', 0)) if details else 0
+                        
+                        if not details or state not in [6, 7] or actual_qty == 0:
+                            print(f"⚠️ {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
                             remaining_portfolio.append(p)
                             continue
                             

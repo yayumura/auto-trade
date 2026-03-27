@@ -213,22 +213,21 @@ class KabucomBroker(BaseBroker):
                 "buy_price": float(p['Price']), "current_price": current_price,
                 "highest_price": round(highest_price, 1),
                 "buy_time": buy_time,
-                "partial_sold": partial_sold,
-                "hold_id": p.get('ExecutionID') # 決済時に必須となる建玉ID
+                "partial_sold": partial_sold
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, hold_ids: list = None) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
         """
         現物・信用の成行・指値注文を発注する。
         side: "1" (売), "2" (買)
-        hold_ids: 決済時に指定する建玉IDのリスト (side="1" の時に指定)
         """
         if not self.token: return None
         
         cash_margin = 2 if side == "2" else 3
         # 買付余力(2) または 信用売(3)
-        # [Professional Audit] 信用取引の決済(Close)を明示する
+        # [Professional Audit] 信用取引の決済(Close)はAPI側が建玉を(FIFO)で自動選択するため、
+        # 明示的な建玉指定(ClosePositionOrder)を省略することでエラーを回避し、堅牢性を高める。
         
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         
@@ -247,13 +246,6 @@ class KabucomBroker(BaseBroker):
             "Price": int(price),
             "ExpireDay": 0
         }
-
-        if side == "1" and hold_ids:
-            # [Professional Audit] 決済指定漏れによる両建て増殖バグの修正
-            # 建玉を指定して返済（決済）注文を投げる
-            data["ClosePositionOrder"] = [{"HoldID": h_id, "Qty": shares} for h_id in hold_ids]
-            # ※ 単一の決済なら shares で良いが、複数に跨る場合は各々指定が必要。
-            # 今回は単純化のため、上位で1建玉ごとに呼ぶか、同じ数量を割り当てる想定。
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         if res and res.status_code == 200:
@@ -380,16 +372,6 @@ class KabucomBroker(BaseBroker):
         total_filled_qty = 0
         total_filled_value = 0
         
-        # [Professional Audit] 決済時の建玉特定
-        hold_ids = []
-        if side == "1":
-            try:
-                all_pos = self.get_positions()
-                target_pos = [p for p in all_pos if str(p['code']) == str(code)]
-                hold_ids = [p['hold_id'] for p in target_pos if p.get('hold_id')]
-            except Exception as e:
-                print(f"⚠️ 決済用建玉IDの取得に失敗しました: {e}")
-
         for attempt in range(1, 4):
             if remaining_shares <= 0: break
             time.sleep(0.2)
@@ -420,8 +402,8 @@ class KabucomBroker(BaseBroker):
                 print(f"⚠️ {code} の有効な価格が取得できないため、追従を中断します。")
                 break
 
-            # 注文発注（売却時は建玉IDを指定）
-            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, hold_ids=hold_ids if side == "1" else None)
+            # 注文発注（売却時はAPIが自動で建玉を選択(FIFO)）
+            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price)
             if not order_id: break
             
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
@@ -542,7 +524,7 @@ class KabucomBroker(BaseBroker):
         # --- [V2-C2] 取消完了の確認ポーリングを追加 ---
         print(f"⏳ 注文 ID: {order_id} の取消完了を待機中...")
         cancel_start = time.time()
-        while time.time() - cancel_start < 15:
+        while time.time() - cancel_start < 5:
             details = self.get_order_details(order_id)
             if details and details.get('State') == 8: # 8: 取消済
                 print(f"✅ 注文 ID: {order_id} の取消が完了しました。")
