@@ -72,7 +72,7 @@ class SimulationBroker(BaseBroker):
             for p in summary_record['portfolio']:
                 cp = float(p.get('current_price', p['buy_price']))
                 val = cp * int(p['shares'])
-                profit_pct = (cp - float(p['buy_price'])) / float(p['buy_price']) * 100
+                profit_pct = (cp - float(p['buy_price'])) / float(p['buy_price']) * 100 if float(p['buy_price']) > 0 else 0
                 print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
         else:
             print(" - 保有なし")

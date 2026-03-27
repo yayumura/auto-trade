@@ -440,7 +440,7 @@ class KabucomBroker(BaseBroker):
                 cp = float(p.get('current_price', p['buy_price']))
                 bp = float(p['buy_price'])
                 val = cp * int(p['shares'])
-                profit_pct = (cp - bp) / bp * 100
+                profit_pct = (cp - bp) / bp * 100 if bp > 0 else 0
                 print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
         else:
             print(" - 保有なし")

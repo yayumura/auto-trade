@@ -241,7 +241,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             p['current_price'] = round(current_price_raw / split_ratio if split_ratio > 0 else current_price_raw, 1)
 
 
-            profit_pct = (current_price - buy_price) / buy_price
+            profit_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0
             split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
             print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
 
@@ -333,7 +333,7 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
                 actions.append(act_str)
                 
-                actual_profit_pct = (exec_price - buy_price) / buy_price
+                actual_profit_pct = (exec_price - buy_price) / buy_price if buy_price > 0 else 0
                 
                 trade_record = {
                     "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],

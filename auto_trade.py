@@ -346,6 +346,11 @@ def _main_exec():
         else:
              is_morning_scan = False
 
+        # ▼【追加】日中スキャンの頻度制限（これを入れないと30秒ごとにyfinanceを叩いてIP BANされます）
+        if should_scan and not is_morning_scan:
+             if time.time() - last_scan_time < SCAN_INTERVAL_SEC:
+                 should_scan = False
+
         # --- 3. システムによる数学的スクリーニング ---
         if should_scan:
             last_scan_time = time.time()
@@ -389,11 +394,15 @@ def _main_exec():
                     chunk = tickers[i:i + chunk_size]
                     try:
                         # モーニングスキャンなら日足、日中なら15分足
-                        dl_period = "1mo" if is_morning_scan else "5d"
+                        dl_period = "3mo" if is_morning_scan else "5d"
                         dl_interval = "1d" if is_morning_scan else "15m"
                         chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', threads=False, progress=False)
                         if chunk_df is not None and not chunk_df.empty:
                             if isinstance(chunk_df.columns, pd.MultiIndex):
+                                data_dfs.append(chunk_df)
+                            elif len(chunk) == 1:
+                                # 1銘柄のみの場合、結合形式(MultiIndex)に合わせてから追加する
+                                chunk_df.columns = pd.MultiIndex.from_product([[chunk[0]], chunk_df.columns])
                                 data_dfs.append(chunk_df)
                     except Exception as e:
                         print(f"⚠️ データ取得中にエラーが発生しました: {e}")
