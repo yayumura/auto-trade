@@ -102,28 +102,9 @@ class RealtimeBuffer:
 def normalize_tick_size(price: float, is_buy: bool) -> int:
     """
     東証の呼値ルールに合わせて指値価格を安全かつ有効な価格に丸める。
-    絶対に約定させたい(Marketable Limit Order)ため、あえて不利な方向
-    （買付なら上、売却なら下）の有効な呼値に丸めます。
     """
     p = float(price)
-    
-    # [Professional Audit] 2024年現在の東証標準呼値（非TOPIX100銘柄用）に基づく厳格な丸め
-    if p <= 3000:
-        tick = 1.0
-    elif p <= 5000:
-        tick = 5.0
-    elif p <= 10000:
-        tick = 10.0
-    elif p <= 30000:
-        tick = 50.0
-    elif p <= 50000:
-        tick = 100.0
-    elif p <= 100000:
-        tick = 500.0
-    elif p <= 1000000:
-        tick = 1000.0
-    else:
-        tick = 5000.0
+    tick = get_tick_size(p)
     
     if is_buy:
         # 買付：指定価格以上の最小の呼値（切り上げ）
@@ -131,6 +112,18 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
     else:
         # 売却：指定価格以下の最大の呼値（切り捨て）
         return int(p // tick * tick)
+
+def get_tick_size(price: float) -> float:
+    """ [Professional Audit] 2024年現在の東証標準呼値（非TOPIX100銘柄用） """
+    p = float(price)
+    if p <= 3000: return 1.0
+    if p <= 5000: return 5.0
+    if p <= 10000: return 10.0
+    if p <= 30000: return 50.0
+    if p <= 50000: return 100.0
+    if p <= 100000: return 500.0
+    if p <= 1000000: return 1000.0
+    return 5000.0
 
 # --- 【中核1】レジーム（地合い）認識 ---
 def detect_market_regime(broker=None, buffer=None, current_time_override=None, verbose=True):
@@ -339,8 +332,14 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             api_price = p.get('current_price')
             if not is_simulation and api_price is not None and api_price > 0:
                 current_price_raw = float(api_price)
+                open_price = current_price_raw
+                high_price = current_price_raw
+                low_price = current_price_raw
             else:
                 current_price_raw = float(df['Close'].iloc[-1])
+                open_price = float(df['Open'].iloc[-1])
+                high_price = float(df['High'].iloc[-1])
+                low_price = float(df['Low'].iloc[-1])
                 
             # [V2-C3] ストップ高/安張り付き（流動性枯渇）のフェイルセーフ
             is_volume_zero = False
@@ -359,9 +358,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             # [V2-M1] 動的スリッページ (ATRベース: ボラティリティの1%をスリッページとする)
             # Strategy 2.0: 0.03 から 0.01 に緩和 (1 tick程度の実勢に合わせる)
             if is_simulation:
-                slippage = atr * 0.01 
+                tick_size = get_tick_size(current_price_raw)
+                slippage = max(tick_size, atr * 0.01) 
                 current_price = max(0.1, current_price_raw - slippage)
             else:
+                slippage = 0
                 current_price = current_price_raw
             
             # 【修正】profit_pct をここで定義（後の sell_reason で参照するため）
@@ -420,7 +421,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 # 目標未達時は最高値から ATR 2.5倍（ゆったり）
                 chandelier_stop = highest_price_db - (atr * TRAIL_STOP_MULT)
 
-            if current_price <= hard_stop_price:
+            # 【重要】損切り判定（窓開け考慮）
+            if is_simulation and open_price <= hard_stop_price:
+                sell_reason = f"窓開け損切 (Open {open_price:,.1f} <= Stop {hard_stop_price:,.1f})"
+                current_price_raw = open_price # 執行ベース価格を始値に修正
+                current_price = max(low_price, open_price - slippage) # クリップ処理
+            elif current_price <= hard_stop_price:
                 if current_price > buy_price:
                     sell_reason = f"建値守備決済 (Breakeven at {hard_stop_price:,.1f})"
                 else:

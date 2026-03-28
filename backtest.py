@@ -7,7 +7,7 @@ import sys
 # プロジェクトルートをパスに追加
 sys.path.append(os.getcwd())
 
-from core.logic import select_best_candidates, manage_positions, RealtimeBuffer, detect_market_regime
+from core.logic import select_best_candidates, manage_positions, RealtimeBuffer, detect_market_regime, get_tick_size
 from core.sim_broker import SimulationBroker
 from core.config import (
     INITIAL_CASH, DATA_FILE, JST, 
@@ -49,7 +49,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
     broker = SimulationBroker()
 
     # タイムマシン・ループ
-    for current_time in timeline:
+    for i in range(len(timeline)):
+        current_time = timeline[i]
         # --- A. データのスライス ---
         # 15分足バッファを作成
         mock_buffers = {}
@@ -92,42 +93,62 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                     
                     if candidates:
                         best = candidates[0]
-                        best_df = mock_buffers[best['code']].df
-                        buy_price = float(best_df.iloc[-1]['Close'])
-                        atr = best['atr']
+                        code = best['code']
                         
-                        # 資金管理ロジック
-                        total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-                        risk_amount = total_equity * MAX_RISK_PER_TRADE
-                        current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-                        risk_per_share = atr * current_sl_mult
-                        
-                        ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
-                        max_inv = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
-                        max_shares_inv = int(max_inv // buy_price)
-                        max_shares_cash = int(account['cash'] // buy_price)
-                        
-                        raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash)
-                        shares_to_buy = (raw_shares // 100) * 100
-                        
-                        # 【欠陥④修正】ポジションサイズが0になる場合のフォールバック
-                        # リスクベース計算が0に丸められた場合、最低投資額(MIN_ALLOCATION_AMOUNT)で強制購入を試みる
-                        if shares_to_buy == 0 and account['cash'] >= buy_price * 100:
-                            fallback_shares = int(min(MIN_ALLOCATION_AMOUNT, account['cash'] * 0.3) // buy_price)
-                            shares_to_buy = (fallback_shares // 100) * 100
-                        
-                        cost = buy_price * shares_to_buy
-                        
-                        if shares_to_buy >= 100 and account['cash'] >= cost:
-                            broker.execute_market_order(best['code'], shares_to_buy, "buy", price=buy_price)
-                            portfolio.append({
-                                "code": best['code'], "name": best['name'],
-                                "buy_price": buy_price, "shares": shares_to_buy,
-                                "buy_time": current_time, "atr": atr
-                            })
-                            account['cash'] -= cost
+                        # 【重要】執行を「次の足」に遅延させる (Lookahead Bias 回避)
+                        if i + 1 < len(timeline):
+                            next_time = timeline[i+1]
+                            ticker_sym = f"{code}.T"
+                            
+                            # 次足のデータを確認
+                            if ticker_sym in full_data.columns.levels[0]:
+                                next_bar = full_data[ticker_sym].loc[next_time]
+                                if next_bar.empty or pd.isna(next_bar['Open']):
+                                    continue
+                                
+                                next_open = float(next_bar['Open'])
+                                next_high = float(next_bar['High'])
+                                next_low = float(next_bar['Low'])
+                                
+                                # スリッページ計算 (買付は Open + slippage)
+                                tick_size = get_tick_size(next_open)
+                                slippage = max(tick_size, best['atr'] * 0.01)
+                                buy_price = min(next_high, next_open + slippage) # クリップ処理
+                                
+                                # 資金管理ロジック
+                                total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                                risk_amount = total_equity * MAX_RISK_PER_TRADE
+                                current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+                                risk_per_share = best['atr'] * current_sl_mult
+                                
+                                ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+                                max_inv = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                                max_shares_inv = int(max_inv // buy_price)
+                                max_shares_cash = int(account['cash'] // buy_price)
+                                
+                                raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash)
+                                shares_to_buy = (raw_shares // 100) * 100
+                                
+                                # 最低単元でのフォールバック
+                                if shares_to_buy == 0 and account['cash'] >= buy_price * 100:
+                                    fallback_shares = int(min(MIN_ALLOCATION_AMOUNT, account['cash'] * 0.3) // buy_price)
+                                    shares_to_buy = (fallback_shares // 100) * 100
+                                
+                                cost = buy_price * shares_to_buy
+                                
+                                if shares_to_buy >= 100 and account['cash'] >= cost:
+                                    broker.execute_market_order(best['code'], shares_to_buy, "buy", price=buy_price)
+                                    portfolio.append({
+                                        "code": best['code'], "name": best['name'],
+                                        "buy_price": buy_price, "shares": shares_to_buy,
+                                        "buy_time": next_time, "atr": best['atr']
+                                    })
+                                    account['cash'] -= cost
+                                    if verbose:
+                                        print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy (Next Bar Open): {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Slip: {slippage:.1f})")
+                        else:
                             if verbose:
-                                print(f"    [{current_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy}sh @ {buy_price:.1f}")
+                                print(f"    [{current_time.strftime('%m/%d %H:%M')}] Signal on Last Bar: {code} (Execution skipped)")
 
     # 結果集計
     final_stock_value = 0
@@ -140,9 +161,17 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
     total_assets = account['cash'] + final_stock_value
     profit_pct = (total_assets - initial_cash_val) / initial_cash_val * 100
     win_rate = 0
+    avg_net_profit = 0
+    payoff_ratio = 0
     if trade_history:
         win_trades = [t for t in trade_history if t.get('net_profit', 0) > 0]
+        loss_trades = [t for t in trade_history if t.get('net_profit', 0) <= 0]
         win_rate = len(win_trades) / len(trade_history) * 100
+        avg_net_profit = sum(t['net_profit'] for t in trade_history) / len(trade_history)
+        
+        avg_win = sum(t['net_profit'] for t in win_trades) / len(win_trades) if win_trades else 0
+        avg_loss = sum(t['net_profit'] for t in loss_trades) / len(loss_trades) if loss_trades else 0
+        payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
 
     return {
         "start_date": timeline[0].strftime('%Y/%m/%d'),
@@ -152,6 +181,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         "profit_pct": profit_pct,
         "trade_count": len(trade_history),
         "win_rate": win_rate,
+        "avg_net_profit": avg_net_profit,
+        "payoff_ratio": payoff_ratio,
         "held_count": len(portfolio)
     }
 
@@ -232,6 +263,8 @@ if __name__ == "__main__":
         print(f"Net Profit:   {res['final_assets'] - res['initial_cash']:+.0f} ({res['profit_pct']:+.2f}%)")
         print(f"Total Trades: {res['trade_count']}")
         print(f"Win Rate:     {res['win_rate']:.1f}%")
+        print(f"Avg Profit:   {res['avg_net_profit']:+,.0f} yen")
+        print(f"Payoff Ratio: {res['payoff_ratio']:.2f}")
         print(f"Held Positions: {res['held_count']}")
         print("="*40)
         
