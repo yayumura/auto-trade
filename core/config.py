@@ -89,3 +89,10 @@ def load_insider_exclusion_codes() -> set:
 ATR_STOP_LOSS = 5.0       # 15分足ATRの5倍（日足の約1ATR相当）のゆとりを持たせる
 RANGE_ATR_STOP_LOSS = 6.0 # レンジ相場は少し広めに
 ATR_TRAIL = 8.0           # トレンドに長く乗るため、最高値からATR8倍の下落で利確
+
+# --- Strategy Optimization (Phase 4.2) ---
+MIN_VOLUME_SURGE = 1.1    # 緩やかな出来高増 (1.3 -> 1.1)
+ATR_TARGET_MULT = 3.0     # 利益を大きく狙う (2.0 -> 3.0)
+ATR_STOP_MULT = 2.0       # 損切りにさらに余裕を持たせる (1.8 -> 2.0)
+BREAKEVEN_TRIGGER = 0.012 # (+1.5% -> +1.2%)
+TRAIL_STOP_MULT = 2.0     # 利確トレイルをタイトにして利益確保 (3.0 -> 2.0)

@@ -6,7 +6,10 @@ from datetime import datetime
 import json
 import os
 import time
-from core.config import ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST
+from core.config import (
+    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST,
+    MIN_VOLUME_SURGE, ATR_TARGET_MULT, ATR_STOP_MULT, BREAKEVEN_TRIGGER, TRAIL_STOP_MULT
+)
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
 from core.utils import calculate_effective_age
@@ -301,7 +304,13 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 continue
             df = data_map[code]
             
-            if df.empty or len(df) < 14: 
+            if df.empty or len(df) < 20: 
+                remaining_portfolio.append(p)
+                continue
+            
+            # 【重要】テクニカル指標の計算（SMA5等を使用するため）
+            df = calculate_technicals_for_scan(df)
+            if df is None or 'SMA5' not in df.columns:
                 remaining_portfolio.append(p)
                 continue
 
@@ -325,10 +334,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             buy_price = float(p.get('buy_price', 0)) * split_ratio
             highest_price_db = float(p.get('highest_price', buy_price)) * split_ratio
 
-            # --- [Phase 13] 価格入力の階層化 (Price Input Hierarchy) ---
-            # 証券会社API由来のリアルタイム価格(p['current_price'])がある場合は、yfinanceの遅延データより優先する
+            # --- 価格入力の階層化 (Price Input Hierarchy) ---
+            # シミュレーション時は常に df の最新値を使用する（ stales 防止）
             api_price = p.get('current_price')
-            if api_price is not None and api_price > 0:
+            if not is_simulation and api_price is not None and api_price > 0:
                 current_price_raw = float(api_price)
             else:
                 current_price_raw = float(df['Close'].iloc[-1])
@@ -387,47 +396,54 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 buy_dt = buy_dt.to_pydatetime()
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
-            # --- 決済ロジック: 優先度順に展隈 ---
+            # --- 決済ロジック: 優先度順に展開 ---
+            
+            # [Optimization] ボラティリティに基づいた初期損切り (ATR 1.6倍)
+            initial_stop_price = buy_price - (atr * ATR_STOP_MULT)
+            # [Optimization] 絶対ハードストップ (-4.0%) とのタイトな方を選択
+            hard_stop_price = max(buy_price * 0.96, initial_stop_price)
 
-            # 1.絶対ハードストップ（大暴落時の命綱）
-            hard_stop_price = buy_price * 0.96  
+            # [Optimization] 建値決済（ブレイクイーブン）の設定
+            # 1%以上の含み益が出た後は、損切りラインを建値（+手数料分）に引き上げる
+            if profit_pct >= BREAKEVEN_TRIGGER:
+                hard_stop_price = max(hard_stop_price, buy_price * 1.001)
 
-            # 2. 初期固定ストップ：ポジションが倸益にオンになるまでは -2% 固定損切りを使用する
-            # 高値が買値の+1%超えたらトレールモードに移行する
-            is_in_profit_mode = highest_price_db >= buy_price * 1.01  # +1%超えたらトレールモード
-            if is_in_profit_mode:
-                # トレールモード: 最高値からATR 2.5倍の下落
-                chandelier_stop = highest_price_db - (atr * 2.5)
+            # [Optimization] 多段階利確・トレールロジック
+            # 高値が目標値 (ATR 1.5倍) を超えたらトレールモードをよりタイトにする
+            target_price = buy_price + (atr * ATR_TARGET_MULT)
+            is_target_reached = highest_price_db >= target_price
+            
+            if is_target_reached:
+                # 目標達成後は最高値から ATR 2.0倍で利益確保
+                chandelier_stop = highest_price_db - (atr * 2.0)
             else:
-                # 初期固定ストップ: Strategy 3.0: -1.0% に調整
-                chandelier_stop = buy_price * 0.99
+                # 目標未達時は最高値から ATR 2.5倍（ゆったり）
+                chandelier_stop = highest_price_db - (atr * TRAIL_STOP_MULT)
 
             if current_price <= hard_stop_price:
-                sell_reason = "絶対損切 (-4.0% Hard Stop)"
+                if current_price > buy_price:
+                    sell_reason = f"建値守備決済 (Breakeven at {hard_stop_price:,.1f})"
+                else:
+                    sell_reason = f"絶対損切 (Hard/Initial Stop at {hard_stop_price:,.1f})"
             elif current_price <= chandelier_stop:
                 if current_price > buy_price:
-                    sell_reason = f"シャンデリア・トレール利確 (Trail Stop from {highest_price_db:.1f})"
+                    sell_reason = f"トレール利確 (Trail Stop from {highest_price_db:,.1f})"
                 else:
-                    sell_reason = f"初期ストップ損切 (Initial Stop: {chandelier_stop:.1f})"
-            elif current_price >= buy_price * 1.01:
-                # 【利確ターゲット】Strategy 3.0: 1.5% -> 1.0% に調整（大型株の15分足現実に合わせる）
-                sell_reason = f"利確ターゲット達成 (+1.0% Take Profit)"
-            elif hold_days > 3.0: 
-                # 【Strategy 3.0】時間切れ決済を対称化（3日経ったら収益に関わらず一旦仕切り直し）
-                # これにより「微益」を逃さず勝率に反映させる
-                if current_price >= buy_price:
-                    sell_reason = f"三日時間切れ利確 (Held > 3 days & Profit {profit_pct*100:+.2f}%)"
-                else:
-                    sell_reason = f"三日時間切れ損切 (Held > 3 days & Loss {profit_pct*100:+.2f}%)"
-            elif is_closing_time:
-                sell_reason = "大引け直前決済 (Daytrade Time Stop 15:15)"
-            elif not is_partial_sold and current_price >= buy_price + (atr * 8.0):
-                # ATR 8倍で半分利確（大幅上昇时のボーナス利確）
-                sell_reason = f"分割利確 (Scale-out TP at ATRx8.0)"
+                    sell_reason = f"下降トレンド転換損切 (Trail Stop below Buy)"
+            elif hold_days > 5.0: 
+                # 【Strategy 4.2】時間切れのさらなる柔軟化 (4 -> 5 days)
+                # 5日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
+                is_momentum_lost = current_price < df['SMA5'].iloc[-1]
+                if is_momentum_lost and profit_pct < 0.005:
+                    sell_reason = f"効率化撤退 (5 days & no momentum)"
+            elif not is_partial_sold and current_price >= target_price:
+                # ATRターゲット達成で半分利確
+                sell_reason = f"第一目標達成・半分利確 (+{ATR_TARGET_MULT}xATR)"
                 half_qty = (current_shares // 2 // 100) * 100
                 if half_qty >= 100:
                     sell_qty = half_qty
                 else:
+                    # 最小単位なら全決済
                     sell_qty = current_shares
 
             if not sell_reason:
@@ -589,6 +605,12 @@ def calculate_technicals_for_scan(df):
     # VWAP (Volume Weighted Average Price) の簡易計算
     df['VWAP'] = (df[price_col] * df['Volume']).cumsum() / df['Volume'].cumsum()
     
+    # 【新規】移動平均線の拡張
+    df['SMA5'] = df[price_col].rolling(window=5).mean()
+    
+    # 乖離率
+    df['ROC_4h'] = df[price_col].pct_change(periods=16) # 15分足×16 = 約4時間 (1日相当の勢い)
+    
     return df
 
 def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None, verbose=True):
@@ -618,53 +640,62 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             
             latest = df.iloc[-1]
 
-            score = 0
-            
-            reason = "Unknown"
-            if regime == "BULL":
-                # 【SMA20押し目買い戦略 (Strategy 2.0)】
-                # 「強い銘柄が少し休んだところを確実に拾う」
+            # 【新規】市場トレンドフィルター (Nikkei 1321.T)
+            # 15分足ベースで日経平均が下げている時は、買いを控える（レンジ相場は除く）
+            market_ok = True
+            if regime == "BULL" and realtime_buffers and '1321' in realtime_buffers:
+                nk_df = realtime_buffers['1321'].df
+                if len(nk_df) > 20:
+                    nk_sma20 = nk_df['Close'].rolling(window=20).mean().iloc[-1]
+                    if nk_df['Close'].iloc[-1] < nk_sma20:
+                        market_ok = False
 
+            # 【新規】出来高フィルタ
+            vol_surge = False
+            if 'Avg_Vol_15m' in latest and latest['Volume'] > 0:
+                if latest['Volume'] > latest['Avg_Vol_15m'] * MIN_VOLUME_SURGE:
+                    vol_surge = True
+
+            score = 0
+            reason = "Unknown"
+            
+            # 【Strategy 4.2】ハードフィルターを緩和し、スコアリングベースに変更
+            if regime == "BULL":
+                # 【SMA20押し目買い戦略 (Strategy 4.2)】
                 if len(df) < 50:
-                    reason = "Not enough data for SMA20 check"
+                    reason = "Not enough data"
                     continue
 
-                # 各種テクニカル
-                vwap = latest.get('VWAP', latest['Close']) # すでに計算済みのものを優先
                 sma20 = latest['SMA20']
-                sma5 = df['Close'].rolling(window=5).mean().iloc[-1]
+                sma50 = latest.get('SMA50', sma20)
                 rsi = latest.get('RSI', 50)
-                
-                # モメンタム（50本前からの変化率）
                 momentum_50 = (latest['Close'] - df['Close'].iloc[-50]) / df['Close'].iloc[-50]
-
-                # --- BULL 判定ロジック ---
-                dist_sma20 = (latest['Close'] - sma20) / sma20
                 is_yang_sen = latest['Close'] > latest['Open']
+                is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
 
-                if momentum_50 < 0:
-                    reason = f"Negative Momentum ({momentum_50:.2%})"
-                elif latest['Close'] < vwap:
-                    reason = "Below VWAP (Intraday weak)"
-                elif rsi > 65:
-                    reason = f"RSI Too High ({rsi:.0f} > 65, wait for cooling)"
-                elif dist_sma20 > 0.025:
-                    reason = f"Too far from SMA20 ({dist_sma20:.2%}, wait for pullback)"
-                elif not is_yang_sen:
-                    reason = "Wait for bounce (Yin-sen)"
+                # 必須条件（これらを満たさない場合は足切り）
+                if momentum_50 < -0.02: # 緩やかな下落なら許容
+                    reason = f"Weak Momentum ({momentum_50:.2%})"
+                elif latest['Close'] < sma50 * 0.98: # 多少の下抜けは許容
+                    reason = "Below Anchor SMA50"
+                elif rsi > 70: # 70までは許容
+                    reason = f"RSI Too High ({rsi:.0f})"
+                elif not is_yang_sen and not is_sma5_up: # どちらかは必須
+                    reason = "No Bounce Confirmation"
                 else:
-                    # 【合格】
-                    # 1) VWAPの上（基本トレンド維持）
-                    # 2) RSIが過熱していない（押し目中）
-                    # 3) SMA20から1.5%以内の「近傍」
-                    # 4) 陽線で反発を確認
-                    score = (momentum_50 * 5000) + ((0.02 - abs(dist_sma20)) * 1000)
-                    reason = "SMA20 Pullback Bounce"
+                    # 【合格】スコア計算
+                    dist_sma20 = (latest['Close'] - sma20) / sma20
+                    # 基本スコア
+                    score = (momentum_50 * 5000) + ((0.03 - abs(dist_sma20)) * 1000)
+                    # ボーナス
+                    if vol_surge: score += 100
+                    if market_ok: score += 50
+                    if is_yang_sen and is_sma5_up: score += 50
+                    
+                    reason = "Strategy 4.2 Bull Entry"
 
             elif regime == "RANGE":
-                # 【RSI平均回帰戦略 (Strategy 2.0)】
-                # 「売られすぎた優良銘柄の自律反発を狙う」
-
+                # 【RSI平均回帰戦略 (Strategy 4.0)】
                 if len(df) < 20: 
                     reason = "Not enough data"
                     continue
@@ -672,21 +703,16 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 rsi = latest.get('RSI', 50)
                 sma20 = latest['SMA20']
                 is_yang_sen = latest['Close'] > latest['Open']
-                
-                # モメンタム
-                momentum_50 = (latest['Close'] - df['Close'].iloc[-50]) / df['Close'].iloc[-50] if len(df) >= 50 else 0
 
-                if rsi > 35:
+                if rsi > 30: # より厳格に (35 -> 30)
                     reason = f"RSI({rsi:.1f}) not oversold enough"
                 elif latest['Close'] >= sma20:
-                    reason = "Above SMA20 (No mean reversion room)"
+                    reason = "Above SMA20"
                 elif not is_yang_sen:
-                    reason = f"Falling (Yin-sen, wait for confirmation)"
+                    reason = "Falling (Yin-sen)"
                 else:
-                    # 【合格】レンジ相場でRSI35以下まで売られ、陽線で反発を開始した銘柄
-                    # スコアは売られすぎているほど高くする
-                    score = (35 - rsi) * 20 + abs(momentum_50) * 1000
-                    reason = "RSI Mean Reversion (Bounce)"
+                    score = (30 - rsi) * 30 + (latest['Volume'] / latest['Avg_Vol_15m'] * 50)
+                    reason = "RSI Oversold Bounce"
             else:
                 reason = f"Unsupported Regime: {regime}"
 
