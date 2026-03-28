@@ -462,7 +462,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 tax = max(0, gross_profit * TAX_RATE) if gross_profit > 0 else 0
                 net_profit = gross_profit - tax
                 
-                account['cash'] += (price_final * qty_final) - tax
+                # [Optimization] When delay_sim_execution=True (Backtest), backtest.py handles cash addition
+                if not delay_sim_execution:
+                    account['cash'] += (price_final * qty_final) - tax
                 
                 log_entry = {
                     "time": current_time,
@@ -488,8 +490,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
                 # 分割利確の場合は残りをポートフォリオに戻す
                 if qty_final < current_shares:
-                    p['shares'] = current_shares - qty_final
-                    p['partial_sold'] = True
+                    # [Optimization] When delay_sim_execution=True (Backtest), backtest.py handles share reduction
+                    if not delay_sim_execution:
+                        p['shares'] = current_shares - qty_final
+                        p['partial_sold'] = True
                     remaining_portfolio.append(p)
 
         except Exception as e:
