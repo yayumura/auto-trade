@@ -91,8 +91,8 @@ RANGE_ATR_STOP_LOSS = 6.0 # レンジ相場は少し広めに
 ATR_TRAIL = 8.0           # トレンドに長く乗るため、最高値からATR8倍の下落で利確
 
 # --- Strategy Optimization (Phase 4.2) ---
-MIN_VOLUME_SURGE = 1.1    # 緩やかな出来高増 (1.3 -> 1.1)
-ATR_TARGET_MULT = 3.0     # 利益を大きく狙う (2.0 -> 3.0)
-ATR_STOP_MULT = 2.0       # 損切りにさらに余裕を持たせる (1.8 -> 2.0)
-BREAKEVEN_TRIGGER = 0.012 # (+1.5% -> +1.2%)
-TRAIL_STOP_MULT = 2.0     # 利確トレイルをタイトにして利益確保 (3.0 -> 2.0)
+MIN_VOLUME_SURGE = 1.5    # 機関投資家の流入を狙う (1.1 -> 1.5)
+ATR_TARGET_MULT = 3.0     # 利益を大きく狙う
+ATR_STOP_MULT = 2.0       # 損切りにさらに余裕を持たせる
+BREAKEVEN_TRIGGER = 0.02  # ノイズでの自律反発を待つ (+1.2% -> +2.0%)
+TRAIL_STOP_MULT = 3.0     # トレンド追従を確実にする (2.0 -> 3.0)

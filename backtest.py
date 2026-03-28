@@ -12,7 +12,7 @@ from core.sim_broker import SimulationBroker
 from core.config import (
     INITIAL_CASH, DATA_FILE, JST, 
     MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
-    MAX_POSITIONS, ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS
+    MAX_POSITIONS, ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, TAX_RATE
 )
 
 def get_historical_data(target_codes, period="60d", interval="15m"):
@@ -46,11 +46,74 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
     account = {"cash": initial_cash_val}
     portfolio = [] 
     trade_history = []
+    pending_exits = [] # 【Round 2】次足決済用
     broker = SimulationBroker()
 
     # タイムマシン・ループ
     for i in range(len(timeline)):
         current_time = timeline[i]
+        # --- [Phase 0] 決済の執行 (Next Bar Open Exit) ---
+        if pending_exits:
+            new_pending = []
+            for pe in pending_exits:
+                code = pe['code']
+                ticker_sym = f"{code}.T"
+                if ticker_sym in full_data.columns.levels[0]:
+                    bar_data = full_data[ticker_sym].loc[current_time]
+                    if not bar_data.empty and not pd.isna(bar_data['Open']):
+                        op = float(bar_data['Open'])
+                        hi = float(bar_data['High'])
+                        lo = float(bar_data['Low'])
+                        
+                        # スリッページ計算 (売却)
+                        tick_size = get_tick_size(op)
+                        slippage = max(tick_size, pe['atr'] * 0.01)
+                        exec_price = max(lo, op - slippage)
+                        
+                        # 損益計算の再実行
+                        actual_qty = pe['shares']
+                        buy_price = pe['buy_price']
+                        gross_profit = (exec_price - buy_price) * actual_qty
+                        tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
+                        
+                        COMMISSION_RATE = 0.000
+                        sell_commission = int((exec_price * actual_qty) * COMMISSION_RATE)
+                        buy_commission = int((buy_price * actual_qty) * COMMISSION_RATE)
+                        sale_proceeds = (exec_price * actual_qty) - tax_amount - sell_commission
+                        net_profit = gross_profit - tax_amount - sell_commission - buy_commission
+                        
+                        account['cash'] += sale_proceeds
+                        
+                        # ポートフォリオから削除（または枚数減らし）
+                        p_idx = next((idx for idx, p in enumerate(portfolio) if str(p['code']) == str(code)), None)
+                        if p_idx is not None:
+                            p = portfolio[p_idx]
+                            if actual_qty < p['shares']:
+                                p['shares'] -= actual_qty
+                                if "分割利確" in pe['reason']: p['partial_sold'] = True
+                            else:
+                                portfolio.pop(p_idx)
+                        
+                        # 確定ログの作成
+                        trade_record = pe.copy()
+                        trade_record.update({
+                            "sell_time": current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                            "sell_price": exec_price,
+                            "gross_profit": gross_profit,
+                            "tax_amount": tax_amount,
+                            "net_profit": net_profit,
+                            "profit_pct": (exec_price - buy_price) / buy_price if buy_price > 0 else 0
+                        })
+                        trade_history.append(trade_record)
+                        if verbose:
+                            print(f"    [{current_time.strftime('%m/%d %H:%M')}] Sell Executed (Next Bar Open): {code} @ {exec_price:.1f} ({pe['reason']})")
+                    else:
+                        # データがない場合は次の足に持ち越し
+                        new_pending.append(pe)
+                else:
+                    new_pending.append(pe)
+            pending_exits = new_pending
+
         # --- A. データのスライス ---
         # 15分足バッファを作成
         mock_buffers = {}
@@ -69,13 +132,22 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         # --- B. レジーム判定 ---
         regime = detect_market_regime(broker=None, buffer=mock_buffers.get('1321'), current_time_override=current_time, verbose=verbose)
 
-        # --- C. 保有ポジションの管理 ---
-        portfolio, account, actions, logs = manage_positions(
-            portfolio, account, broker=broker, regime=regime, 
+        # --- C. 保有ポジションの管理 (シグナル発生のみ) ---
+        # 既に売却予約されている銘柄は manage_positions の対象から外す
+        temp_portfolio = [p for p in portfolio if not any(str(pe['code']) == str(p['code']) for pe in pending_exits)]
+        
+        _, account, actions, logs = manage_positions(
+            temp_portfolio, account, broker=broker, regime=regime, 
             is_simulation=True, realtime_buffers=mock_buffers,
-            current_time_override=current_time, verbose=verbose
+            current_time_override=current_time, verbose=verbose,
+            delay_sim_execution=True # 【Round 2】
         )
-        trade_history.extend(logs)
+        
+        # 発生したログを売却予約として蓄積
+        for log in logs:
+            # manage_positions 内で計算された exec_price 等は一旦無視され、
+            # 次のイテレーションで Open 価格に基づいて再計算される
+            pending_exits.append(log)
 
         # --- D. 新規買付判定 ---
         market_time = current_time.time()

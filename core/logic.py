@@ -235,7 +235,7 @@ def save_invalid_tickers(invalid_set):
         print(f"[Error] キャッシュ保存エラー: {e}")
 
 # --- 【中核2】保有ポジションの高度な管理 ---
-def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True):
+def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True, delay_sim_execution=False):
     """
     保有株式の利確・損切・タイムストップを判定し、売却処理を行う。
     realtime_buffers: { code: RealtimeBuffer } の辞書。存在すれば yfinance 通信を回避する。
@@ -472,8 +472,10 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
                 # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
                 if is_simulation:
-                    actual_qty = sell_qty # 【修正】決定した売却株数を適用
-                    exec_price = current_price
+                    # 【Round 2】シミュレーション時はシグナルとして記録し、執行は次足に委ねる
+                    # ただし、現在の互換性維持のため、一部情報をここで確定させる
+                    actual_qty = sell_qty
+                    exec_price = current_price # 判定時の参考価格
                 else:
                     if broker:
                         if verbose:
@@ -522,25 +524,28 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     sale_proceeds = (exec_price * actual_qty) - tax_amount - sell_commission
                     net_profit = gross_profit - tax_amount - sell_commission - buy_commission
 
+                    if delay_sim_execution:
+                        # 【Round 2】バックテスト用：ここでは口座更新を行わず、シグナルのみ返す
+                        pass
+                    else:
+                        account['cash'] += sale_proceeds
                 else:
                     # 実運用時はAPIが正のためそのまま計算ベースとして扱う
                     sale_proceeds = (exec_price * actual_qty) - tax_amount
                     net_profit = gross_profit - tax_amount 
-
-                
-                if is_simulation:
-                    account['cash'] += sale_proceeds
-                else:
                     account['cash'] += sale_proceeds
 
                 # [Robust Update] Once cash is updated, we MUST ensure the portfolio is updated correctly
-                if actual_qty < current_shares:
-                    remaining_p = p.copy()
-                    remaining_p['shares'] = current_shares - actual_qty
-                    if "分割利確" in sell_reason:
-                        remaining_p['partial_sold'] = True
-                    remaining_portfolio.append(remaining_p)
-                
+                if not (is_simulation and delay_sim_execution):
+                    if actual_qty < current_shares:
+                        remaining_p = p.copy()
+                        remaining_p['shares'] = current_shares - actual_qty
+                        if "分割利確" in sell_reason:
+                            remaining_p['partial_sold'] = True
+                        remaining_portfolio.append(remaining_p)
+                else:
+                    # バックテストで遅延実行する場合は、一旦そのまま残す（後でバックテスト側で処理）
+                    remaining_portfolio.append(p)
                 # Notification and Logging (should not block the state update)
                 try:
                     log_msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})"
@@ -559,7 +564,8 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                         "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
                         "buy_price": buy_price, "sell_price": exec_price, "highest_price_reached": highest_price,
                         "shares": actual_qty, "gross_profit": gross_profit, "tax_amount": tax_amount, 
-                        "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason
+                        "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason,
+                        "atr": atr # 【Round 2】次足執行時に使用
                     }
                     trade_logs.append(trade_record)
                 except Exception as log_err:
