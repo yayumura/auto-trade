@@ -550,14 +550,23 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             latest = df.iloc[-1]
 
             # 【新規】市場トレンドフィルター (Nikkei 1321.T)
-            # 15分足ベースで日経平均が下げている時は、買いを控える（レンジ相場は除く）
+            # 相場全体が下落トレンドの時は「落ちてくるナイフ」を掴まないよう全エントリーを禁止する
             market_ok = True
-            if regime == "BULL" and realtime_buffers and '1321' in realtime_buffers:
+            if realtime_buffers and '1321' in realtime_buffers:
                 nk_df = realtime_buffers['1321'].df
                 if len(nk_df) > 20:
-                    nk_sma20 = nk_df['Close'].rolling(window=20).mean().iloc[-1]
-                    if nk_df['Close'].iloc[-1] < nk_sma20:
+                    # 最新のSMA20と、1つ前（15分前）のSMA20を取得して傾きを計算
+                    nk_sma20_current = nk_df['Close'].rolling(window=20).mean().iloc[-1]
+                    nk_sma20_prev = nk_df['Close'].rolling(window=20).mean().iloc[-2]
+                    
+                    # 1. 現在値がSMA20を下回っている
+                    # 2. または、SMA20の傾き自体が下向き（下落トレンド）
+                    if nk_df['Close'].iloc[-1] < nk_sma20_current or nk_sma20_current < nk_sma20_prev:
                         market_ok = False
+            
+            # market_okがFalseの場合は、この銘柄を即座にスキップ（足切り）
+            if not market_ok:
+                continue
 
             # 【新規】出来高フィルタ
             vol_surge = False
@@ -600,7 +609,6 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                     score = (momentum_50 * 5000) + ((0.03 - abs(dist_sma20)) * 1000)
                     # ボーナス
                     if vol_surge: score += 100
-                    if market_ok: score += 50
                     if is_yang_sen and is_sma5_up: score += 50
                     
                     reason = "Strategy 4.3 Bull Entry"
