@@ -90,9 +90,10 @@ ATR_STOP_LOSS = 5.0       # 15分足ATRの5倍（日足の約1ATR相当）のゆ
 RANGE_ATR_STOP_LOSS = 6.0 # レンジ相場は少し広めに
 ATR_TRAIL = 8.0           # トレンドに長く乗るため、最高値からATR8倍の下落で利確
 
-# --- Strategy Optimization (Phase 4.2) ---
-MIN_VOLUME_SURGE = 1.5    # 機関投資家の流入を狙う (1.1 -> 1.5)
-ATR_TARGET_MULT = 3.0     # 利益を大きく狙う
-ATR_STOP_MULT = 2.0       # 損切りにさらに余裕を持たせる
-BREAKEVEN_TRIGGER = 0.02  # ノイズでの自律反発を待つ (+1.2% -> +2.0%)
-TRAIL_STOP_MULT = 3.0     # トレンド追従を確実にする (2.0 -> 3.0)
+# --- Scenario B (Professional Baseline Strategy 4.3) ---
+MIN_VOLUME_SURGE = 2.5    # 出来高急増フィルタの微調整 (3.5 -> 2.5)
+ATR_TARGET_MULT = 10.0    # 利確目標 (10.0xATR)
+ATR_STOP_MULT = 2.5       # 初期損切幅 (2.5xATR)
+BREAKEVEN_TRIGGER = 0.040 # 建値移動
+TRAIL_STOP_MULT = 6.0     # トレール
+MIN_MOMENTUM_THRESHOLD = 0.10 # モメンタム10%以上に調整 (12.0% -> 10.0%)

@@ -8,7 +8,8 @@ import os
 import time
 from core.config import (
     ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, EXCLUSION_CACHE_FILE, JST,
-    MIN_VOLUME_SURGE, ATR_TARGET_MULT, ATR_STOP_MULT, BREAKEVEN_TRIGGER, TRAIL_STOP_MULT
+    MIN_VOLUME_SURGE, ATR_TARGET_MULT, ATR_STOP_MULT, BREAKEVEN_TRIGGER, TRAIL_STOP_MULT,
+    MIN_MOMENTUM_THRESHOLD
 )
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, safe_read_json
@@ -370,55 +371,30 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
 
             # 【新規】分割利確（スケールアウト）のステータス確認
             is_partial_sold = p.get('partial_sold', False)
-            
-            # トレール幅を動的に変更
-            current_trail_mult = ATR_TRAIL * 1.5 if is_partial_sold else ATR_TRAIL
 
             sell_reason = None
-            # レジームに応じた損切り倍率の選択
-            current_stop_loss_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-            
-            # --- 【ピボット修正】VWAP Pullback戦略用の売却ロジック ---
             sell_qty = current_shares
 
-            # 【修正1】絶対ストップを -4.0% に広げ、日中のノイズ（ダマシ）で死なないようにする
-            hard_stop_price = buy_price * 0.96  
-            
-            current_dt = current_time_override if current_time_override else datetime.now(JST)
-            if hasattr(current_dt, 'to_pydatetime'):
-                current_dt = current_dt.to_pydatetime()
-            buy_dt = p['buy_time']
-            if isinstance(buy_dt, str):
-                try:
-                    buy_dt = datetime.strptime(buy_dt, '%Y-%m-%d %H:%M:%S').replace(tzinfo=JST)
-                except ValueError:
-                    buy_dt = now_dt 
-            if hasattr(buy_dt, 'to_pydatetime'):
-                buy_dt = buy_dt.to_pydatetime()
-            hold_days = (current_dt - buy_dt).total_seconds() / 86400
-
-            # --- 決済ロジック: 優先度順に展開 ---
-            
-            # [Optimization] ボラティリティに基づいた初期損切り (ATR 1.6倍)
+            # [Optimization] 初期損切り (ATR 2.0倍)
             initial_stop_price = buy_price - (atr * ATR_STOP_MULT)
-            # [Optimization] 絶対ハードストップ (-4.0%) とのタイトな方を選択
+            # [Optimization] 絶対ハードストップ (-4.0%) とのタイトな方を選択 (損小の徹底)
             hard_stop_price = max(buy_price * 0.96, initial_stop_price)
 
             # [Optimization] 建値決済（ブレイクイーブン）の設定
-            # 1%以上の含み益が出た後は、損切りラインを建値（+手数料分）に引き上げる
+            # 2%以上の含み益が出た後は、損切りラインを建値（+手数料分）に引き上げる (1.5% -> 2.0%)
             if profit_pct >= BREAKEVEN_TRIGGER:
-                hard_stop_price = max(hard_stop_price, buy_price * 1.001)
+                hard_stop_price = max(hard_stop_price, buy_price * 1.002) # 少し余裕を持たせて同値撤退以上を確保
 
             # [Optimization] 多段階利確・トレールロジック
-            # 高値が目標値 (ATR 1.5倍) を超えたらトレールモードをよりタイトにする
+            # 高値が目標値 (ATR 6.0倍) を超えたらトレールモードを非常にタイトにする (利大の追求)
             target_price = buy_price + (atr * ATR_TARGET_MULT)
             is_target_reached = highest_price_db >= target_price
             
             if is_target_reached:
-                # 目標達成後は最高値から ATR 2.0倍で利益確保
+                # 目標達成後は最高値から ATR 2.0倍で利益をガッチリ確保
                 chandelier_stop = highest_price_db - (atr * 2.0)
             else:
-                # 目標未達時は最高値から ATR 2.5倍（ゆったり）
+                # 目標未達時は最高値から ATR 4.0倍（ゆったり）で、一時的な押し目での振るい落としを回避
                 chandelier_stop = highest_price_db - (atr * TRAIL_STOP_MULT)
 
             # 【重要】損切り判定（窓開け考慮）
@@ -436,216 +412,133 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                     sell_reason = f"トレール利確 (Trail Stop from {highest_price_db:,.1f})"
                 else:
                     sell_reason = f"下降トレンド転換損切 (Trail Stop below Buy)"
-            elif hold_days > 5.0: 
-                # 【Strategy 4.2】時間切れのさらなる柔軟化 (4 -> 5 days)
-                # 5日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
-                is_momentum_lost = current_price < df['SMA5'].iloc[-1]
-                if is_momentum_lost and profit_pct < 0.005:
-                    sell_reason = f"効率化撤退 (5 days & no momentum)"
-            elif not is_partial_sold and current_price >= target_price:
-                # ATRターゲット達成で半分利確
-                sell_reason = f"第一目標達成・半分利確 (+{ATR_TARGET_MULT}xATR)"
-                half_qty = (current_shares // 2 // 100) * 100
-                if half_qty >= 100:
-                    sell_qty = half_qty
-                else:
-                    # 最小単位なら全決済
-                    sell_qty = current_shares
+
+            # 時間切れおよび分割利確の判定
+            current_dt = current_time_override if current_time_override else datetime.now(JST)
+            if hasattr(current_dt, 'to_pydatetime'):
+                current_dt = current_dt.to_pydatetime()
+            buy_dt = p['buy_time']
+            if isinstance(buy_dt, str):
+                try:
+                    buy_dt = datetime.strptime(buy_dt, '%Y-%m-%d %H:%M:%S').replace(tzinfo=JST)
+                except ValueError:
+                    buy_dt = now_dt 
+            if hasattr(buy_dt, 'to_pydatetime'):
+                buy_dt = buy_dt.to_pydatetime()
+            hold_days = (current_dt - buy_dt).total_seconds() / 86400
+
+            if not sell_reason:
+                if hold_days > 5.0: 
+                    # 【Strategy 4.2】時間切れのさらなる柔軟化 (4 -> 5 days)
+                    # 5日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
+                    is_momentum_lost = current_price < df['SMA5'].iloc[-1]
+                    if is_momentum_lost and profit_pct < 0.005:
+                        sell_reason = f"効率化撤退 (5 days & no momentum)"
+                elif not is_partial_sold and current_price >= target_price:
+                    # ATRターゲット達成で半分利確
+                    sell_reason = f"第一目標達成・半分利確 (+{ATR_TARGET_MULT}xATR)"
+                    half_qty = (current_shares // 2 // 100) * 100
+                    if half_qty >= 100:
+                        sell_qty = half_qty
+                    else:
+                        sell_qty = current_shares
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
                 p['highest_price'] = round(new_highest, 1)
                 highest_price = p['highest_price'] * split_ratio 
-            else:
-                highest_price = highest_price_db
-
-            # [AI改善策2] +0.00%固定化バグの修正: ポートフォリオの現在値をライブデータで常時更新する
-            p['current_price'] = round(current_price_raw / split_ratio if split_ratio > 0 else current_price_raw, 1)
-
-            split_mark = "(分割補正済)" if split_ratio < 0.99 else ""
-            if verbose:
-                print(f"[{code} {p['name']}] 買:{buy_price:,.1f} 現在:{current_price:,.1f} (高:{highest_price:,.1f} | 損益:{profit_pct*100:+.2f}%) {split_mark}")
-
-            if sell_reason:
-                if is_volume_zero and verbose:
-                    print(f"[WARNING] [{code}] 出来高0(特別気配等)ですが、{sell_reason} のため決済注文を強行します。")
-
-                # リアルAPI運用ならここで売却命令を出し、非同期に結果を得ることになる。
-                if is_simulation:
-                    # 【Round 2】シミュレーション時はシグナルとして記録し、執行は次足に委ねる
-                    # ただし、現在の互換性維持のため、一部情報をここで確定させる
-                    actual_qty = sell_qty
-                    exec_price = current_price # 判定時の参考価格
-                else:
-                    if broker:
-                        if verbose:
-                            print(f"[OMS売却発動] 追従型指値注文（Chase Order）で売却を開始します")
-                        # 売却時は side="1" (売)
-                        details = broker.execute_chase_order(code, sell_qty, side="1", atr=atr)
-                        
-                        # [Professional Audit Round 2] 部分約定 (State=7) を受容し、データ不整合を防ぐ
-                        state = details.get('State') if details else None
-                        actual_qty = int(details.get('Qty', 0)) if details else 0
-                        
-                        if not details or state not in [6, 7] or actual_qty == 0:
-                            if verbose:
-                                print(f"[WARNING] {code} の売却が完了しませんでした（約定0株）。次サイクルで再試行します。")
-                            remaining_portfolio.append(p)
-                            continue
-                            
-                        # APIからの約定データをパースする
-                        exec_price = float(details.get('Price', 0))
-                        if exec_price == 0:
-                            exec_price = current_price
-                            exec_details = details.get('Details', [])
-                            if exec_details:
-                                total_val = sum(float(d.get('Price', 0)) * float(d.get('Qty', 0)) for d in exec_details)
-                                total_qty = sum(float(d.get('Qty', 0)) for d in exec_details)
-                                if total_qty > 0:
-                                    exec_price = total_val / total_qty
-                        
-                        actual_qty = int(details.get('Qty', sell_qty))
-                        
-                    else:
-                        if verbose:
-                            print(f"[WARNING] エラー: {code} の本番決済が必要ですが、Brokerが提供されていません。")
-                        remaining_portfolio.append(p)
-                        continue
-
-                # 実際の約定値に基づいて損益計算
-                gross_profit = (exec_price - buy_price) * actual_qty
-                tax_amount = int(gross_profit * TAX_RATE) if gross_profit > 0 else 0
-                
-                # [OK] SIMモードの場合は売却手数料(最近のゼロ手数料コースを考慮し0.000とする)
-                if is_simulation:
-                    COMMISSION_RATE = 0.000  # [AI改善策1] 手数料ゼロコースに合わせてコストを排除
-                    sell_commission = int((exec_price * actual_qty) * COMMISSION_RATE)
-                    buy_commission = int((buy_price * actual_qty) * COMMISSION_RATE)
-                    sale_proceeds = (exec_price * actual_qty) - tax_amount - sell_commission
-                    net_profit = gross_profit - tax_amount - sell_commission - buy_commission
-
-                    if delay_sim_execution:
-                        # 【Round 2】バックテスト用：ここでは口座更新を行わず、シグナルのみ返す
-                        pass
-                    else:
-                        account['cash'] += sale_proceeds
-                else:
-                    # 実運用時はAPIが正のためそのまま計算ベースとして扱う
-                    sale_proceeds = (exec_price * actual_qty) - tax_amount
-                    net_profit = gross_profit - tax_amount 
-                    account['cash'] += sale_proceeds
-
-                # [Robust Update] Once cash is updated, we MUST ensure the portfolio is updated correctly
-                if not (is_simulation and delay_sim_execution):
-                    if actual_qty < current_shares:
-                        remaining_p = p.copy()
-                        remaining_p['shares'] = current_shares - actual_qty
-                        if "分割利確" in sell_reason:
-                            remaining_p['partial_sold'] = True
-                        remaining_portfolio.append(remaining_p)
-                else:
-                    # バックテストで遅延実行する場合は、一旦そのまま残す（後でバックテスト側で処理）
-                    remaining_portfolio.append(p)
-                # Notification and Logging (should not block the state update)
-                try:
-                    log_msg = f"[TRADE]【決済】{code} {p['name']} ({sell_reason})"
-                    details_msg = f"   約定単価: {exec_price:,.1f}円 × {actual_qty}株 | 税引前損益: {int(gross_profit):+d}円 | 税引後: {int(net_profit):+d}円"
-                    if verbose:
-                        print(log_msg)
-                        print(details_msg)
-                    if not current_time_override:
-                        send_discord_notify(log_msg + "\n" + details_msg)
-                    
-                    act_str = f"決済: {code} {p['name']} {actual_qty}株 ({sell_reason}) {net_profit:+.0f}円"
-                    actions.append(act_str)
-                    
-                    actual_profit_pct = (exec_price - buy_price) / buy_price if buy_price > 0 else 0
-                    trade_record = {
-                        "sell_time": current_time, "code": code, "name": p['name'], "buy_time": p['buy_time'],
-                        "buy_price": buy_price, "sell_price": exec_price, "highest_price_reached": highest_price,
-                        "shares": actual_qty, "gross_profit": gross_profit, "tax_amount": tax_amount, 
-                        "net_profit": net_profit, "profit_pct": actual_profit_pct, "reason": sell_reason,
-                        "atr": atr # 【Round 2】次足執行時に使用
-                    }
-                    trade_logs.append(trade_record)
-                except Exception as log_err:
-                    if verbose:
-                        print(f"[ERROR] ログ記録/通知中にエラー（取引自体は実行済）: {log_err}")
-            else:
                 remaining_portfolio.append(p)
+            else:
+                # 実行フェーズ
+                price_final = current_price
+                qty_final = sell_qty
                 
-        except Exception as e: 
+                if not is_simulation:
+                    # 本番環境：API経由で売り注文
+                    broker.send_order(code, "SELL", qty_final, price_final)
+                
+                # 計算：手数料と税金 (簡易シミュレーション)
+                gross_profit = (price_final - buy_price) * qty_final
+                tax = max(0, gross_profit * TAX_RATE) if gross_profit > 0 else 0
+                net_profit = gross_profit - tax
+                
+                account['cash'] += (price_final * qty_final) - tax
+                
+                log_entry = {
+                    "time": current_time,
+                    "code": code,
+                    "name": p.get('name', '不明'),
+                    "action": "SELL",
+                    "shares": qty_final,
+                    "price": price_final,
+                    "profit": net_profit,
+                    "profit_pct": f"{profit_pct:.2%}",
+                    "reason": sell_reason,
+                    "atr": atr, # Added for backtest slippage calculation
+                    "buy_price": buy_price # Added for backtest consistency
+                }
+                trade_logs.append(log_entry)
+                
+                if verbose:
+                    print(f"  [SELL] {code} {p.get('name')} x{qty_final} @ {price_final:,.1f} ({profit_pct:+.2%}) [{sell_reason}]")
+                
+                # Discord通知 (実トレード時のみ、または設定時)
+                if not is_simulation:
+                    send_discord_notify(f"【売却】{code} {p.get('name')}\n価格: {price_final:,.1f}\n損益: {net_profit:,.0f} ({profit_pct:+.2%})\n理由: {sell_reason}")
+
+                # 分割利確の場合は残りをポートフォリオに戻す
+                if qty_final < current_shares:
+                    p['shares'] = current_shares - qty_final
+                    p['partial_sold'] = True
+                    remaining_portfolio.append(p)
+
+        except Exception as e:
             if verbose:
-                print(f"[WARNING] {code} 監視エラー: {e}")
+                print(f"[RE-P-ERR] {code} の判定中にエラー: {e}")
             remaining_portfolio.append(p)
 
     return remaining_portfolio, account, actions, trade_logs
 
-# --- 【中核3】マルチファクター・スキャン ---
-def calculate_technicals_for_scan(df):
-    if len(df) < 50:
-        return None
-    
-    price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-    if price_col not in df.columns or df[price_col].isnull().all():
-        return None
-    df['SMA20'] = df[price_col].rolling(window=20).mean().replace(0, np.nan)
-    df['SMA50'] = df[price_col].rolling(window=50).mean() # 【新規】MTFA用の50期間線を追加
-    df['STD20'] = df[price_col].rolling(window=20).std()
-    df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
-    df['BB_Lower'] = df['SMA20'] - (df['STD20'] * 2)
-    df['Deviation'] = (df[price_col] - df['SMA20']) / df['SMA20']
-    
-    delta = df[price_col].diff()
-    up = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    down = -1 * delta.clip(upper=0).ewm(span=14, adjust=False).mean()
-    # M-4: np.where→pd.Series.whereに変更し、pandas Seriesの型一貫性を保つ
-    rsi_denominator = up + down
-    df['RSI'] = (100 * up / rsi_denominator).where(rsi_denominator != 0, other=50.0)
-    
-    tr1 = df['High'] - df['Low']
-    tr2 = abs(df['High'] - df['Close'].shift())
-    tr3 = abs(df['Low'] - df['Close'].shift())
-    df['ATR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(window=14).mean()
-    
-    df['MACD'] = df[price_col].ewm(span=12, adjust=False).mean() - df[price_col].ewm(span=26, adjust=False).mean()
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # --- [Phase 12] ボリューム解析の追加 ---
-    df['Avg_Vol_15m'] = df['Volume'].rolling(window=20).mean()
-    
-    # VWAP (Volume Weighted Average Price) の簡易計算
-    df['VWAP'] = (df[price_col] * df['Volume']).cumsum() / df['Volume'].cumsum()
-    
-    # 【新規】移動平均線の拡張
-    df['SMA5'] = df[price_col].rolling(window=5).mean()
-    
-    # 乖離率
-    df['ROC_4h'] = df[price_col].pct_change(periods=16) # 15分足×16 = 約4時間 (1日相当の勢い)
-    
-    return df
-
-def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers=None, current_time_override=None, verbose=True):
-    """ 地合い(レジーム)に応じた数学的スコアリングを行い、トップ候補を抽出 """
+# --- 【中核3】銘柄スキャン＆期待値評価 ---
+def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True):
+    """
+    複数銘柄からテクニカル分析を行い、スコアの高い上位3銘柄を返す。
+    """
     candidates = []
     
-    for code in targets:
+    # リアルタイムバッファ未搭載の銘柄のために一括取得（銘柄数が多い場合は分割実行を推奨）
+    data_map = {}
+    tickers_to_download = []
+    for c in codes:
+        code = str(c)
+        if realtime_buffers and code in realtime_buffers:
+            data_map[code] = realtime_buffers[code].get_df()
+        else:
+            tickers_to_download.append(f"{code}.T")
+
+    if tickers_to_download:
         try:
-            # バックテスト時は realtime_buffers からデータを取得
-            if realtime_buffers and code in realtime_buffers:
-                buf_entry = realtime_buffers[code]
-                df = buf_entry.df if hasattr(buf_entry, 'df') else buf_entry
-            else:
-                # リアルタイム時は yfinance から取得
-                df = yf.download(f"{code}.T", period="5d", interval="15m", progress=False, threads=False)
-                # [FIX] yfinance の MultiIndex 対策：Ticker レベルを削除してフラットにする
-                if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.droplevel('Ticker')
-            
+            # バックテスト時は yf 通信を避けるため、realtime_buffers を必須にするか、
+            # 通信が発生することを警告する
+            downloaded = yf.download(tickers_to_download, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
+            for t in tickers_to_download:
+                code = t.replace(".T", "")
+                if isinstance(downloaded.columns, pd.MultiIndex):
+                    if t in downloaded.columns.levels[0]:
+                        data_map[code] = downloaded[t].dropna()
+                else:
+                    data_map[code] = downloaded.dropna()
+        except Exception as e:
+            if verbose:
+                print(f"[WARNING] スキャン用データの一括取得に失敗: {e}")
+
+    for code in codes:
+        code = str(code)
+        try:
+            df = data_map.get(code)
             if df is None or df.empty:
                 continue
-
-            # テクニカル指標の計算
+            
             df = calculate_technicals_for_scan(df)
             if df is None:
                 continue
@@ -686,14 +579,16 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                 is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
 
                 # 必須条件（これらを満たさない場合は足切り）
-                if momentum_50 < -0.02: # 緩やかな下落なら許容
+                if momentum_50 < 0.12: # トレンド強度をさらに厳格に (0.10 -> 0.12)
                     reason = f"Weak Momentum ({momentum_50:.2%})"
-                elif latest['Close'] < sma50 * 0.98: # 多少の下抜けは許容
-                    reason = "Below Anchor SMA50"
-                elif rsi > 70: # 70までは許容
+                elif latest['Close'] < sma20: # SMA20を下回っている場合は「押し目」ではなく「反転」のリスク
+                    reason = "Below SMA20"
+                elif rsi > 60: # 高値掴みを防止
                     reason = f"RSI Too High ({rsi:.0f})"
-                elif not is_yang_sen and not is_sma5_up: # どちらかは必須
-                    reason = "No Bounce Confirmation"
+                elif not is_yang_sen: # 陽線は必須
+                    reason = "No Yang-sen Bounce"
+                elif latest['Volume'] < latest['Avg_Vol_15m'] * 3.5: # 出来高急増を厳格化 (3.0 -> 3.5)
+                    reason = f"Insufficient Vol Surge ({latest['Volume']/latest['Avg_Vol_15m']:.1f}x)"
                 else:
                     # 【合格】スコア計算
                     dist_sma20 = (latest['Close'] - sma20) / sma20
@@ -704,7 +599,7 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
                     if market_ok: score += 50
                     if is_yang_sen and is_sma5_up: score += 50
                     
-                    reason = "Strategy 4.2 Bull Entry"
+                    reason = "Strategy 4.3 Bull Entry"
 
             elif regime == "RANGE":
                 # 【RSI平均回帰戦略 (Strategy 4.0)】
@@ -747,3 +642,35 @@ def select_best_candidates(broker, targets, df_symbols, regime, realtime_buffers
             continue
             
     return sorted(candidates, key=lambda x: x['score'], reverse=True)[:3]
+
+def calculate_technicals_for_scan(df):
+    """ スキャンおよび保有ポジ監視用のテクニカル指標一括計算 """
+    if df is None or len(df) < 20: return None
+    df = df.copy()
+    
+    # 出来高の移動平均（20本分 = 約5時間分）
+    df['Avg_Vol_15m'] = df['Volume'].rolling(window=20).mean()
+    
+    # RSI (14)
+    delta = df['Close'].diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ema_up = up.ewm(com=13, adjust=False).mean()
+    ema_down = down.ewm(com=13, adjust=False).mean()
+    rs = ema_up / ema_down
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # SMA (20, 50)
+    df['SMA5'] = df['Close'].rolling(window=5).mean()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    df['SMA50'] = df['Close'].rolling(window=50).mean()
+    
+    # ATR (14)
+    tr1 = df['High'] - df['Low']
+    tr2 = abs(df['High'] - df['Close'].shift())
+    tr3 = abs(df['Low'] - df['Close'].shift())
+    df['ATR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(14).mean()
+    df['ATR'] = df['ATR'].ffill().fillna(df['Close'] * 0.02) # 安全策
+    df['ATR'] = df['ATR'].clip(lower=1.0) # 0回避
+    
+    return df

@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime
 import os
 import sys
+import argparse
+import pytz
 
 # プロジェクトルートをパスに追加
 sys.path.append(os.getcwd())
@@ -14,6 +16,27 @@ from core.config import (
     MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
     MAX_POSITIONS, ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, TAX_RATE
 )
+
+# --- Stock Universes ---
+PHASE1_STOCKS = [
+    "7203", "7267", "7201", "8306", "8316", "8411", "8766", "8591", "8035", "6857", 
+    "6920", "6723", "6758", "9984", "9432", "7974", "8058", "8031", "8001", "7011", 
+    "6301", "6501", "5401", "9501", "9983", "3382", "4661", "6098", "4502", "4519", 
+    "4063", "8801", "9101", "5020"
+]
+
+PHASE2_STOCKS = [
+    "7203", "7267", "7269", "7201", "7270", "7211", "7202", "7282", "7259",
+    "8306", "8316", "8411", "8308", "8309", "8604", "8601", "8766", "8750", "8795", "8591",
+    "8035", "6857", "6920", "6526", "6723", "6981", "6954", "6594", "6861", "6971", "6762", "7741", "7733", "7751",
+    "9984", "9432", "9433", "9434", "6758", "7974", "3659", "4751", "4307",
+    "8058", "8031", "8001", "8002", "8053", "2768", "8015",
+    "7011", "7012", "6301", "6326", "6501", "6502", "6503", "5401", "5411", "9501", "9502", "9503",
+    "9983", "3382", "4661", "4689", "6098", "2413", "4543", "4452", "8113", "4911", "2502", "2503",
+    "4502", "4503", "4519", "4568", "4523", "4507",
+    "8801", "8802", "8830", "9020", "9021", "9022", "1925", "1928", "1801", "1802", "1803",
+    "4063", "3402", "4183", "4005", "4901", "5020", "5108", "9101", "9104", "9107"
+]
 
 def get_historical_data(target_codes, period="60d", interval="15m"):
     """過去データのダウンロードと前処理"""
@@ -84,27 +107,38 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                         
                         account['cash'] += sale_proceeds
                         
-                        # ポートフォリオから削除（または枚数減らし）
+                        # ポートフォリオからポジションを特定
                         p_idx = next((idx for idx, p in enumerate(portfolio) if str(p['code']) == str(code)), None)
                         if p_idx is not None:
                             p = portfolio[p_idx]
+                            # 集計用データの蓄積
+                            p['total_sell_proceeds'] = p.get('total_sell_proceeds', 0) + sale_proceeds
+                            p['total_tax'] = p.get('total_tax', 0) + tax_amount
+                            p['total_sell_qty'] = p.get('total_sell_qty', 0) + actual_qty
+                            
                             if actual_qty < p['shares']:
                                 p['shares'] -= actual_qty
                                 if "分割利確" in pe['reason']: p['partial_sold'] = True
                             else:
+                                # 全決済完了時に trade_history へ記録
+                                final_qty = p['total_sell_qty']
+                                avg_sell_price = p['total_sell_proceeds'] / final_qty if final_qty > 0 else exec_price
+                                total_buy_cost = p['buy_price'] * final_qty
+                                gross_pnl = p['total_sell_proceeds'] - total_buy_cost
+                                
+                                trade_record = {
+                                    "code": p['code'], "name": p['name'],
+                                    "buy_time": p['buy_time'], "buy_price": p['buy_price'],
+                                    "sell_time": current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                                    "sell_price": avg_sell_price,
+                                    "shares": final_qty,
+                                    "net_profit": gross_pnl - p['total_tax'],
+                                    "profit_pct": (avg_sell_price - p['buy_price']) / p['buy_price'] if p['buy_price'] > 0 else 0,
+                                    "reason": pe['reason']
+                                }
+                                trade_history.append(trade_record)
                                 portfolio.pop(p_idx)
                         
-                        # 確定ログの作成
-                        trade_record = pe.copy()
-                        trade_record.update({
-                            "sell_time": current_time.strftime('%Y-%m-%d %H:%M:%S'),
-                            "sell_price": exec_price,
-                            "gross_profit": gross_profit,
-                            "tax_amount": tax_amount,
-                            "net_profit": net_profit,
-                            "profit_pct": (exec_price - buy_price) / buy_price if buy_price > 0 else 0
-                        })
-                        trade_history.append(trade_record)
                         if verbose:
                             print(f"    [{current_time.strftime('%m/%d %H:%M')}] Sell Executed (Next Bar Open): {code} @ {exec_price:.1f} ({pe['reason']})")
                     else:
@@ -145,9 +179,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         
         # 発生したログを売却予約として蓄積
         for log in logs:
-            # manage_positions 内で計算された exec_price 等は一旦無視され、
-            # 次のイテレーションで Open 価格に基づいて再計算される
-            pending_exits.append(log)
+            if not any(str(pe['code']) == str(log['code']) for pe in pending_exits):
+                pending_exits.append(log)
 
         # --- D. 新規買付判定 ---
         market_time = current_time.time()
@@ -160,8 +193,9 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                     held_codes = [str(p['code']) for p in portfolio]
                     scan_targets = [c for c in target_codes if str(c) not in held_codes]
                     
-                    candidates = select_best_candidates(None, scan_targets, df_symbols, regime, 
-                                                       realtime_buffers=mock_buffers, current_time_override=current_time, verbose=verbose)
+                    candidates = select_best_candidates(scan_targets, broker, df_symbols, regime, 
+                                                       is_simulation=True, realtime_buffers=mock_buffers, 
+                                                       current_time_override=current_time, verbose=verbose)
                     
                     if candidates:
                         best = candidates[0]
@@ -180,31 +214,38 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                                 
                                 next_open = float(next_bar['Open'])
                                 next_high = float(next_bar['High'])
-                                next_low = float(next_bar['Low'])
+                                next_vol = float(next_bar['Volume']) if 'Volume' in next_bar else 0
                                 
+                                if next_open <= 0: continue
+
                                 # スリッページ計算 (買付は Open + slippage)
                                 tick_size = get_tick_size(next_open)
                                 slippage = max(tick_size, best['atr'] * 0.01)
                                 buy_price = min(next_high, next_open + slippage) # クリップ処理
                                 
                                 # 資金管理ロジック
-                                total_equity = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                                current_stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                                total_equity = account['cash'] + current_stock_value
                                 risk_amount = total_equity * MAX_RISK_PER_TRADE
                                 current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
                                 risk_per_share = best['atr'] * current_sl_mult
                                 
                                 ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
-                                max_inv = max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                                # 1銘柄への最大投資額を制限 (資産の30% もしくは 固定2000万円の小さい方)
+                                max_inv_limit = min(total_equity * 0.3, 20000000)
+                                max_inv = min(max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), max_inv_limit)
+
                                 max_shares_inv = int(max_inv // buy_price)
                                 max_shares_cash = int(account['cash'] // buy_price)
                                 
-                                raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash)
-                                shares_to_buy = (raw_shares // 100) * 100
+                                # 【新規】流動性制限 (次の足の出来高の1.0%まで、最低100株。0なら買わない)
+                                liquidity_limit = int(next_vol * 0.01)
+                                if liquidity_limit < 100:
+                                    if verbose: print(f"  [Skip] {code} Insufficient liquidity (1% Vol: {liquidity_limit})")
+                                    continue
                                 
-                                # 最低単元でのフォールバック
-                                if shares_to_buy == 0 and account['cash'] >= buy_price * 100:
-                                    fallback_shares = int(min(MIN_ALLOCATION_AMOUNT, account['cash'] * 0.3) // buy_price)
-                                    shares_to_buy = (fallback_shares // 100) * 100
+                                raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash, liquidity_limit)
+                                shares_to_buy = (raw_shares // 100) * 100
                                 
                                 cost = buy_price * shares_to_buy
                                 
@@ -217,7 +258,7 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                                     })
                                     account['cash'] -= cost
                                     if verbose:
-                                        print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy (Next Bar Open): {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Slip: {slippage:.1f})")
+                                        print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Vol: {next_vol:.0f})")
                         else:
                             if verbose:
                                 print(f"    [{current_time.strftime('%m/%d %H:%M')}] Signal on Last Bar: {code} (Execution skipped)")
@@ -239,7 +280,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         win_trades = [t for t in trade_history if t.get('net_profit', 0) > 0]
         loss_trades = [t for t in trade_history if t.get('net_profit', 0) <= 0]
         win_rate = len(win_trades) / len(trade_history) * 100
-        avg_net_profit = sum(t['net_profit'] for t in trade_history) / len(trade_history)
+        total_pnl = total_assets - initial_cash_val
+        avg_net_profit = total_pnl / len(trade_history) if len(trade_history) > 0 else 0
         
         avg_win = sum(t['net_profit'] for t in win_trades) / len(win_trades) if win_trades else 0
         avg_loss = sum(t['net_profit'] for t in loss_trades) / len(loss_trades) if loss_trades else 0
@@ -308,7 +350,17 @@ def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days
     print("="*70 + "\n")
 
 if __name__ == "__main__":
-    test_universe = ["8306", "7203", "9101", "8058", "6758", "4063", "9501", "6723", "7201", "8411", "9503"]
+    parser = argparse.ArgumentParser(description='Trade Bot Backtester')
+    parser.add_argument('--stocks', type=str, default='phase1', choices=['phase1', 'phase2'], help='Stocks set (phase1 or phase2)')
+    parser.add_argument('--all', action='store_true', help='Alias for --stocks phase2')
+    args = parser.parse_args()
+
+    is_phase2 = args.all or args.stocks == 'phase2'
+    test_universe = PHASE2_STOCKS if is_phase2 else PHASE1_STOCKS
+    
+    print(f"\n{'='*60}")
+    print(f"Mode: {'Phase 2 (100 stocks)' if is_phase2 else 'Phase 1 (34 stocks)'}")
+    print(f"{'='*60}\n")
     
     # 一括でデータをダウンロード
     full_data, df_1321_full = get_historical_data(test_universe, period="60d")
