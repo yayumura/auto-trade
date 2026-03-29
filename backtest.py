@@ -62,12 +62,19 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
         chunk_size = 20
         df_list = []
         
+        # 助走期間（1.5ヶ月分）を考慮した開始日の計算 (Phase 11.1)
+        adjusted_start = start
+        if start:
+            start_date = pd.to_datetime(start)
+            # 1.5ヶ月(45日)前に設定
+            adjusted_start = (start_date - pd.DateOffset(months=1, days=15)).strftime('%Y-%m-%d')
+
         for i in range(0, len(tickers), chunk_size):
             chunk = tickers[i:i+chunk_size]
             print(f"  -> Downloading chunk {i//chunk_size + 1} ({len(chunk)} tickers) ...")
             
             if start and end:
-                temp_df = yf.download(chunk, start=start, end=end, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+                temp_df = yf.download(chunk, start=adjusted_start, end=end, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
             else:
                 p = period if period else "60d"
                 temp_df = yf.download(chunk, period=p, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
@@ -341,26 +348,29 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         "held_count": len(portfolio)
     }
 
-def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days=5):
+def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days=5, start_date=None, end_date=None):
     """複数期間に分割してバックテストを実行"""
     print(f"\n{'='*60}\nMulti-Period Backtest Start (Window: {window_days} days)\n{'='*60}")
     
     if full_data is None: return
 
     all_times = df_1321_full.index.unique().sort_values()
-    
-    # 営業日ベースで分割
     dates = pd.Series(all_times.date).unique()
-    results = []
+    
+    # シミュレーション対象期間の決定 (Phase 11.1)
+    if start_date:
+        sim_start = pd.to_datetime(start_date).date()
+        evaluation_dates = [d for d in dates if d >= sim_start]
+    else:
+        # デフォルト10営業日を助走に充てる
+        warmup_days = 10
+        evaluation_dates = dates[warmup_days:]
 
-    # window_days ごとに分割して実行
-    warmup_days = 10
-    if len(dates) <= warmup_days:
-        print(f"  [Error] Data too short for warmup ({len(dates)} days)")
+    if not evaluation_dates:
+        print(f"  [Error] No dates found for evaluation after warmup")
         return
-        
-    evaluation_dates = dates[warmup_days:]
 
+    results = []
     for i in range(0, len(evaluation_dates), window_days):
         window_dates = evaluation_dates[i : i + window_days]
         if len(window_dates) < window_days and i > 0: # 最後の端数が少なすぎる場合はスキップ
@@ -413,23 +423,27 @@ if __name__ == "__main__":
     
     if full_data is not None:
         # 1. 複数期間のサマリーを表示
-        run_multi_period_backtest(test_universe, full_data, df_1321_full, window_days=5)
+        run_multi_period_backtest(test_universe, full_data, df_1321_full, window_days=5, start_date=args.start, end_date=args.end)
         
         # 2. 指定期間（または全期間）の統合サマリーを表示
         print("\n" + "="*40)
-        print("Detailed Summary (Full Selected Period)")
+        print("Detailed Summary (Test Period Only)")
         print("="*40)
         
         all_times = df_1321_full.index.unique().sort_values()
-        # `--start` / `--end` がある場合はその全期間を対象にする
-        # 無い場合は従来通り「最後の一部（500ステップ）」を対象にする
+        # `--start` / `--end` がある場合はその期間内のみを対象にする (Phase 11.1)
         if args.start and args.end:
-            timeline = all_times
+            # タイムゾーン考慮: ユーザー入力を東京時間として解釈し、データのTZ (通常UTC) に変換
+            data_tz = all_times.tz
+            start_dt = pd.to_datetime(args.start).tz_localize('Asia/Tokyo').tz_convert(data_tz)
+            end_dt = pd.to_datetime(args.end).tz_localize('Asia/Tokyo').tz_convert(data_tz)
+            timeline = all_times[(all_times >= start_dt) & (all_times < end_dt)]
         else:
             test_start_idx = max(0, len(all_times) - 500) 
             timeline = all_times[test_start_idx:]
             
-        res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=args.verbose, show_trades=True)
+        if len(timeline) > 0:
+            res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=args.verbose, show_trades=True)
         
         print("\n" + "="*40)
         print("Backtest Result Summary")

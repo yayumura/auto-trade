@@ -610,8 +610,8 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 # ▲▲▲ ここまで ▲▲▲
 
                 # ▼▼▼ 変更：市場平均をアウトパフォームしているか（RS判定） ▼▼▼
-                # 【Phase 9】最低モメンタム要求を 0.04 (4%) から 0.025 (2.5%) へ緩和。高値掴みを防ぎ初動を捉える。
-                required_momentum = max(0.025, nk_momentum_50)
+                # 【Phase 11】市場追従ベータ（0.5）を適用し、指数暴走時の無理難題を回避する。
+                required_momentum = max(0.025, nk_momentum_50 * 0.5)
                 
                 if momentum_50 < required_momentum: 
                     reason = f"Underperforming Market (Stock:{momentum_50:.2%} < Req:{required_momentum:.2%})"
