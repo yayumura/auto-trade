@@ -629,15 +629,18 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 sma20 = latest['SMA20']
                 is_yang_sen = latest['Close'] > latest['Open']
 
-                if rsi > 30: # より厳格に (35 -> 30)
+                # 【変更1】1時間足の適正値へ緩和 (30 -> 45)
+                # 1時間足ではRSIが45付近で反発することが多いため、ストライクゾーンを広げる
+                if rsi > 45: 
                     reason = f"RSI({rsi:.1f}) not oversold enough"
                 elif latest['Close'] >= sma20:
                     reason = "Above SMA20"
                 elif not is_yang_sen:
                     reason = "Falling (Yin-sen)"
                 else:
-                    score = (30 - rsi) * 30 + (latest['Volume'] / latest['Avg_Vol_15m'] * 50)
-                    reason = "RSI Oversold Bounce"
+                    # 【変更2】スコア計算も緩和したRSI基準(45)に合わせる
+                    score = (45 - rsi) * 20 + (latest['Volume'] / latest['Avg_Vol_15m'] * 50)
+                    reason = "Strategy 4.0 Range RSI Bounce"
             else:
                 reason = f"Unsupported Regime: {regime}"
 
