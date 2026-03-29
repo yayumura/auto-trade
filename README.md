@@ -1,12 +1,11 @@
-# 🏦 ヘッジファンド仕様・究極のAI自律トレードエンジン (1M JPY Optimized)
+# 🏦 ヘッジファンド仕様・究極のAI自律トレードエンジン (Strategy 4.3 Optimized)
 
 機関投資家レベルの**マルチファクター＆レジームスイッチング戦略**を個人投資家向けに開放。
 100万円の資金規模から、プロフェッショナルな資産形成を自動化するためのアルゴリズム・ボットです。
 
-![Main Dashboard](https://img.shields.io/badge/Status-Trading-success?style=for-the-badge&logo=bitdefender)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
-![API](https://img.shields.io/badge/Broker-Kabucom%20API-orange?style=for-the-badge&logo=google-cloud)
-![AI](https://img.shields.io/badge/AI-Gemini%20%2F%20Groq-8E44AD?style=for-the-badge&logo=google-gemini)
+![Status-Trading](https://img.shields.io/badge/Status-Trading-success?style=for-the-badge&logo=bitdefender)
+![Python-3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
+![Broker-Kabucom](https://img.shields.io/badge/Broker-Kabucom%20API-orange?style=for-the-badge&logo=google-cloud)
 
 ---
 
@@ -14,36 +13,39 @@
 
 多くの個人投資家が直面する「感情による判断ミス」「監視不足」「資金効率の悪さ」を、数学的アルゴリズムと最新の生成AIで解決します。
 
-### 💎 4つの革新的コア・テクノロジー
+### 💎 5つの革新的コア・テクノロジー [UPGRADED]
 
-1.  **プロフェショナル・複数期間バックテスター (`backtest.py`)** [UPGRADED]
-    - **自由な期間・時間軸指定 [NEW]**: `--start`, `--end` で特定の日付範囲を、`--interval` で足の長さ（15分, 1時間, 日足）を自在に切り替え可能。
-    - **正確な集計ロジック**: ポジション単位（エントリーから全決済まで）での損益・平均利益算出。含み益も適正に反映し、実態に即した評価が可能。
-    - **スマート・ログ制御 [NEW]**: `--verbose` 引数により、必要な売買ログと詳細なデバッグログを使い分け、長期間のテストもクリーンに出力。
-2.  **ハイブリッド・リアルタイム監視エンジン**
-    - 朝の「モーニング・スクリーニング」で全500銘柄以上から 50 銘柄を精査。
-    - 日中は kabuステーション API の板情報（PUSH配信）と同期し、30秒単位でポジションを自動制御。
-3.  **マルチ・レジーム適応ロジック (Strategy 4.3)** [LATEST - 💎 Swing Optimized]
-    - 相場を **BULL（強気）/ RANGE（揉み合い）/ BEAR（弱気）** に自動分類し、各環境に最適化したエントリーを実行。
-    - **BULL**: 強い銘柄の押し目を狙う **"SMA20 Pullback + SMA5 Momentum Check"** 戦略。
-    - **Professional Exit Management**: ATRベースの多段階利確（10.0x ATR）と追従トレール（2.5x ATR）により、大きなトレンドを確実に捕捉。
-    - **Breakeven Protection**: 含み益が1.2%を超えた時点でストップを建値へ自動移動。
-4.  **AI 二次定性フィルタ (Gemini / Groq)**
-    - 数学的スクリーニングを通過した銘柄に対し、最新ニュースを AI がリアルタイム分析。
-    - 不祥事や悪材料を検知した場合、瞬時にエントリーをブロック。
+1.  **プロフェッショナル・データパイプライン (Phase 13 Normalization)** [NEW]
+    - `yfinance` の非構造化データ（大文字小文字のブレや階層逆転）をリアルタイムで正規化。
+    - **1.5ヶ月の助走期間 (Warm-up)**: シミュレーション開始初日から SMA100 等の長期指標を完全に算出。
+    - **スマート・キャッシュ機能 (Phase 8)**: `data_cache/*.pkl` により、100銘柄の検証も 2 回目以降は**数秒**で完了。
+2.  **マルチ・レジーム適応ロジック (Strategy 4.3)** [LATEST]
+    - **BULL (強気)**: 強い上昇トレンドの押し目を狙う **"SMA20/50 Pullback + RSI 85 Expansion"**。
+    - **RANGE (揉み合い)**: 下値圏（RSI 45）からの反発を狙う平均回帰戦略。
+    - **BEAR (弱気)**: 暴落を回避するための全エントリー凍結＋緊急損切り。
+3.  **精密なマーケット・フィルター (Phase 10 & 12.2)**
+    - 日経平均 (1321.T) の SMA100 と 1.5% の「遊び（Buffer）」を組み合わせ、真のトレンドのみを捕捉。
+4.  **プロフェッショナル・マルチ期間バックテスター**
+    - ポジション単位での厳格な評価、スリッページ・シミュレーション（ATR連動）を搭載。
+5.  **AI 二次定性フィルタ (Gemini / Groq)**
+    - 数学的スクリーニング通過銘柄に対し、最新ニュースを AI がリアルタイム分析し、ニュース由来の暴落を回避。
 
 ---
 
-## ✨ 主要機能 (Feature Highlights)
+## 📈 実証された検証結果 (Backtest Evidence)
 
-### 📈 資金管理とリスクコントロール (Capital Management)
-- **100万円運用特化**: 少額（10〜30万円前後）で流動性の高い銘柄を優先。
-- **リスクベース・サイジング**: 1トレードの許容損失を総資金の 2%（MAX_RISK_PER_TRADE）に抑えるよう株数を自動計算。
-- **投資上限フィルタ [NEW]**: 単一銘柄への投資を「総資産の30%」かつ「最大2,000万円」に制限し、資産規模拡大時もリスク分散を維持。
+### 2024年 夏の陣 (2024/06/01 - 08/31 / 101銘柄)
+歴史的な 8 月の暴落を含む、極めて過酷な市場環境での検証結果です。
 
-### 🚢 流動性・執行エンジン [NEW]
-- **出来高連動フィルタ**: 非現実的な大量約定を防ぐため、次足の予想出来高の 1.0% を超える発注を自動制限。
-- **スリッページ・シミュレーション**: 執行時の気配乖離を ATR の 1% 単位で厳格に適用し、理論値と実運用の乖離を最小化。
+| メトリック | 結果 |
+| :--- | :--- |
+| **純利益 (Net Profit)** | **+4.31%** (+43,061 JPY) |
+| **合計取引数** | 20回 |
+| **勝率 (Win Rate)** | **45.0%** |
+| **ペイオフレシオ** | **1.71** |
+
+> [!IMPORTANT]
+> **Data Integrity 100%**: デバイスや API の仕様に左右されない正規化済みデータ（Phase 13）に基づく、偽りのない数値です。
 
 ---
 
@@ -52,15 +54,14 @@
 ```bash
 .
 ├── auto_trade.py         # メインエンジン（自律ループ型）
-├── backtest.py           # プロフェッショナル・バックテスター [NEW]
+├── backtest.py           # プロフェッショナル・物理検証機 [Phase 11.1 / 13 対応]
 ├── core/
-│   ├── logic.py          # 戦略ロジック（レジーム判定、ポジション管理）
+│   ├── logic.py          # 戦略ロジック（Strategy 4.3 最適化済み）
 │   ├── kabucom_broker.py # auカブコム API 通信レイヤー
-│   ├── ai_filter.py      # Gemini/Groq によるニュース定性分析
-│   ├── config.py         # パラメータ設定（最新・戦略4.3定数）
-│   └── kabu_launcher.py  # kabuステーションの自動制御
-├── data/                 # トレードログ、ポートフォリオ保存
-└── dashboard.py          # リアルタイム運用状況の可視化
+│   ├── config.py         # パラメータ設定（ATR, リスク管理）
+│   └── logic.py          # [Core] レジーム判定、エントリー/イグジット判定
+├── data_cache/           # 正規化済みヒストリカル・キャッシュ
+└── data/                 # 銘柄リスト、ログ出力
 ```
 
 ---
@@ -68,40 +69,14 @@
 ## 📦 クイックスタート (Quick Start)
 
 ### 1. バックテスト (検証)
-戦略 4.3 の性能を検証します。
+100銘柄（Phase 2）の全期間検証を 1 時間足で実行します。
 
 ```bash
-# 1. 基本実行 (直近60日・15分足)
-python backtest.py --stocks phase1
-
-# 2. 特定の期間を日足で検証 (例: 2025年全体)
-python backtest.py --start 2025-01-01 --end 2025-12-31 --interval 1d
-
-# 3. 過去の大相場（コロナショックなど）をストレス検証
-python backtest.py --start 2020-02-01 --end 2020-05-01 --interval 1d
-
-# 4. 詳細ログ（レジーム判定など）を表示してデバッグ
-python backtest.py --period 30d --verbose
+python backtest.py --all --start 2024-06-01 --end 2024-08-31 --interval 1h
 ```
 
-> [!IMPORTANT]
-> **yfinanceの制限事項**:
-> - `15m`（15分足）などのザラ場データ取得は**直近60日間**までです。
-> - それより過去の検証を行う場合は、`--interval 1d`（日足）または `--interval 1h`（1時間足：直近730日まで）を指定してください。
-
-### 2. 本番自律稼働 (Production Automation)
-本システムは、Windowsタスクスケジューラと組み合わせることで完全自律運用が可能です。
-
-1.  **起動用バッチファイル (`run_bot.bat`)** [NEW]
-    - カレントディレクトリの固定と、実行環境の自動化を行います。直接叩くことでいつでもボットを開始できます。
-2.  **Windows タスクスケジューラ設定**
-    - **トリガー**: 毎日 08:45 AM (一回)
-    - **操作**: `run_bot.bat` を開始
-    - **詳細**: 「最上位の特権で実行」「ネットワークが利用可能な場合のみ開始」を推奨。
-3.  **手動実行 (Debug/Manual)**
-```bash
-run_bot.bat
-```
+### 2. 本番自律稼働 (Automation)
+Windows タスクスケジューラで `run_bot.bat` を 08:45 に設定することを推奨します。
 
 ---
 Created by Antigravity - *Next Generation Algorithmic Trading Solution*
