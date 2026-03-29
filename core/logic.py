@@ -622,13 +622,14 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 # 【変更】SMA20ではなく、SMA50（約2週間）を下回った場合のみ足切り
                 elif latest['Close'] < latest.get('SMA50', sma20): 
                     reason = "Below SMA50"
-                # 【変更1】RSIの上限を 60 から 75 に引き上げ（強いトレンドへの順張りを許可）
-                elif rsi > 75: 
+                # 【Phase 12】RSI上限を 75 から 85 に引き上げ（強いトレンドへの順張りを許可）
+                elif rsi > 85: 
                     reason = f"RSI Too High ({rsi:.0f})"
-                elif not is_yang_sen: 
-                    reason = "No Yang-sen Bounce"
-                # 【変更2】出来高の急増要求を 1.5倍 から 1.2倍 に緩和（少しでも平均を上回っていれば合格）
-                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.2: 
+                # 【Phase 12.1】強気相場では1時間の形状よりトレンドを重視。陽線または5時間線上昇で許可。
+                elif not (is_yang_sen or is_sma5_up): 
+                    reason = "No Yang-sen or SMA5 Up"
+                # 【Phase 12】出来高の急増要求を 1.2倍 から 1.0倍 に緩和（平均並みならエントリー許可）
+                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.0: 
                     reason = f"Insufficient Vol Surge ({latest['Volume']/latest['Avg_Vol_15m']:.1f}x)"
                 else:
                     # 【合格】スコア計算
