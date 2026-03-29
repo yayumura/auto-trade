@@ -244,11 +244,8 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                                 max_shares_inv = int(max_inv // buy_price)
                                 max_shares_cash = int(account['cash'] // buy_price)
                                 
-                                # 【新規】流動性制限 (次の足の出来高の1.0%まで、最低100株。0なら買わない)
-                                liquidity_limit = int(next_vol * 0.01)
-                                if liquidity_limit < 100:
-                                    if verbose: print(f"  [Skip] {code} Insufficient liquidity (1% Vol: {liquidity_limit})")
-                                    continue
+                                # 【新規】流動性制限 (次の足の出来高の1.0%まで、最低100株。0なら100株とする)
+                                liquidity_limit = max(100, int(next_vol * 0.01))
                                 
                                 raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash, liquidity_limit)
                                 shares_to_buy = (raw_shares // 100) * 100

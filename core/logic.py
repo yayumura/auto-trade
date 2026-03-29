@@ -554,20 +554,21 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             market_ok = True
             if realtime_buffers and '1321' in realtime_buffers:
                 nk_df = realtime_buffers['1321'].df
-                if len(nk_df) > 20:
-                    # 最新のSMA20と、1つ前（15分前）のSMA20を取得して傾きを計算
-                    nk_sma20_current = nk_df['Close'].rolling(window=20).mean().iloc[-1]
-                    nk_sma20_prev = nk_df['Close'].rolling(window=20).mean().iloc[-2]
+                if len(nk_df) > 100:
+                    # 最新のSMA100と、1つ前（1時間前）のSMA100を取得して傾きを計算
+                    # 【変更】1時間足で約1ヶ月のトレンドを見るため、20 -> 100 に変更
+                    nk_sma100_current = nk_df['Close'].rolling(window=100).mean().iloc[-1]
+                    nk_sma100_prev = nk_df['Close'].rolling(window=100).mean().iloc[-2]
                     
-                    # 1. 現在値がSMA20を下回っている
-                    # 2. または、SMA20の傾き自体が下向き（下落トレンド）
-                    if nk_df['Close'].iloc[-1] < nk_sma20_current or nk_sma20_current < nk_sma20_prev:
+                    # 1. 現在値がSMA100を下回っている
+                    # 2. または、SMA100の傾き自体が下向き（下落トレンド）
+                    if nk_df['Close'].iloc[-1] < nk_sma100_current or nk_sma100_current < nk_sma100_prev:
                         market_ok = False
             
-            # market_okがFalseの場合は、この銘柄を即座にスキップ（足切り）
             if not market_ok:
                 if verbose:
-                    print(f"  [Scan] {code}: Market Trend Rejection")
+                    nk_len = len(realtime_buffers['1321'].df) if (realtime_buffers and '1321' in realtime_buffers) else 0
+                    print(f"  [Scan] {code}: Market Trend Rejection (NK Buffer: {nk_len})")
                 continue
 
             # 【新規】出来高フィルタ
@@ -596,8 +597,9 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 # 必須条件（これらを満たさない場合は足切り）
                 if momentum_50 < 0.04: 
                     reason = f"Weak Momentum ({momentum_50:.2%})"
-                elif latest['Close'] < sma20: 
-                    reason = "Below SMA20"
+                # 【変更】SMA20ではなく、SMA50（約2週間）を下回った場合のみ足切り
+                elif latest['Close'] < latest.get('SMA50', sma20): 
+                    reason = "Below SMA50"
                 # 【変更1】RSIの上限を 60 から 75 に引き上げ（強いトレンドへの順張りを許可）
                 elif rsi > 75: 
                     reason = f"RSI Too High ({rsi:.0f})"
@@ -639,22 +641,22 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             else:
                 reason = f"Unsupported Regime: {regime}"
 
-                if score > 0:
-                    score = min(score, 500)
-                    name = "不明"
-                    if df_symbols is not None:
-                        name_row = df_symbols[df_symbols['コード'].astype(str) == code]
-                        name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
-                    candidates.append({
-                        "code": code, "name": name, 
-                        "score": score, 
-                        "price": latest['Close'], 
-                        "atr": latest['ATR']
-                    })
-                    if verbose:
-                        print(f"  [Scan] {code}: {reason} (Score: {score:.1f})")
-                elif verbose:
-                    print(f"  [Scan] {code}: {reason}")
+            if score > 0:
+                score = min(score, 500)
+                name = "不明"
+                if df_symbols is not None:
+                    name_row = df_symbols[df_symbols['コード'].astype(str) == code]
+                    name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
+                candidates.append({
+                    "code": code, "name": name, 
+                    "score": score, 
+                    "price": latest['Close'], 
+                    "atr": latest['ATR']
+                })
+                if verbose:
+                    print(f"  [Scan] {code}: {reason} (Score: {score:.1f})")
+            elif verbose:
+                print(f"  [Scan] {code}: {reason}")
 
         except Exception as e:
             if verbose:
