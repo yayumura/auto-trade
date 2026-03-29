@@ -38,11 +38,17 @@ PHASE2_STOCKS = [
     "4063", "3402", "4183", "4005", "4901", "5020", "5108", "9101", "9104", "9107"
 ]
 
-def get_historical_data(target_codes, period="60d", interval="15m"):
+def get_historical_data(target_codes, start=None, end=None, period=None, interval="15m"):
     """過去データのダウンロードと前処理"""
     tickers = [f"{code}.T" for code in target_codes] + ["1321.T"]
-    print(f"Downloading historical data (period={period}, interval={interval})...")
-    full_data = yf.download(tickers, period=period, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+    
+    if start and end:
+        print(f"Downloading historical data (start={start}, end={end}, interval={interval})...")
+        full_data = yf.download(tickers, start=start, end=end, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+    else:
+        p = period if period else "60d"
+        print(f"Downloading historical data (period={p}, interval={interval})...")
+        full_data = yf.download(tickers, period=p, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
     
     if full_data.empty:
         return None, None
@@ -57,9 +63,9 @@ def get_historical_data(target_codes, period="60d", interval="15m"):
     df_1321_full = full_data['1321.T'].dropna() if '1321.T' in full_data.columns.levels[0] else pd.DataFrame()
     return full_data, df_1321_full
 
-def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initial_cash_val=1000000, verbose=True):
+def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initial_cash_val=1000000, verbose=False, show_trades=True):
     """特定のタイムライン上でバックテストを実行"""
-    if verbose:
+    if show_trades or verbose:
         print(f"  Session Start: {timeline[0].strftime('%Y-%m-%d')} to {timeline[-1].strftime('%Y-%m-%d')} ({len(timeline)} steps)")
 
     # 銘柄情報の読み込み
@@ -139,7 +145,7 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                                 trade_history.append(trade_record)
                                 portfolio.pop(p_idx)
                         
-                        if verbose:
+                        if show_trades or verbose:
                             print(f"    [{current_time.strftime('%m/%d %H:%M')}] Sell Executed (Next Bar Open): {code} @ {exec_price:.1f} ({pe['reason']})")
                     else:
                         # データがない場合は次の足に持ち越し
@@ -257,7 +263,7 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                                         "buy_time": next_time, "atr": best['atr']
                                     })
                                     account['cash'] -= cost
-                                    if verbose:
+                                    if show_trades or verbose:
                                         print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Vol: {next_vol:.0f})")
                         else:
                             if verbose:
@@ -330,7 +336,7 @@ def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days
         
         if len(timeline) < 10: continue
         
-        res = run_backtest_session(target_codes, full_data, df_1321_full, timeline, verbose=False)
+        res = run_backtest_session(target_codes, full_data, df_1321_full, timeline, verbose=False, show_trades=False)
         results.append(res)
         print(f"  Result: {res['start_date']} - {res['end_date']} | Profit: {res['profit_pct']:+.2f}% | Trades: {res['trade_count']}")
 
@@ -353,6 +359,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Trade Bot Backtester')
     parser.add_argument('--stocks', type=str, default='phase1', choices=['phase1', 'phase2'], help='Stocks set (phase1 or phase2)')
     parser.add_argument('--all', action='store_true', help='Alias for --stocks phase2')
+    parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)', default=None)
+    parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)', default=None)
+    parser.add_argument('--period', type=str, help='Data period (e.g. 60d, 1y)', default='60d')
+    parser.add_argument('--interval', type=str, help='Data interval (15m, 1h, 1d)', default='15m')
+    parser.add_argument('--verbose', action='store_true', help='Show detailed regime/buffer logs')
     args = parser.parse_args()
 
     is_phase2 = args.all or args.stocks == 'phase2'
@@ -363,21 +374,27 @@ if __name__ == "__main__":
     print(f"{'='*60}\n")
     
     # 一括でデータをダウンロード
-    full_data, df_1321_full = get_historical_data(test_universe, period="60d")
+    full_data, df_1321_full = get_historical_data(test_universe, start=args.start, end=args.end, period=args.period, interval=args.interval)
     
     if full_data is not None:
         # 1. 複数期間のサマリーを表示
         run_multi_period_backtest(test_universe, full_data, df_1321_full, window_days=5)
         
-        # 2. 直近20日間の詳細サマリーを表示
+        # 2. 指定期間（または全期間）の統合サマリーを表示
         print("\n" + "="*40)
-        print("Detailed Summary (Last 500 steps / approx. 20 days)")
+        print("Detailed Summary (Full Selected Period)")
         print("="*40)
         
         all_times = df_1321_full.index.unique().sort_values()
-        test_start_idx = max(0, len(all_times) - 500) 
-        timeline = all_times[test_start_idx:]
-        res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=True)
+        # `--start` / `--end` がある場合はその全期間を対象にする
+        # 無い場合は従来通り「最後の一部（500ステップ）」を対象にする
+        if args.start and args.end:
+            timeline = all_times
+        else:
+            test_start_idx = max(0, len(all_times) - 500) 
+            timeline = all_times[test_start_idx:]
+            
+        res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=args.verbose, show_trades=True)
         
         print("\n" + "="*40)
         print("Backtest Result Summary")
