@@ -566,6 +566,8 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             
             # market_okがFalseの場合は、この銘柄を即座にスキップ（足切り）
             if not market_ok:
+                if verbose:
+                    print(f"  [Scan] {code}: Market Trend Rejection")
                 continue
 
             # 【新規】出来高フィルタ
@@ -592,15 +594,17 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
 
                 # 必須条件（これらを満たさない場合は足切り）
-                if momentum_50 < 0.04: # モメンタム要求を 12% から 4% に緩和
+                if momentum_50 < 0.04: 
                     reason = f"Weak Momentum ({momentum_50:.2%})"
                 elif latest['Close'] < sma20: 
                     reason = "Below SMA20"
-                elif rsi > 60: 
+                # 【変更1】RSIの上限を 60 から 75 に引き上げ（強いトレンドへの順張りを許可）
+                elif rsi > 75: 
                     reason = f"RSI Too High ({rsi:.0f})"
                 elif not is_yang_sen: 
                     reason = "No Yang-sen Bounce"
-                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.5: # 出来高の急増要求を 3.5倍 から 1.5倍 に緩和
+                # 【変更2】出来高の急増要求を 1.5倍 から 1.2倍 に緩和（少しでも平均を上回っていれば合格）
+                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.2: 
                     reason = f"Insufficient Vol Surge ({latest['Volume']/latest['Avg_Vol_15m']:.1f}x)"
                 else:
                     # 【合格】スコア計算
@@ -635,18 +639,22 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             else:
                 reason = f"Unsupported Regime: {regime}"
 
-            if score > 0:
-                score = min(score, 500)
-                name = "不明"
-                if df_symbols is not None:
-                    name_row = df_symbols[df_symbols['コード'].astype(str) == code]
-                    name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
-                candidates.append({
-                    "code": code, "name": name, 
-                    "score": score, 
-                    "price": latest['Close'], 
-                    "atr": latest['ATR']
-                })
+                if score > 0:
+                    score = min(score, 500)
+                    name = "不明"
+                    if df_symbols is not None:
+                        name_row = df_symbols[df_symbols['コード'].astype(str) == code]
+                        name = name_row['銘柄名'].values[0] if not name_row.empty else "不明"
+                    candidates.append({
+                        "code": code, "name": name, 
+                        "score": score, 
+                        "price": latest['Close'], 
+                        "atr": latest['ATR']
+                    })
+                    if verbose:
+                        print(f"  [Scan] {code}: {reason} (Score: {score:.1f})")
+                elif verbose:
+                    print(f"  [Scan] {code}: {reason}")
 
         except Exception as e:
             if verbose:
