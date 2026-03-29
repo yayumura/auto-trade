@@ -636,11 +636,12 @@ def _main_exec():
                         else:
                             print(f"  -> [OK] Passed (no negative news)")
 
-                    # Capital management
-                    p = float(item['price'])
-                    a = float(item['atr'])
+                    # 資本管理
+                    p = float(item['price']) if item['price'] is not None and not pd.isna(item['price']) else 0.0
+                    a = float(item['atr']) if item.get('atr') is not None and not pd.isna(item.get('atr')) else 0.0
+                    
                     if p <= 0 or a <= 0:
-                        print(f"  -> [Skip] {item['code']} - Invalid price or ATR (price={p}, atr={a})")
+                        print(f"  -> [Skip] {item['code']} - 無効な価格またはATRデータ (price={p}, atr={a})")
                         continue
                     
                     # [AI Correction] Check ATR ratio (volatility) against investment price, rather than ATR value itself
@@ -670,10 +671,10 @@ def _main_exec():
                     
                     if ts >= 100:
                         best_target, shares_to_buy, buy_price, cost, final_atr = item, ts, tp, tp * ts, a
-                        print(f"  -> [OK] Selected: {code} ({ts} shares)")
+                        print(f"  -> [OK] Selected: {item['code']} ({ts} shares)")
                         break
                     else:
-                        print(f"  -> [Skip] {code} - Budget Short (Needs {tp*100:,.0f} / Cash {account['cash']:,.0f})")
+                        print(f"  -> [Skip] {item['code']} - Budget Short (Needs {tp*100:,.0f} / Cash {account['cash']:,.0f})")
 
                 if not best_target:
                     print("\n[Scan] No passing candidate found.")
