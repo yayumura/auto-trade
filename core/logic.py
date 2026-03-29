@@ -592,15 +592,15 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
 
                 # 必須条件（これらを満たさない場合は足切り）
-                if momentum_50 < 0.12: # トレンド強度をさらに厳格に (0.10 -> 0.12)
+                if momentum_50 < 0.04: # モメンタム要求を 12% から 4% に緩和
                     reason = f"Weak Momentum ({momentum_50:.2%})"
-                elif latest['Close'] < sma20: # SMA20を下回っている場合は「押し目」ではなく「反転」のリスク
+                elif latest['Close'] < sma20: 
                     reason = "Below SMA20"
-                elif rsi > 60: # 高値掴みを防止
+                elif rsi > 60: 
                     reason = f"RSI Too High ({rsi:.0f})"
-                elif not is_yang_sen: # 陽線は必須
+                elif not is_yang_sen: 
                     reason = "No Yang-sen Bounce"
-                elif latest['Volume'] < latest['Avg_Vol_15m'] * 3.5: # 出来高急増を厳格化 (3.0 -> 3.5)
+                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.5: # 出来高の急増要求を 3.5倍 から 1.5倍 に緩和
                     reason = f"Insufficient Vol Surge ({latest['Volume']/latest['Avg_Vol_15m']:.1f}x)"
                 else:
                     # 【合格】スコア計算
