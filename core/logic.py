@@ -428,12 +428,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
             if not sell_reason:
-                if hold_days > 8.0: 
-                    # 【Strategy 4.3】時間切れのさらなる柔軟化 (5 -> 8 days)
-                    # 8日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
+                if hold_days > 5.0: 
+                    # 【Strategy 4.2】時間切れのさらなる柔軟化 (4 -> 5 days)
+                    # 5日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
                     is_momentum_lost = current_price < df['SMA5'].iloc[-1]
                     if is_momentum_lost and profit_pct < 0.005:
-                        sell_reason = f"効率化撤退 (8 days & no momentum)"
+                        sell_reason = f"効率化撤退 (5 days & no momentum)"
                 elif not is_partial_sold and current_price >= target_price:
                     # ATRターゲット達成で半分利確
                     sell_reason = f"第一目標達成・半分利確 (+{ATR_TARGET_MULT}xATR)"
