@@ -11,6 +11,7 @@ trade_history.csv
 execution_log.csv
 .bot_sim.lock
 logs/
+data_cache/
 
 # Python
 __pycache__/

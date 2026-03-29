@@ -74,7 +74,7 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
             
             # yfinanceの仕様対策: 1銘柄だけ取得した場合はMultiIndexにならないため強制変換
             if len(chunk) == 1:
-                temp_df.columns = pd.MultiIndex.from_product([chunk, temp_df.columns])
+                temp_df.columns = pd.MultiIndex.from_product([chunk, temp_df.columns], names=['Ticker', 'Price'])
                 
             df_list.append(temp_df)
             
