@@ -5,6 +5,8 @@ import os
 import sys
 import argparse
 import pytz
+import time
+import pickle
 
 # プロジェクトルートをパスに追加
 sys.path.append(os.getcwd())
@@ -31,7 +33,7 @@ PHASE2_STOCKS = [
     "8035", "6857", "6920", "6526", "6723", "6981", "6954", "6594", "6861", "6971", "6762", "7741", "7733", "7751",
     "9984", "9432", "9433", "9434", "6758", "7974", "3659", "4751", "4307",
     "8058", "8031", "8001", "8002", "8053", "2768", "8015",
-    "7011", "7012", "6301", "6326", "6501", "6502", "6503", "5401", "5411", "9501", "9502", "9503",
+    "7011", "7012", "6301", "6326", "6501", "6503", "5401", "5411", "9501", "9502", "9503",
     "9983", "3382", "4661", "4689", "6098", "2413", "4543", "4452", "8113", "4911", "2502", "2503",
     "4502", "4503", "4519", "4568", "4523", "4507",
     "8801", "8802", "8830", "9020", "9021", "9022", "1925", "1928", "1801", "1802", "1803",
@@ -39,16 +41,52 @@ PHASE2_STOCKS = [
 ]
 
 def get_historical_data(target_codes, start=None, end=None, period=None, interval="15m"):
-    """過去データのダウンロードと前処理"""
+    """過去データのダウンロードと前処理 (Phase 8: キャッシュ機構と分割ダウンロード)"""
     tickers = [f"{code}.T" for code in target_codes] + ["1321.T"]
     
-    if start and end:
-        print(f"Downloading historical data (start={start}, end={end}, interval={interval})...")
-        full_data = yf.download(tickers, start=start, end=end, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+    cache_dir = "data_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # キャッシュファイル名の生成（パラメータごとに一意にする）
+    safe_start = start if start else "None"
+    safe_end = end if end else "None"
+    safe_period = period if period else "None"
+    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+
+    if os.path.exists(cache_path):
+        print(f"[OK] ローカルキャッシュからデータを高速読み込みします: {cache_filename}")
+        full_data = pd.read_pickle(cache_path)
     else:
-        p = period if period else "60d"
-        print(f"Downloading historical data (period={p}, interval={interval})...")
-        full_data = yf.download(tickers, period=p, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+        print(f"[API] Yahoo APIからデータを取得します (API制限回避のため20銘柄ずつ分割・ウェイト処理)")
+        chunk_size = 20
+        df_list = []
+        
+        for i in range(0, len(tickers), chunk_size):
+            chunk = tickers[i:i+chunk_size]
+            print(f"  -> Downloading chunk {i//chunk_size + 1} ({len(chunk)} tickers) ...")
+            
+            if start and end:
+                temp_df = yf.download(chunk, start=start, end=end, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+            else:
+                p = period if period else "60d"
+                temp_df = yf.download(chunk, period=p, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
+            
+            # yfinanceの仕様対策: 1銘柄だけ取得した場合はMultiIndexにならないため強制変換
+            if len(chunk) == 1:
+                temp_df.columns = pd.MultiIndex.from_product([chunk, temp_df.columns])
+                
+            df_list.append(temp_df)
+            
+            if i + chunk_size < len(tickers):
+                time.sleep(2)  # API制限を回避するための2秒間のスリープ
+            
+        # 分割取得したデータを横方向（銘柄別）に結合
+        full_data = pd.concat(df_list, axis=1)
+        
+        # 次回のためにキャッシュとして保存
+        full_data.to_pickle(cache_path)
+        print(f"[SAVE] データをキャッシュに保存しました！")
     
     if full_data.empty:
         return None, None
