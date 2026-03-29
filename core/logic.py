@@ -552,6 +552,8 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
             # 【新規】市場トレンドフィルター (Nikkei 1321.T)
             # 相場全体が下落トレンドの時は「落ちてくるナイフ」を掴まないよう全エントリーを禁止する
             market_ok = True
+            nk_momentum_50 = 0.0  # 日経平均のモメンタム初期値
+            
             if realtime_buffers and '1321' in realtime_buffers:
                 nk_df = realtime_buffers['1321'].df
                 if len(nk_df) > 100:
@@ -564,6 +566,10 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                     # 2. または、SMA100の傾き自体が下向き（下落トレンド）
                     if nk_df['Close'].iloc[-1] < nk_sma100_current or nk_sma100_current < nk_sma100_prev:
                         market_ok = False
+                
+                # ▼▼▼ 追加：日経平均自体の50本（約10日）モメンタムを計算 ▼▼▼
+                if len(nk_df) > 50:
+                    nk_momentum_50 = (nk_df['Close'].iloc[-1] - nk_df['Close'].iloc[-50]) / nk_df['Close'].iloc[-50]
             
             if not market_ok:
                 if verbose:
@@ -595,8 +601,14 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
 
                 # 必須条件（これらを満たさない場合は足切り）
-                if momentum_50 < 0.04: 
-                    reason = f"Weak Momentum ({momentum_50:.2%})"
+                
+                # ▼▼▼ 変更：市場平均をアウトパフォームしているか（RS判定） ▼▼▼
+                # 最低でも4%の上昇、かつ、日経平均の上昇率を上回っていることを要求する
+                required_momentum = max(0.04, nk_momentum_50)
+                
+                if momentum_50 < required_momentum: 
+                    reason = f"Underperforming Market (Stock:{momentum_50:.2%} < Req:{required_momentum:.2%})"
+                # ▲▲▲ ここまで ▲▲▲
                 # 【変更】SMA20ではなく、SMA50（約2週間）を下回った場合のみ足切り
                 elif latest['Close'] < latest.get('SMA50', sma20): 
                     reason = "Below SMA50"
