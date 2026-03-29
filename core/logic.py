@@ -602,6 +602,14 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
 
                 # 必須条件（これらを満たさない場合は足切り）
                 
+                # ▼▼▼ 追加：時間帯フィルター（魔の9時台を回避） ▼▼▼
+                # 1時間足の 9:00 のバーは寄付き直後のノイズが多いため、新規エントリーを見送る
+                current_candle_time = latest.name
+                if current_candle_time.hour == 9:
+                    reason = "Morning Noise (Skipping 9:00-10:00)"
+                    continue
+                # ▲▲▲ ここまで ▲▲▲
+
                 # ▼▼▼ 変更：市場平均をアウトパフォームしているか（RS判定） ▼▼▼
                 # 最低でも4%の上昇、かつ、日経平均の上昇率を上回っていることを要求する
                 required_momentum = max(0.04, nk_momentum_50)
