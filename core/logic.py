@@ -558,13 +558,12 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 nk_df = realtime_buffers['1321'].df
                 if len(nk_df) > 100:
                     # 最新のSMA100と、1つ前（1時間前）のSMA100を取得して傾きを計算
-                    # 【変更】1時間足で約1ヶ月のトレンドを見るため、20 -> 100 に変更
+                    # 【修正】1時間足で約1ヶ月のトレンドを見るため、20 -> 100 に変更
                     nk_sma100_current = nk_df['Close'].rolling(window=100).mean().iloc[-1]
-                    nk_sma100_prev = nk_df['Close'].rolling(window=100).mean().iloc[-2]
                     
-                    # 1. 現在値がSMA100を下回っている
-                    # 2. または、SMA100の傾き自体が下向き（下落トレンド）
-                    if nk_df['Close'].iloc[-1] < nk_sma100_current or nk_sma100_current < nk_sma100_prev:
+                    # 【修正】傾きの判定（nk_sma100_current < nk_sma100_prev）を削除し、
+                    # シンプルに「現在値が約1ヶ月の平均線(SMA100)を下回っているか」だけで危険判定を行う
+                    if nk_df['Close'].iloc[-1] < nk_sma100_current:
                         market_ok = False
                 
                 # ▼▼▼ 追加：日経平均自体の50本（約10日）モメンタムを計算 ▼▼▼
