@@ -616,6 +616,9 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                 
                 if momentum_50 < required_momentum: 
                     reason = f"Underperforming Market (Stock:{momentum_50:.2%} < Req:{required_momentum:.2%})"
+                # ▼▼▼ 追加：マルチタイムフレーム・フィルター（上位足の下落トレンド回避） ▼▼▼
+                elif pd.isna(latest.get('SMA100')) or latest['Close'] < latest['SMA100']:
+                    reason = "HTF Downtrend (Below SMA100)"
                 # ▲▲▲ ここまで ▲▲▲
                 # 【変更】SMA20ではなく、SMA50（約2週間）を下回った場合のみ足切り
                 elif latest['Close'] < latest.get('SMA50', sma20): 
@@ -709,6 +712,9 @@ def calculate_technicals_for_scan(df):
     df['SMA5'] = df['Close'].rolling(window=5).mean()
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['SMA50'] = df['Close'].rolling(window=50).mean()
+    # ▼▼▼ 追加：上位足（約1ヶ月/20営業日）のトレンドライン ▼▼▼
+    df['SMA100'] = df['Close'].rolling(window=100).mean()
+    # ▲▲▲ ここまで ▲▲▲
     
     # ATR (14)
     tr1 = df['High'] - df['Low']
