@@ -563,7 +563,8 @@ def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "
                     
                     # 【修正】傾きの判定（nk_sma100_current < nk_sma100_prev）を削除し、
                     # シンプルに「現在値が約1ヶ月の平均線(SMA100)を下回っているか」だけで危険判定を行う
-                    if nk_df['Close'].iloc[-1] < nk_sma100_current:
+                    # 【Phase 12.2】強気局面では多少の押し（-1.5%）を許容する
+                    if nk_df['Close'].iloc[-1] < nk_sma100_current * 0.985:
                         market_ok = False
                 
                 # ▼▼▼ 追加：日経平均自体の50本（約10日）モメンタムを計算 ▼▼▼

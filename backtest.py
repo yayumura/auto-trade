@@ -47,18 +47,18 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
     cache_dir = "data_cache"
     os.makedirs(cache_dir, exist_ok=True)
     
-    # キャッシュファイル名の生成（パラメータごとに一意にする）
+    # キャッシュファイル名の生成（バージョンv2にして再取得を強制）
     safe_start = start if start else "None"
     safe_end = end if end else "None"
     safe_period = period if period else "None"
-    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}.pkl"
+    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}_v2.pkl"
     cache_path = os.path.join(cache_dir, cache_filename)
 
     if os.path.exists(cache_path):
         print(f"[OK] ローカルキャッシュからデータを高速読み込みします: {cache_filename}")
         full_data = pd.read_pickle(cache_path)
     else:
-        print(f"[API] Yahoo APIからデータを取得します (API制限回避のため20銘柄ずつ分割・ウェイト処理)")
+        print(f"[API] Yahoo APIからデータを取得します (データ構造のブレを完全に正規化します)")
         chunk_size = 20
         df_list = []
         
@@ -66,7 +66,6 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
         adjusted_start = start
         if start:
             start_date = pd.to_datetime(start)
-            # 1.5ヶ月(45日)前に設定
             adjusted_start = (start_date - pd.DateOffset(months=1, days=15)).strftime('%Y-%m-%d')
 
         for i in range(0, len(tickers), chunk_size):
@@ -79,14 +78,26 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
                 p = period if period else "60d"
                 temp_df = yf.download(chunk, period=p, interval=interval, group_by='ticker', auto_adjust=True, progress=False, threads=False)
             
-            # yfinanceの仕様対策: 1銘柄だけ取得した場合はMultiIndexにならないため強制変換
-            if len(chunk) == 1:
+            if temp_df.empty:
+                continue
+                
+            # 【究極の防波堤】yfinanceの仕様変更や単一/複数銘柄によるデータ構造のブレを完全に正規化
+            if isinstance(temp_df.columns, pd.MultiIndex):
+                # (Price, Ticker) になっている場合は (Ticker, Price) に反転
+                if any(str(c) in temp_df.columns.levels[1] for c in chunk):
+                    temp_df = temp_df.swaplevel(0, 1, axis=1)
+                
+                # カラム名を強制的に頭文字大文字（'close' -> 'Close'）に統一
+                temp_df.rename(columns=lambda x: str(x).capitalize(), level=1, inplace=True)
+            else:
+                # 1銘柄だけ取得した場合 (フラットなIndex)
+                temp_df.rename(columns=lambda x: str(x).capitalize(), inplace=True)
                 temp_df.columns = pd.MultiIndex.from_product([chunk, temp_df.columns], names=['Ticker', 'Price'])
                 
             df_list.append(temp_df)
             
             if i + chunk_size < len(tickers):
-                time.sleep(2)  # API制限を回避するための2秒間のスリープ
+                time.sleep(2)
             
         # 分割取得したデータを横方向（銘柄別）に結合
         full_data = pd.concat(df_list, axis=1)
