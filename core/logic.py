@@ -375,45 +375,36 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             sell_reason = None
             sell_qty = current_shares
 
-            # [Optimization] 初期損切り (ATR 2.0倍)
-            initial_stop_price = buy_price - (atr * ATR_STOP_MULT)
-            # [Optimization] 絶対ハードストップ (-4.0%) とのタイトな方を選択 (損小の徹底)
-            hard_stop_price = max(buy_price * 0.96, initial_stop_price)
+            # --- フェーズ14: スマート・エグジット（ハイブリッド決済） ---
 
-            # [Optimization] 建値決済（ブレイクイーブン）の設定
-            # 2%以上の含み益が出た後は、損切りラインを建値（+手数料分）に引き上げる (1.5% -> 2.0%)
-            if profit_pct >= BREAKEVEN_TRIGGER:
-                hard_stop_price = max(hard_stop_price, buy_price * 1.002) # 少し余裕を持たせて同値撤退以上を確保
-
-            # [Optimization] 多段階利確・トレールロジック
-            # 高値が目標値 (ATR 6.0倍) を超えたらトレールモードを非常にタイトにする (利大の追求)
-            target_price = buy_price + (atr * ATR_TARGET_MULT)
-            is_target_reached = highest_price_db >= target_price
-            
-            if is_target_reached:
-                # 目標達成後は最高値から ATR 2.0倍で利益をガッチリ確保
-                chandelier_stop = highest_price_db - (atr * 2.0)
+            # 視点3：リスクマネージャー（ブレイクイーブン・ストップ）
+            # 含み益がATRの1.5倍に達したら、初期損切りラインを「建値＋微益」に引き上げてリスクをゼロにする
+            if highest_price_db > buy_price + (atr * 1.5):
+                # 手数料やスリッページをカバーするため、建値の+0.2%にストップを置く
+                base_stop_line = buy_price * 1.002 
             else:
-                # 目標未達時は最高値から ATR 4.0倍（ゆったり）で、一時的な押し目での振るい落としを回避
-                chandelier_stop = highest_price_db - (atr * TRAIL_STOP_MULT)
+                # 初期の絶対損切りライン（ATRの2.0倍）
+                base_stop_line = buy_price - (atr * 2.0)
+
+            # 視点1：トレンドフォロワー（ワイド・トレールストップ）
+            # 最高値からATRの4.0倍下がったらトレンド崩壊とみなす（ノイズでは絶対に狩られない広さ）
+            trail_stop_line = highest_price_db - (atr * 4.0)
+
+            # 実際のストップラインは、ベースとトレールのうち「より高い方（安全な方）」を採用
+            actual_stop_line = max(base_stop_line, trail_stop_line)
 
             # 【重要】損切り判定（窓開け考慮）
-            if is_simulation and open_price <= hard_stop_price:
-                sell_reason = f"窓開け損切 (Open {open_price:,.1f} <= Stop {hard_stop_price:,.1f})"
+            if is_simulation and open_price <= actual_stop_line:
+                sell_reason = f"窓開け損切 (Open {open_price:,.1f} <= Stop {actual_stop_line:,.1f})"
                 current_price_raw = open_price # 執行ベース価格を始値に修正
                 current_price = max(low_price, open_price - slippage) # クリップ処理
-            elif current_price <= hard_stop_price:
-                if current_price > buy_price:
-                    sell_reason = f"建値守備決済 (Breakeven at {hard_stop_price:,.1f})"
+            elif current_price <= actual_stop_line:
+                if current_price < buy_price:
+                    sell_reason = f"絶対損切 / 建値撤退 (Stop at {actual_stop_line:,.1f})"
                 else:
-                    sell_reason = f"絶対損切 (Hard/Initial Stop at {hard_stop_price:,.1f})"
-            elif current_price <= chandelier_stop:
-                if current_price > buy_price:
-                    sell_reason = f"トレール利確 (Trail Stop from {highest_price_db:,.1f})"
-                else:
-                    sell_reason = f"下降トレンド転換損切 (Trail Stop below Buy)"
+                    sell_reason = f"トレール大波利確 (Trail Stop from {highest_price_db:,.1f})"
 
-            # 時間切れおよび分割利確の判定
+            # 時間切れおよび分割利確の判定 (暦日ベース 5日経過を約25バーと見なす)
             current_dt = current_time_override if current_time_override else datetime.now(JST)
             if hasattr(current_dt, 'to_pydatetime'):
                 current_dt = current_dt.to_pydatetime()
@@ -428,20 +419,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
             if not sell_reason:
-                if hold_days > 5.0: 
-                    # 【Strategy 4.2】時間切れのさらなる柔軟化 (4 -> 5 days)
-                    # 5日経っても勢いがない（SMA5を下回った、かつ利益が0.5%未満）場合に効率化撤退
-                    is_momentum_lost = current_price < df['SMA5'].iloc[-1]
-                    if is_momentum_lost and profit_pct < 0.005:
-                        sell_reason = f"効率化撤退 (5 days & no momentum)"
-                elif not is_partial_sold and current_price >= target_price:
-                    # ATRターゲット達成で半分利確
-                    sell_reason = f"第一目標達成・半分利確 (+{ATR_TARGET_MULT}xATR)"
-                    half_qty = (current_shares // 2 // 100) * 100
-                    if half_qty >= 100:
-                        sell_qty = half_qty
-                    else:
-                        sell_qty = current_shares
+                # 視点2：クオンツ・リサーチャー（スマート・タイムストップ）
+                # 約5日以上経過した場合のガベージコレクション
+                if hold_days >= 5.0: 
+                    # 含み益がATRの1.0倍未満（＝勢いがなく停滞している）場合のみ強制決済して資金を解放する
+                    if current_price < buy_price + (atr * 1.0):
+                        sell_reason = "スマートタイムストップ (停滞銘柄の資金解放)"
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -512,20 +495,19 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
     
     # auto_trade で既に取得された data_df を利用して data_map を構築する
     data_map = {}
-    if data_df is not None and not data_df.empty:
-        is_multi = isinstance(data_df.columns, pd.MultiIndex)
-        for code_item in targets:
-            code = str(code_item)
-            if realtime_buffers and code in realtime_buffers:
-                data_map[code] = realtime_buffers[code].get_df()
+    is_multi = isinstance(data_df.columns, pd.MultiIndex) if data_df is not None and not data_df.empty else False
+    for code_item in targets:
+        code = str(code_item)
+        if realtime_buffers and code in realtime_buffers:
+            data_map[code] = realtime_buffers[code].get_df()
+        elif data_df is not None and not data_df.empty:
+            ticker = f"{code}.T"
+            if is_multi:
+                if ticker in data_df.columns.get_level_values(0):
+                    data_map[code] = data_df[ticker].dropna()
             else:
-                ticker = f"{code}.T"
-                if is_multi:
-                    if ticker in data_df.columns.get_level_values(0):
-                        data_map[code] = data_df[ticker].dropna()
-                else:
-                    if len(targets) == 1:
-                        data_map[code] = data_df.dropna()
+                if len(targets) == 1:
+                    data_map[code] = data_df.dropna()
 
     for code_item in targets:
         code = str(code_item)

@@ -255,7 +255,7 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                     held_codes = [str(p['code']) for p in portfolio]
                     scan_targets = [c for c in target_codes if str(c) not in held_codes]
                     
-                    candidates = select_best_candidates(scan_targets, broker, df_symbols, regime, 
+                    candidates = select_best_candidates(None, scan_targets, df_symbols, regime, 
                                                        is_simulation=True, realtime_buffers=mock_buffers, 
                                                        current_time_override=current_time, verbose=verbose)
                     
