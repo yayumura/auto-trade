@@ -51,7 +51,7 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
     safe_start = start if start else "None"
     safe_end = end if end else "None"
     safe_period = period if period else "None"
-    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}_v2.pkl"
+    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}_v3.pkl"
     cache_path = os.path.join(cache_dir, cache_filename)
 
     if os.path.exists(cache_path):
@@ -62,11 +62,11 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
         chunk_size = 20
         df_list = []
         
-        # 助走期間（1.5ヶ月分）を考慮した開始日の計算 (Phase 11.1)
+        # 助走期間（4ヶ月分）を考慮した開始日の計算 (Phase 17)
         adjusted_start = start
         if start:
             start_date = pd.to_datetime(start)
-            adjusted_start = (start_date - pd.DateOffset(months=1, days=15)).strftime('%Y-%m-%d')
+            adjusted_start = (start_date - pd.DateOffset(months=4)).strftime('%Y-%m-%d')
 
         for i in range(0, len(tickers), chunk_size):
             chunk = tickers[i:i+chunk_size]

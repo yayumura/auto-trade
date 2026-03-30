@@ -559,14 +559,15 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
             score = 0
             reason = "Unknown"
             
-            # --- フェーズ16: エントリーの抜本的改革（押し目買い戦略への転換） ---
+            # --- フェーズ17: MTF（マルチタイムフレーム）アライメント ---
             if regime == "BULL":
-                if len(df) < 50:
-                    reason = "Not enough data"
+                if len(df) < 400:
+                    reason = "Not enough data (needs 400 for SMA400)"
                     continue
 
                 sma50 = latest.get('SMA50', latest['SMA20'])
-                sma100 = latest.get('SMA100', sma50)
+                sma200 = latest.get('SMA200', sma50)
+                sma400 = latest.get('SMA400', sma200)
                 rsi = latest.get('RSI', 50)
                 is_yang_sen = latest['Close'] > latest['Open']
                 
@@ -576,29 +577,29 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
                     reason = "Morning Noise (Skipping 9:00-10:00)"
                     continue
 
-                # 1. 大局の強さの確認（これは維持）
-                if pd.isna(sma100) or latest['Close'] < sma100:
-                    reason = "HTF Downtrend (Below SMA100)"
+                # 1. 大局（マクロ）の鉄壁フィルター：完全なパーフェクトオーダー
+                # SMA50 > SMA200 > SMA400
+                if pd.isna(sma400) or not (sma50 > sma200 > sma400):
+                    reason = "No Perfect Order (SMA50 > 200 > 400)"
                 else:
-                    # 2. 押し目（短期的によく下がったか）の判定
+                    # 2. 局所（ミクロ）の引き付けとプルトリガー
                     # RSIが45以下に冷えている、または株価がSMA50（約1週間線）付近まで落ちてきたか
                     is_pullback = rsi < 45 or (latest['Close'] <= sma50 * 1.02)
                     
                     if not is_pullback:
                         reason = f"Not Pullback (RSI:{rsi:.1f}, SMA50 dist:{(latest['Close']/sma50 - 1)*100:.1f}%)"
                     else:
-                        # 3. 反発の確認（下げ止まって陽線が出たか、あるいは出来高が平均以上か）
-                        vol_ok = latest['Volume'] > latest['Avg_Vol_15m'] * 1.0
-                        if is_yang_sen or vol_ok:
-                            reason = "Strategy 4.4 Bull Pullback Entry"
+                        # 3. 反発の確認（下げ止まって陽線が出たか）
+                        # 厳しい条件：陽線が絶対条件
+                        if is_yang_sen:
+                            reason = "Strategy 4.5 MTF Pullback Entry"
                             # スコア計算: RSIが低い（売られすぎ）ほど、または出来高が多いほど高得点にする
                             score = max(0, 50 - rsi) * 100
-                            if vol_ok:
+                            if latest['Volume'] > latest['Avg_Vol_15m'] * 1.0:
                                 score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
-                            if is_yang_sen:
-                                score += 50
+                            score += 50
                         else:
-                            reason = "No bounce confirmed (No yang-sen and low volume)"
+                            reason = "No bounce confirmed (No yang-sen)"
 
             elif regime == "RANGE":
                 # 【RSI平均回帰戦略 (Strategy 4.0)】
@@ -672,6 +673,8 @@ def calculate_technicals_for_scan(df):
     df['SMA50'] = df['Close'].rolling(window=50).mean()
     # ▼▼▼ 追加：上位足（約1ヶ月/20営業日）のトレンドライン ▼▼▼
     df['SMA100'] = df['Close'].rolling(window=100).mean()
+    df['SMA200'] = df['Close'].rolling(window=200).mean()
+    df['SMA400'] = df['Close'].rolling(window=400).mean()
     # ▲▲▲ ここまで ▲▲▲
     
     # ATR (14)
