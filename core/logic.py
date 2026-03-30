@@ -375,36 +375,22 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             sell_reason = None
             sell_qty = current_shares
 
-            # --- フェーズ14: スマート・エグジット（ハイブリッド決済） ---
+            # ==========================================
+            # フェーズ21: パニック・リバーサル（逆張り高回転）エグジット
+            # ==========================================
+            actual_stop_line = buy_price - (atr * 2.0)
+            sma20 = float(df['SMA20'].iloc[-1]) if 'SMA20' in df.columns else float('nan')
+            rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else 50.0
 
-            # 視点3：リスクマネージャー（ブレイクイーブン・ストップ）
-            # 含み益がATRの1.5倍に達したら、初期損切りラインを「建値＋微益」に引き上げてリスクをゼロにする
-            if highest_price_db > buy_price + (atr * 1.5):
-                # 手数料やスリッページをカバーするため、建値の+0.2%にストップを置く
-                base_stop_line = buy_price * 1.002 
-            else:
-                # 初期の絶対損切りライン（ATRの2.0倍）
-                base_stop_line = buy_price - (atr * 2.0)
-
-            # 視点1：トレンドフォロワー（ワイド・トレールストップ）
-            # 最高値からATRの4.0倍下がったらトレンド崩壊とみなす（ノイズでは絶対に狩られない広さ）
-            trail_stop_line = highest_price_db - (atr * 4.0)
-
-            # 実際のストップラインは、ベースとトレールのうち「より高い方（安全な方）」を採用
-            actual_stop_line = max(base_stop_line, trail_stop_line)
-
-            # 【重要】損切り判定（窓開け考慮）
+            # 1. 絶対損切り（大暴落の継続）
             if is_simulation and open_price <= actual_stop_line:
                 sell_reason = f"窓開け損切 (Open {open_price:,.1f} <= Stop {actual_stop_line:,.1f})"
                 current_price_raw = open_price # 執行ベース価格を始値に修正
                 current_price = max(low_price, open_price - slippage) # クリップ処理
             elif current_price <= actual_stop_line:
-                if current_price < buy_price:
-                    sell_reason = f"絶対損切 / 建値撤退 (Stop at {actual_stop_line:,.1f})"
-                else:
-                    sell_reason = f"トレール大波利確 (Trail Stop from {highest_price_db:,.1f})"
+                sell_reason = f"絶対損切 (Stop at {actual_stop_line:,.1f})"
 
-            # 時間切れおよび分割利確の判定 (暦日ベース 5日経過を約25バーと見なす)
+            # 時間切れおよび分割利確の判定 (暦日ベース)
             current_dt = current_time_override if current_time_override else datetime.now(JST)
             if hasattr(current_dt, 'to_pydatetime'):
                 current_dt = current_dt.to_pydatetime()
@@ -419,12 +405,13 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
             if not sell_reason:
-                # 視点2：クオンツ・リサーチャー（スマート・タイムストップ）
-                # 約5日以上経過した場合のガベージコレクション
-                if hold_days >= 5.0: 
-                    # 含み益がATRの1.0倍未満（＝勢いがなく停滞している）場合のみ強制決済して資金を解放する
-                    if current_price < buy_price + (atr * 1.0):
-                        sell_reason = "スマートタイムストップ (停滞銘柄の資金解放)"
+                # 2. 利確（平均回帰の達成）
+                if current_price >= sma20 or rsi >= 50:
+                    sell_reason = f"平均回帰完了・利確 (Price: {current_price:,.1f})"
+                
+                # 3. タイムストップ（資金の解放・デッドマネー排除）
+                elif hold_days >= 3.0: 
+                    sell_reason = "タイムストップ (反発不発による資金解放)"
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -539,90 +526,56 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
                 continue
             
             df = calculate_technicals_for_scan(df)
-            if df is None:
+            if df is None or len(df) < 2:
                 continue
             
             latest = df.iloc[-1]
+            previous = df.iloc[-2]
 
-            # --- フェーズ18: 個別銘柄のMTF（長期トレンド）フィルターの厳格化 ---
-            # これを満たさない銘柄は、どれだけRSIが冷えていようが「下落トレンド中の単なる暴落」とみなし即座に排除する
-            sma50 = latest.get('SMA50')
-            sma200 = latest.get('SMA200')
+            # ==========================================
+            # フェーズ21: パニック・リバーサル（逆張り高回転）エントリー
+            # ==========================================
+            rsi = latest.get('RSI', 50)
+            sma20 = latest.get('SMA20')
+            atr = latest.get('ATR')
             close_price = latest.get('Close')
-            
-            if pd.isna(sma50) or pd.isna(sma200):
-                if verbose:
-                    print(f"  [Scan] {code}: MTF Filter Rejection (Not enough data for SMA50 or SMA200)")
-                continue
-                
-            if not (sma50 > sma200 and close_price > sma200):
-                if verbose:
-                    print(f"  [Scan] {code}: MTF Downtrend Rejection (SMA50 <= SMA200 or Close <= SMA200)")
-                continue
+            open_price = latest.get('Open')
 
-            # 【新規】出来高フィルタ
-            vol_surge = False
-            if 'Avg_Vol_15m' in latest and latest['Volume'] > 0:
-                if latest['Volume'] > latest['Avg_Vol_15m'] * MIN_VOLUME_SURGE:
-                    vol_surge = True
+            if pd.isna(sma20) or pd.isna(atr):
+                if verbose:
+                    print(f"  [Scan] {code}: Not enough data for SMA20/ATR")
+                continue
 
             score = 0
             reason = "Unknown"
-            
-            # --- フェーズ17: MTF（マルチタイムフレーム）アライメント ---
-            if regime == "BULL":
-                rsi = latest.get('RSI', 50)
-                is_yang_sen = latest['Close'] > latest['Open']
-                
-                # ▼▼▼ 時間帯フィルター（魔の9時台を回避） ▼▼▼
-                current_candle_time = latest.name
-                if current_candle_time.hour == 9:
-                    reason = "Morning Noise (Skipping 9:00-10:00)"
-                    if verbose: print(f"  [Scan] {code}: {reason}"); 
-                    continue
+
+            # ▼▼▼ 時間帯フィルター（魔の9時台のノイズを一部回避） ▼▼▼
+            current_candle_time = latest.name
+            if current_candle_time.hour == 9:
+                reason = "Morning Noise (Skipping 9:00-10:00)"
+                if verbose: print(f"  [Scan] {code}: {reason}")
+                continue
+
+            # 1. 極限の恐怖判定（ゴムが限界まで引き伸ばされた状態）
+            # RSIが25未満 かつ 株価がSMA20から下方へ極端に乖離（ボリンジャーバンド-2σ近似）
+            is_panic_sell = (rsi < 25) and (close_price < sma20 - (atr * 2.0))
+
+            if is_panic_sell:
+                # 2. 反発の初動確認
+                # 完全に落ちるナイフの先端ではなく、その時間足で「陽線（始値より終値が高い）」になり、
+                # わずかでも買い戻しが入ったことを確認した瞬間にトリガーを引く
+                if close_price > open_price:
+                    # スコアは「RSIが低い（恐怖が強い）ほど高得点」になるように反転計算
+                    score = 100 - rsi 
+                    reason = "Panic Reversal (RSI < 25 & Bounce)"
                     
-                # 局所（ミクロ）の引き付けとプルトリガー
-                is_pullback = rsi < 45 or (latest['Close'] <= sma50 * 1.02)
-                
-                if not is_pullback:
-                    reason = f"Not Pullback (RSI:{rsi:.1f}, SMA50 dist:{(latest['Close']/sma50 - 1)*100:.1f}%)"
-                    if verbose: print(f"  [Scan] {code}: {reason}");
-                    continue
-
-                # 3. 反発の確認（下げ止まって明確な陽線が出たか）
-                if is_yang_sen:
-                    reason = "Strategy 4.5 MTF Pullback Entry"
-                    score = max(0, 50 - rsi) * 100
-                    if latest['Volume'] > latest['Avg_Vol_15m'] * 1.0:
-                        score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
-                    score += 50
+                    if 'Avg_Vol_15m' in latest and latest['Volume'] > 0:
+                        if latest['Volume'] > latest['Avg_Vol_15m'] * 1.0:
+                            score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
                 else:
-                    reason = "No bounce confirmed (No yang-sen)"
-
-            elif regime == "RANGE":
-                # 【RSI平均回帰戦略 (Strategy 4.0)】
-                if len(df) < 20: 
-                    reason = "Not enough data"
-                    continue
-
-                rsi = latest.get('RSI', 50)
-                sma20 = latest['SMA20']
-                is_yang_sen = latest['Close'] > latest['Open']
-
-                # 【変更1】1時間足の適正値へ緩和 (30 -> 45)
-                # 1時間足ではRSIが45付近で反発することが多いため、ストライクゾーンを広げる
-                if rsi > 45: 
-                    reason = f"RSI({rsi:.1f}) not oversold enough"
-                elif latest['Close'] >= sma20:
-                    reason = "Above SMA20"
-                elif not is_yang_sen:
-                    reason = "Falling (Yin-sen)"
-                else:
-                    # 【変更2】スコア計算も緩和したRSI基準(45)に合わせる
-                    score = (45 - rsi) * 20 + (latest['Volume'] / latest['Avg_Vol_15m'] * 50)
-                    reason = "Strategy 4.0 Range RSI Bounce"
+                    reason = "恐怖水準だが反発未確認 (陰線継続)"
             else:
-                reason = f"Unsupported Regime: {regime}"
+                reason = f"平常値 (RSI: {rsi:.1f}, Dist to SMA20: {close_price - sma20:.1f})"
 
             if score > 0:
                 score = min(score, 500)
