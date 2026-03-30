@@ -504,40 +504,31 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
     return remaining_portfolio, account, actions, trade_logs
 
 # --- 【中核3】銘柄スキャン＆期待値評価 ---
-def select_best_candidates(codes: list, broker, df_symbols=None, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True):
+def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None, regime: str = "RANGE", is_simulation: bool = True, realtime_buffers: dict = None, current_time_override=None, verbose=True):
     """
     複数銘柄からテクニカル分析を行い、スコアの高い上位3銘柄を返す。
     """
     candidates = []
     
-    # リアルタイムバッファ未搭載の銘柄のために一括取得（銘柄数が多い場合は分割実行を推奨）
+    # auto_trade で既に取得された data_df を利用して data_map を構築する
     data_map = {}
-    tickers_to_download = []
-    for c in codes:
-        code = str(c)
-        if realtime_buffers and code in realtime_buffers:
-            data_map[code] = realtime_buffers[code].get_df()
-        else:
-            tickers_to_download.append(f"{code}.T")
-
-    if tickers_to_download:
-        try:
-            # バックテスト時は yf 通信を避けるため、realtime_buffers を必須にするか、
-            # 通信が発生することを警告する
-            downloaded = yf.download(tickers_to_download, period="5d", interval="15m", group_by='ticker', threads=False, progress=False)
-            for t in tickers_to_download:
-                code = t.replace(".T", "")
-                if isinstance(downloaded.columns, pd.MultiIndex):
-                    if t in downloaded.columns.levels[0]:
-                        data_map[code] = downloaded[t].dropna()
+    if data_df is not None and not data_df.empty:
+        is_multi = isinstance(data_df.columns, pd.MultiIndex)
+        for code_item in targets:
+            code = str(code_item)
+            if realtime_buffers and code in realtime_buffers:
+                data_map[code] = realtime_buffers[code].get_df()
+            else:
+                ticker = f"{code}.T"
+                if is_multi:
+                    if ticker in data_df.columns.get_level_values(0):
+                        data_map[code] = data_df[ticker].dropna()
                 else:
-                    data_map[code] = downloaded.dropna()
-        except Exception as e:
-            if verbose:
-                print(f"[WARNING] スキャン用データの一括取得に失敗: {e}")
+                    if len(targets) == 1:
+                        data_map[code] = data_df.dropna()
 
-    for code in codes:
-        code = str(code)
+    for code_item in targets:
+        code = str(code_item)
         try:
             df = data_map.get(code)
             if df is None or df.empty:
