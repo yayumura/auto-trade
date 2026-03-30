@@ -40,6 +40,25 @@ PHASE2_STOCKS = [
     "4063", "3402", "4183", "4005", "4901", "5020", "5108", "9101", "9104", "9107"
 ]
 
+def get_topix500_stocks():
+    """
+    data_j.csvからTOPIX500（Core30, Large70, Mid400）の銘柄コードを動的に取得する
+    規模コード: 1=Core30, 2=Large70, 4=Mid400
+    """
+    try:
+        if os.path.exists(DATA_FILE):
+            df = pd.read_csv(DATA_FILE, dtype={'規模コード': str, 'コード': str})
+            # 規模コード 1, 2, 4 の銘柄を抽出
+            topix500 = df[df['規模コード'].isin(['1', '2', '4'])]['コード'].tolist()
+            if topix500:
+                return topix500
+    except Exception as e:
+        print(f"  [Warning] Failed to load TOPIX500 from {DATA_FILE}: {e}")
+    # 失敗した場合はフェイルセーフとしてPHASE2を返す
+    return PHASE2_STOCKS
+
+PHASE3_STOCKS = get_topix500_stocks()
+
 def get_historical_data(target_codes, start=None, end=None, period=None, interval="15m"):
     """過去データのダウンロードと前処理 (Phase 8: キャッシュ機構と分割ダウンロード)"""
     tickers = [f"{code}.T" for code in target_codes] + ["1321.T"]
@@ -413,8 +432,8 @@ def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Trade Bot Backtester')
-    parser.add_argument('--stocks', type=str, default='phase1', choices=['phase1', 'phase2'], help='Stocks set (phase1 or phase2)')
-    parser.add_argument('--all', action='store_true', help='Alias for --stocks phase2')
+    parser.add_argument('--stocks', type=str, default='phase1', choices=['phase1', 'phase2', 'phase3'], help='Stocks set (phase1=34, phase2=100, phase3=TOPIX500)')
+    parser.add_argument('--all', action='store_true', help='Alias for --stocks phase3 (TOPIX500)')
     parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)', default=None)
     parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)', default=None)
     parser.add_argument('--period', type=str, help='Data period (e.g. 60d, 1y)', default='60d')
@@ -422,11 +441,18 @@ if __name__ == "__main__":
     parser.add_argument('--verbose', action='store_true', help='Show detailed regime/buffer logs')
     args = parser.parse_args()
 
-    is_phase2 = args.all or args.stocks == 'phase2'
-    test_universe = PHASE2_STOCKS if is_phase2 else PHASE1_STOCKS
+    if args.all or args.stocks == 'phase3':
+        test_universe = PHASE3_STOCKS
+        mode_name = f"Phase 3 (TOPIX 500 - {len(PHASE3_STOCKS)} stocks)"
+    elif args.stocks == 'phase2':
+        test_universe = PHASE2_STOCKS
+        mode_name = "Phase 2 (100 stocks)"
+    else:
+        test_universe = PHASE1_STOCKS
+        mode_name = "Phase 1 (34 stocks)"
     
     print(f"\n{'='*60}")
-    print(f"Mode: {'Phase 2 (100 stocks)' if is_phase2 else 'Phase 1 (34 stocks)'}")
+    print(f"Mode: {mode_name}")
     print(f"{'='*60}\n")
     
     # 一括でデータをダウンロード
