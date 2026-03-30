@@ -148,8 +148,8 @@ class KabucomBroker(BaseBroker):
         res = self._api_request("GET", "wallet/cash", timeout=10)
         if res and res.status_code == 200:
             data = res.json()
-            cash = data.get('StockAccountWallet', 0)
-            return {"cash": float(cash)}
+            cash = data.get('StockAccountWallet')
+            return {"cash": float(cash) if cash is not None else 0.0}
         
         print(f"⚠️ 余力取得エラー: {res.text if res else 'No Response'}")
         return {"cash": 0}
@@ -181,14 +181,14 @@ class KabucomBroker(BaseBroker):
 
         final_positions = []
         for p in api_positions:
-            if p['LeavesQty'] == 0: continue
+            if p.get('LeavesQty', 0) == 0: continue
             code_sym = str(p['Symbol'])
-            current_price = float(p['CurrentPrice'])
+            current_price = float(p['CurrentPrice']) if p.get('CurrentPrice') is not None else 0.0
             
             if code_sym in local_data:
                 hist = local_data[code_sym]
-                local_buy_price = float(hist.get('buy_price', 0))
-                api_buy_price = float(p['Price'])
+                local_buy_price = float(hist.get('buy_price', 0)) if hist.get('buy_price') is not None else 0.0
+                api_buy_price = float(p['Price']) if p.get('Price') is not None else 0.0
                 
                 # --- [Phase 10] 株式分割・併合の自動検知同期 ---
                 # APIの取得単価とローカルの取得単価に5%以上の乖離がある場合、分割等があったとみなす
@@ -209,8 +209,8 @@ class KabucomBroker(BaseBroker):
                 partial_sold = False
 
             final_positions.append({
-                "code": code_sym, "name": p['SymbolName'], "shares": int(p['LeavesQty']),
-                "buy_price": float(p['Price']), "current_price": current_price,
+                "code": code_sym, "name": p.get('SymbolName', ''), "shares": int(p.get('LeavesQty', 0)),
+                "buy_price": float(p['Price']) if p.get('Price') is not None else 0.0, "current_price": current_price,
                 "highest_price": round(highest_price, 1),
                 "buy_time": buy_time,
                 "partial_sold": partial_sold
