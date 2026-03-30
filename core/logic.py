@@ -496,6 +496,28 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
     # auto_trade で既に取得された data_df を利用して data_map を構築する
     data_map = {}
     is_multi = isinstance(data_df.columns, pd.MultiIndex) if data_df is not None and not data_df.empty else False
+    
+    # --- フェーズ17: マクロ（全体相場）のレジーム・フィルター（Risk-Off判定） ---
+    df_1321 = None
+    if realtime_buffers and '1321' in realtime_buffers:
+        df_1321 = realtime_buffers['1321'].get_df()
+    elif is_multi and '1321.T' in data_df.columns.get_level_values(0):
+        df_1321 = data_df['1321.T'].dropna()
+        
+    nk_risk_off = False
+    if df_1321 is not None and len(df_1321) >= 200:
+        nk_sma100 = df_1321['Close'].rolling(window=100).mean().iloc[-1]
+        nk_sma200 = df_1321['Close'].rolling(window=200).mean().iloc[-1]
+        nk_close = df_1321['Close'].iloc[-1]
+        if pd.notna(nk_sma100) and pd.notna(nk_sma200) and pd.notna(nk_close):
+            if nk_close < nk_sma100 or nk_close < nk_sma200:
+                nk_risk_off = True
+
+    if nk_risk_off:
+        if verbose:
+            print("[Regime] Risk-Off Mode: Nikkei 1321 (Close < SMA100 or SMA200). Skipping ALL entries.")
+        return []
+    # -------------------------------------------------------------------------
     for code_item in targets:
         code = str(code_item)
         if realtime_buffers and code in realtime_buffers:
@@ -522,32 +544,20 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
             
             latest = df.iloc[-1]
 
-            # 【新規】市場トレンドフィルター (Nikkei 1321.T)
-            # 相場全体が下落トレンドの時は「落ちてくるナイフ」を掴まないよう全エントリーを禁止する
-            market_ok = True
-            nk_momentum_50 = 0.0  # 日経平均のモメンタム初期値
+            # --- フェーズ18: 個別銘柄のMTF（長期トレンド）フィルターの厳格化 ---
+            # これを満たさない銘柄は、どれだけRSIが冷えていようが「下落トレンド中の単なる暴落」とみなし即座に排除する
+            sma50 = latest.get('SMA50')
+            sma200 = latest.get('SMA200')
+            close_price = latest.get('Close')
             
-            if realtime_buffers and '1321' in realtime_buffers:
-                nk_df = realtime_buffers['1321'].df
-                if len(nk_df) > 100:
-                    # 最新のSMA100と、1つ前（1時間前）のSMA100を取得して傾きを計算
-                    # 【修正】1時間足で約1ヶ月のトレンドを見るため、20 -> 100 に変更
-                    nk_sma100_current = nk_df['Close'].rolling(window=100).mean().iloc[-1]
-                    
-                    # 【修正】傾きの判定（nk_sma100_current < nk_sma100_prev）を削除し、
-                    # シンプルに「現在値が約1ヶ月の平均線(SMA100)を下回っているか」だけで危険判定を行う
-                    # 【Phase 12.2】強気局面では多少の押し（-1.5%）を許容する
-                    if nk_df['Close'].iloc[-1] < nk_sma100_current * 0.985:
-                        market_ok = False
-                
-                # ▼▼▼ 追加：日経平均自体の50本（約10日）モメンタムを計算 ▼▼▼
-                if len(nk_df) > 50:
-                    nk_momentum_50 = (nk_df['Close'].iloc[-1] - nk_df['Close'].iloc[-50]) / nk_df['Close'].iloc[-50]
-            
-            if not market_ok:
+            if pd.isna(sma50) or pd.isna(sma200):
                 if verbose:
-                    nk_len = len(realtime_buffers['1321'].df) if (realtime_buffers and '1321' in realtime_buffers) else 0
-                    print(f"  [Scan] {code}: Market Trend Rejection (NK Buffer: {nk_len})")
+                    print(f"  [Scan] {code}: MTF Filter Rejection (Not enough data for SMA50 or SMA200)")
+                continue
+                
+            if not (sma50 > sma200 and close_price > sma200):
+                if verbose:
+                    print(f"  [Scan] {code}: MTF Downtrend Rejection (SMA50 <= SMA200 or Close <= SMA200)")
                 continue
 
             # 【新規】出来高フィルタ
@@ -561,13 +571,6 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
             
             # --- フェーズ17: MTF（マルチタイムフレーム）アライメント ---
             if regime == "BULL":
-                if len(df) < 400:
-                    reason = "Not enough data (needs 400 for SMA400)"
-                    continue
-
-                sma50 = latest.get('SMA50', latest['SMA20'])
-                sma200 = latest.get('SMA200', sma50)
-                sma400 = latest.get('SMA400', sma200)
                 rsi = latest.get('RSI', 50)
                 is_yang_sen = latest['Close'] > latest['Open']
                 
@@ -575,31 +578,26 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
                 current_candle_time = latest.name
                 if current_candle_time.hour == 9:
                     reason = "Morning Noise (Skipping 9:00-10:00)"
+                    if verbose: print(f"  [Scan] {code}: {reason}"); 
+                    continue
+                    
+                # 局所（ミクロ）の引き付けとプルトリガー
+                is_pullback = rsi < 45 or (latest['Close'] <= sma50 * 1.02)
+                
+                if not is_pullback:
+                    reason = f"Not Pullback (RSI:{rsi:.1f}, SMA50 dist:{(latest['Close']/sma50 - 1)*100:.1f}%)"
+                    if verbose: print(f"  [Scan] {code}: {reason}");
                     continue
 
-                # 1. 大局（マクロ）の鉄壁フィルター：完全なパーフェクトオーダー
-                # SMA50 > SMA200 > SMA400
-                if pd.isna(sma400) or not (sma50 > sma200 > sma400):
-                    reason = "No Perfect Order (SMA50 > 200 > 400)"
+                # 3. 反発の確認（下げ止まって明確な陽線が出たか）
+                if is_yang_sen:
+                    reason = "Strategy 4.5 MTF Pullback Entry"
+                    score = max(0, 50 - rsi) * 100
+                    if latest['Volume'] > latest['Avg_Vol_15m'] * 1.0:
+                        score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
+                    score += 50
                 else:
-                    # 2. 局所（ミクロ）の引き付けとプルトリガー
-                    # RSIが45以下に冷えている、または株価がSMA50（約1週間線）付近まで落ちてきたか
-                    is_pullback = rsi < 45 or (latest['Close'] <= sma50 * 1.02)
-                    
-                    if not is_pullback:
-                        reason = f"Not Pullback (RSI:{rsi:.1f}, SMA50 dist:{(latest['Close']/sma50 - 1)*100:.1f}%)"
-                    else:
-                        # 3. 反発の確認（下げ止まって陽線が出たか）
-                        # 厳しい条件：陽線が絶対条件
-                        if is_yang_sen:
-                            reason = "Strategy 4.5 MTF Pullback Entry"
-                            # スコア計算: RSIが低い（売られすぎ）ほど、または出来高が多いほど高得点にする
-                            score = max(0, 50 - rsi) * 100
-                            if latest['Volume'] > latest['Avg_Vol_15m'] * 1.0:
-                                score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
-                            score += 50
-                        else:
-                            reason = "No bounce confirmed (No yang-sen)"
+                    reason = "No bounce confirmed (No yang-sen)"
 
             elif regime == "RANGE":
                 # 【RSI平均回帰戦略 (Strategy 4.0)】
