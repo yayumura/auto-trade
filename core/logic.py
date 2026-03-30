@@ -375,16 +375,22 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             sell_reason = None
             sell_qty = current_shares
 
-            # --- フェーズ15: アダプティブ・スイング決済（短期スイング回帰） ---
+            # --- フェーズ14: スマート・エグジット（ハイブリッド決済） ---
 
-            # 1. ベース損切り（絶対防衛ライン）
-            base_stop_line = buy_price - (atr * 2.0)
+            # 視点3：リスクマネージャー（ブレイクイーブン・ストップ）
+            # 含み益がATRの1.5倍に達したら、初期損切りラインを「建値＋微益」に引き上げてリスクをゼロにする
+            if highest_price_db > buy_price + (atr * 1.5):
+                # 手数料やスリッページをカバーするため、建値の+0.2%にストップを置く
+                base_stop_line = buy_price * 1.002 
+            else:
+                # 初期の絶対損切りライン（ATRの2.0倍）
+                base_stop_line = buy_price - (atr * 2.0)
 
-            # 2. アダプティブ・トレールストップ（利益確保ライン）
-            # 1時間足のボラティリティに合わせて、4.0倍から 2.5倍 へとタイトに引き締め
-            trail_stop_line = highest_price_db - (atr * 2.5)
+            # 視点1：トレンドフォロワー（ワイド・トレールストップ）
+            # 最高値からATRの4.0倍下がったらトレンド崩壊とみなす（ノイズでは絶対に狩られない広さ）
+            trail_stop_line = highest_price_db - (atr * 4.0)
 
-            # 実際のストップラインは、より高い方（安全な方）を採用
+            # 実際のストップラインは、ベースとトレールのうち「より高い方（安全な方）」を採用
             actual_stop_line = max(base_stop_line, trail_stop_line)
 
             # 【重要】損切り判定（窓開け考慮）
@@ -394,9 +400,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 current_price = max(low_price, open_price - slippage) # クリップ処理
             elif current_price <= actual_stop_line:
                 if current_price < buy_price:
-                    sell_reason = f"絶対損切 (Stop at {actual_stop_line:,.1f})"
+                    sell_reason = f"絶対損切 / 建値撤退 (Stop at {actual_stop_line:,.1f})"
                 else:
-                    sell_reason = f"スイング利確 (Trail Stop from {highest_price_db:,.1f})"
+                    sell_reason = f"トレール大波利確 (Trail Stop from {highest_price_db:,.1f})"
 
             # 時間切れおよび分割利確の判定 (暦日ベース 5日経過を約25バーと見なす)
             current_dt = current_time_override if current_time_override else datetime.now(JST)
@@ -413,11 +419,12 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
             if not sell_reason:
-                # 3. ガベージコレクション（資金効率化）
-                # 約5営業日経過し、かつ含み益がATR1.5倍未満なら撤退
+                # 視点2：クオンツ・リサーチャー（スマート・タイムストップ）
+                # 約5日以上経過した場合のガベージコレクション
                 if hold_days >= 5.0: 
-                    if current_price < buy_price + (atr * 1.5):
-                        sell_reason = "タイムストップ (資金解放・微益微損撤退)"
+                    # 含み益がATRの1.0倍未満（＝勢いがなく停滞している）場合のみ強制決済して資金を解放する
+                    if current_price < buy_price + (atr * 1.0):
+                        sell_reason = "スマートタイムストップ (停滞銘柄の資金解放)"
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
@@ -552,62 +559,46 @@ def select_best_candidates(data_df: pd.DataFrame, targets: list, df_symbols=None
             score = 0
             reason = "Unknown"
             
-            # 【Strategy 4.2】ハードフィルターを緩和し、スコアリングベースに変更
+            # --- フェーズ16: エントリーの抜本的改革（押し目買い戦略への転換） ---
             if regime == "BULL":
-                # 【SMA20押し目買い戦略 (Strategy 4.2)】
                 if len(df) < 50:
                     reason = "Not enough data"
                     continue
 
-                sma20 = latest['SMA20']
-                sma50 = latest.get('SMA50', sma20)
+                sma50 = latest.get('SMA50', latest['SMA20'])
+                sma100 = latest.get('SMA100', sma50)
                 rsi = latest.get('RSI', 50)
-                momentum_50 = (latest['Close'] - df['Close'].iloc[-50]) / df['Close'].iloc[-50]
                 is_yang_sen = latest['Close'] > latest['Open']
-                is_sma5_up = latest['SMA5'] > df['SMA5'].iloc[-2] if len(df) > 2 else True
-
-                # 必須条件（これらを満たさない場合は足切り）
                 
-                # ▼▼▼ 追加：時間帯フィルター（魔の9時台を回避） ▼▼▼
-                # 1時間足の 9:00 のバーは寄付き直後のノイズが多いため、新規エントリーを見送る
+                # ▼▼▼ 時間帯フィルター（魔の9時台を回避） ▼▼▼
                 current_candle_time = latest.name
                 if current_candle_time.hour == 9:
                     reason = "Morning Noise (Skipping 9:00-10:00)"
                     continue
-                # ▲▲▲ ここまで ▲▲▲
 
-                # ▼▼▼ 変更：市場平均をアウトパフォームしているか（RS判定） ▼▼▼
-                # 【Phase 11】市場追従ベータ（0.5）を適用し、指数暴走時の無理難題を回避する。
-                required_momentum = max(0.025, nk_momentum_50 * 0.5)
-                
-                if momentum_50 < required_momentum: 
-                    reason = f"Underperforming Market (Stock:{momentum_50:.2%} < Req:{required_momentum:.2%})"
-                # ▼▼▼ 追加：マルチタイムフレーム・フィルター（上位足の下落トレンド回避） ▼▼▼
-                elif pd.isna(latest.get('SMA100')) or latest['Close'] < latest['SMA100']:
+                # 1. 大局の強さの確認（これは維持）
+                if pd.isna(sma100) or latest['Close'] < sma100:
                     reason = "HTF Downtrend (Below SMA100)"
-                # ▲▲▲ ここまで ▲▲▲
-                # 【変更】SMA20ではなく、SMA50（約2週間）を下回った場合のみ足切り
-                elif latest['Close'] < latest.get('SMA50', sma20): 
-                    reason = "Below SMA50"
-                # 【Phase 12】RSI上限を 75 から 85 に引き上げ（強いトレンドへの順張りを許可）
-                elif rsi > 85: 
-                    reason = f"RSI Too High ({rsi:.0f})"
-                # 【Phase 12.1】強気相場では1時間の形状よりトレンドを重視。陽線または5時間線上昇で許可。
-                elif not (is_yang_sen or is_sma5_up): 
-                    reason = "No Yang-sen or SMA5 Up"
-                # 【Phase 12】出来高の急増要求を 1.2倍 から 1.0倍 に緩和（平均並みならエントリー許可）
-                elif latest['Volume'] < latest['Avg_Vol_15m'] * 1.0: 
-                    reason = f"Insufficient Vol Surge ({latest['Volume']/latest['Avg_Vol_15m']:.1f}x)"
                 else:
-                    # 【合格】スコア計算
-                    dist_sma20 = (latest['Close'] - sma20) / sma20
-                    # 基本スコア
-                    score = (momentum_50 * 5000) + ((0.03 - abs(dist_sma20)) * 1000)
-                    # ボーナス
-                    if vol_surge: score += 100
-                    if is_yang_sen and is_sma5_up: score += 50
+                    # 2. 押し目（短期的によく下がったか）の判定
+                    # RSIが45以下に冷えている、または株価がSMA50（約1週間線）付近まで落ちてきたか
+                    is_pullback = rsi < 45 or (latest['Close'] <= sma50 * 1.02)
                     
-                    reason = "Strategy 4.3 Bull Entry"
+                    if not is_pullback:
+                        reason = f"Not Pullback (RSI:{rsi:.1f}, SMA50 dist:{(latest['Close']/sma50 - 1)*100:.1f}%)"
+                    else:
+                        # 3. 反発の確認（下げ止まって陽線が出たか、あるいは出来高が平均以上か）
+                        vol_ok = latest['Volume'] > latest['Avg_Vol_15m'] * 1.0
+                        if is_yang_sen or vol_ok:
+                            reason = "Strategy 4.4 Bull Pullback Entry"
+                            # スコア計算: RSIが低い（売られすぎ）ほど、または出来高が多いほど高得点にする
+                            score = max(0, 50 - rsi) * 100
+                            if vol_ok:
+                                score += (latest['Volume'] / latest['Avg_Vol_15m']) * 50
+                            if is_yang_sen:
+                                score += 50
+                        else:
+                            reason = "No bounce confirmed (No yang-sen and low volume)"
 
             elif regime == "RANGE":
                 # 【RSI平均回帰戦略 (Strategy 4.0)】
