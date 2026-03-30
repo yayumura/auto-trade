@@ -375,22 +375,16 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             sell_reason = None
             sell_qty = current_shares
 
-            # --- フェーズ14: スマート・エグジット（ハイブリッド決済） ---
+            # --- フェーズ15: アダプティブ・スイング決済（短期スイング回帰） ---
 
-            # 視点3：リスクマネージャー（ブレイクイーブン・ストップ）
-            # 含み益がATRの1.5倍に達したら、初期損切りラインを「建値＋微益」に引き上げてリスクをゼロにする
-            if highest_price_db > buy_price + (atr * 1.5):
-                # 手数料やスリッページをカバーするため、建値の+0.2%にストップを置く
-                base_stop_line = buy_price * 1.002 
-            else:
-                # 初期の絶対損切りライン（ATRの2.0倍）
-                base_stop_line = buy_price - (atr * 2.0)
+            # 1. ベース損切り（絶対防衛ライン）
+            base_stop_line = buy_price - (atr * 2.0)
 
-            # 視点1：トレンドフォロワー（ワイド・トレールストップ）
-            # 最高値からATRの4.0倍下がったらトレンド崩壊とみなす（ノイズでは絶対に狩られない広さ）
-            trail_stop_line = highest_price_db - (atr * 4.0)
+            # 2. アダプティブ・トレールストップ（利益確保ライン）
+            # 1時間足のボラティリティに合わせて、4.0倍から 2.5倍 へとタイトに引き締め
+            trail_stop_line = highest_price_db - (atr * 2.5)
 
-            # 実際のストップラインは、ベースとトレールのうち「より高い方（安全な方）」を採用
+            # 実際のストップラインは、より高い方（安全な方）を採用
             actual_stop_line = max(base_stop_line, trail_stop_line)
 
             # 【重要】損切り判定（窓開け考慮）
@@ -400,9 +394,9 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
                 current_price = max(low_price, open_price - slippage) # クリップ処理
             elif current_price <= actual_stop_line:
                 if current_price < buy_price:
-                    sell_reason = f"絶対損切 / 建値撤退 (Stop at {actual_stop_line:,.1f})"
+                    sell_reason = f"絶対損切 (Stop at {actual_stop_line:,.1f})"
                 else:
-                    sell_reason = f"トレール大波利確 (Trail Stop from {highest_price_db:,.1f})"
+                    sell_reason = f"スイング利確 (Trail Stop from {highest_price_db:,.1f})"
 
             # 時間切れおよび分割利確の判定 (暦日ベース 5日経過を約25バーと見なす)
             current_dt = current_time_override if current_time_override else datetime.now(JST)
@@ -419,12 +413,11 @@ def manage_positions(portfolio: list, account: dict, broker, regime: str = "RANG
             hold_days = (current_dt - buy_dt).total_seconds() / 86400
 
             if not sell_reason:
-                # 視点2：クオンツ・リサーチャー（スマート・タイムストップ）
-                # 約5日以上経過した場合のガベージコレクション
+                # 3. ガベージコレクション（資金効率化）
+                # 約5営業日経過し、かつ含み益がATR1.5倍未満なら撤退
                 if hold_days >= 5.0: 
-                    # 含み益がATRの1.0倍未満（＝勢いがなく停滞している）場合のみ強制決済して資金を解放する
-                    if current_price < buy_price + (atr * 1.0):
-                        sell_reason = "スマートタイムストップ (停滞銘柄の資金解放)"
+                    if current_price < buy_price + (atr * 1.5):
+                        sell_reason = "タイムストップ (資金解放・微益微損撤退)"
 
             if not sell_reason:
                 new_highest = max(highest_price_db, current_price) / split_ratio if split_ratio > 0 else max(highest_price_db, current_price)
