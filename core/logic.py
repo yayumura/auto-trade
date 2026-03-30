@@ -86,8 +86,8 @@ class RealtimeBuffer:
                 'Open': price, 'High': price, 'Low': price, 'Close': price, 'Volume': delta_volume
             }], index=[bar_start])
             self.df = pd.concat([self.df, new_row])
-            if len(self.df) > 200:
-                self.df = self.df.iloc[-200:]
+            if len(self.df) > 500:
+                self.df = self.df.iloc[-500:]
                 
         return self.df
 

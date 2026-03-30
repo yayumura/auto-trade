@@ -70,7 +70,7 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
     safe_start = start if start else "None"
     safe_end = end if end else "None"
     safe_period = period if period else "None"
-    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}_v3.pkl"
+    cache_filename = f"hist_{len(tickers)}stocks_{safe_start}_{safe_end}_{safe_period}_{interval}_v4.pkl"
     cache_path = os.path.join(cache_dir, cache_filename)
 
     if os.path.exists(cache_path):
@@ -85,7 +85,7 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
         adjusted_start = start
         if start:
             start_date = pd.to_datetime(start)
-            adjusted_start = (start_date - pd.DateOffset(months=4)).strftime('%Y-%m-%d')
+            adjusted_start = (start_date - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
 
         for i in range(0, len(tickers), chunk_size):
             chunk = tickers[i:i+chunk_size]
@@ -138,7 +138,7 @@ def get_historical_data(target_codes, start=None, end=None, period=None, interva
     df_1321_full = full_data['1321.T'].dropna() if '1321.T' in full_data.columns.levels[0] else pd.DataFrame()
     return full_data, df_1321_full
 
-def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initial_cash_val=1000000, verbose=False, show_trades=True):
+def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initial_cash_val=1000000, verbose=False, show_trades=True, interval="15m"):
     """特定のタイムライン上でバックテストを実行"""
     if show_trades or verbose:
         print(f"  Session Start: {timeline[0].strftime('%Y-%m-%d')} to {timeline[-1].strftime('%Y-%m-%d')} ({len(timeline)} steps)")
@@ -264,82 +264,88 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
                 pending_exits.append(log)
 
         # --- D. 新規買付判定 ---
-        market_time = current_time.time()
-        start_buy = datetime.strptime("09:30", "%H:%M").time()
-        end_buy = datetime.strptime("14:00", "%H:%M").time()
+        # 1d（日足）の場合は時間フィルターと分単位のチェックをスキップする (Phase 22 Fix)
+        if interval == "1d":
+            should_scan = (len(portfolio) < MAX_POSITIONS)
+        else:
+            market_time = current_time.time()
+            start_buy = datetime.strptime("09:30", "%H:%M").time()
+            end_buy = datetime.strptime("14:00", "%H:%M").time()
+            is_open = (start_buy <= market_time < end_buy)
+            is_not_lunch = not (current_time.hour == 11 and current_time.minute > 30) and not (current_time.hour == 12)
+            is_on_quarter = (current_time.minute in [0, 15, 30, 45])
+            should_scan = (is_open and is_on_quarter and is_not_lunch and len(portfolio) < MAX_POSITIONS)
 
-        if start_buy <= market_time < end_buy and len(portfolio) < MAX_POSITIONS:
-            if current_time.minute in [0, 15, 30, 45]:
-                if not (current_time.hour == 11 and current_time.minute > 30) and not (current_time.hour == 12):
-                    held_codes = [str(p['code']) for p in portfolio]
-                    scan_targets = [c for c in target_codes if str(c) not in held_codes]
+        if should_scan:
+            held_codes = [str(p['code']) for p in portfolio]
+            scan_targets = [c for c in target_codes if str(c) not in held_codes]
+            
+            candidates = select_best_candidates(None, scan_targets, df_symbols, regime, 
+                                               is_simulation=True, realtime_buffers=mock_buffers, 
+                                               current_time_override=current_time, verbose=verbose)
+            
+            if candidates:
+                best = candidates[0]
+                code = best['code']
+                
+                # 【重要】執行を「次の足」に遅延させる (Lookahead Bias 回避)
+                if i + 1 < len(timeline):
+                    next_time = timeline[i+1]
+                    ticker_sym = f"{code}.T"
                     
-                    candidates = select_best_candidates(None, scan_targets, df_symbols, regime, 
-                                                       is_simulation=True, realtime_buffers=mock_buffers, 
-                                                       current_time_override=current_time, verbose=verbose)
-                    
-                    if candidates:
-                        best = candidates[0]
-                        code = best['code']
+                    # 次足のデータを確認
+                    if ticker_sym in full_data.columns.levels[0]:
+                        next_bar = full_data[ticker_sym].loc[next_time]
+                        if next_bar.empty or pd.isna(next_bar['Open']):
+                            continue
                         
-                        # 【重要】執行を「次の足」に遅延させる (Lookahead Bias 回避)
-                        if i + 1 < len(timeline):
-                            next_time = timeline[i+1]
-                            ticker_sym = f"{code}.T"
-                            
-                            # 次足のデータを確認
-                            if ticker_sym in full_data.columns.levels[0]:
-                                next_bar = full_data[ticker_sym].loc[next_time]
-                                if next_bar.empty or pd.isna(next_bar['Open']):
-                                    continue
-                                
-                                next_open = float(next_bar['Open'])
-                                next_high = float(next_bar['High'])
-                                next_vol = float(next_bar['Volume']) if 'Volume' in next_bar else 0
-                                
-                                if next_open <= 0: continue
+                        next_open = float(next_bar['Open'])
+                        next_high = float(next_bar['High'])
+                        next_vol = float(next_bar['Volume']) if 'Volume' in next_bar else 0
+                        
+                        if next_open <= 0: continue
 
-                                # スリッページ計算 (買付は Open + slippage)
-                                tick_size = get_tick_size(next_open)
-                                slippage = max(tick_size, best['atr'] * 0.01)
-                                buy_price = min(next_high, next_open + slippage) # クリップ処理
-                                
-                                # 資金管理ロジック
-                                current_stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-                                total_equity = account['cash'] + current_stock_value
-                                risk_amount = total_equity * MAX_RISK_PER_TRADE
-                                current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-                                risk_per_share = best['atr'] * current_sl_mult
-                                
-                                ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
-                                # 1銘柄への最大投資額を制限 (資産の30% もしくは 固定2000万円の小さい方)
-                                max_inv_limit = min(total_equity * 0.3, 20000000)
-                                max_inv = min(max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), max_inv_limit)
+                        # スリッページ計算 (買付は Open + slippage)
+                        tick_size = get_tick_size(next_open)
+                        slippage = max(tick_size, best['atr'] * 0.01)
+                        buy_price = min(next_high, next_open + slippage) # クリップ処理
+                        
+                        # 資金管理ロジック
+                        current_stock_value = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                        total_equity = account['cash'] + current_stock_value
+                        risk_amount = total_equity * MAX_RISK_PER_TRADE
+                        current_sl_mult = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
+                        risk_per_share = best['atr'] * current_sl_mult
+                        
+                        ideal_shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+                        # 1銘柄への最大投資額を制限 (資産の30% もしくは 固定2000万円の小さい方)
+                        max_inv_limit = min(total_equity * 0.3, 20000000)
+                        max_inv = min(max(total_equity * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), max_inv_limit)
 
-                                max_shares_inv = int(max_inv // buy_price)
-                                max_shares_cash = int(account['cash'] // buy_price)
-                                
-                                # 【新規】流動性制限 (次の足の出来高の1.0%まで、最低100株。0なら100株とする)
-                                liquidity_limit = max(100, int(next_vol * 0.01))
-                                
-                                raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash, liquidity_limit)
-                                shares_to_buy = (raw_shares // 100) * 100
-                                
-                                cost = buy_price * shares_to_buy
-                                
-                                if shares_to_buy >= 100 and account['cash'] >= cost:
-                                    broker.execute_market_order(best['code'], shares_to_buy, "buy", price=buy_price)
-                                    portfolio.append({
-                                        "code": best['code'], "name": best['name'],
-                                        "buy_price": buy_price, "shares": shares_to_buy,
-                                        "buy_time": next_time, "atr": best['atr']
-                                    })
-                                    account['cash'] -= cost
-                                    if show_trades or verbose:
-                                        print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Vol: {next_vol:.0f})")
-                        else:
-                            if verbose:
-                                print(f"    [{current_time.strftime('%m/%d %H:%M')}] Signal on Last Bar: {code} (Execution skipped)")
+                        max_shares_inv = int(max_inv // buy_price)
+                        max_shares_cash = int(account['cash'] // buy_price)
+                        
+                        # 【新規】流動性制限 (次の足の出来高の1.0%まで、最低100株。0なら100株とする)
+                        liquidity_limit = max(100, int(next_vol * 0.01))
+                        
+                        raw_shares = min(ideal_shares, max_shares_inv, max_shares_cash, liquidity_limit)
+                        shares_to_buy = (raw_shares // 100) * 100
+                        
+                        cost = buy_price * shares_to_buy
+                        
+                        if shares_to_buy >= 100 and account['cash'] >= cost:
+                            broker.execute_market_order(best['code'], shares_to_buy, "buy", price=buy_price)
+                            portfolio.append({
+                                "code": best['code'], "name": best['name'],
+                                "buy_price": buy_price, "shares": shares_to_buy,
+                                "buy_time": next_time, "atr": best['atr']
+                            })
+                            account['cash'] -= cost
+                            if show_trades or verbose:
+                                print(f"    [{next_time.strftime('%m/%d %H:%M')}] Buy: {best['code']} {shares_to_buy}sh @ {buy_price:.1f} (Vol: {next_vol:.0f})")
+                else:
+                    if verbose:
+                        print(f"    [{current_time.strftime('%m/%d %H:%M')}] Signal on Last Bar: {code} (Execution skipped)")
 
     # 結果集計
     final_stock_value = 0
@@ -378,7 +384,7 @@ def run_backtest_session(target_codes, full_data, df_1321_full, timeline, initia
         "held_count": len(portfolio)
     }
 
-def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days=5, start_date=None, end_date=None):
+def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days=5, start_date=None, end_date=None, interval="15m"):
     """複数期間に分割してバックテストを実行"""
     print(f"\n{'='*60}\nMulti-Period Backtest Start (Window: {window_days} days)\n{'='*60}")
     
@@ -411,7 +417,7 @@ def run_multi_period_backtest(target_codes, full_data, df_1321_full, window_days
         
         if len(timeline) < 10: continue
         
-        res = run_backtest_session(target_codes, full_data, df_1321_full, timeline, verbose=False, show_trades=False)
+        res = run_backtest_session(target_codes, full_data, df_1321_full, timeline, verbose=False, show_trades=False, interval=interval)
         results.append(res)
         print(f"  Result: {res['start_date']} - {res['end_date']} | Profit: {res['profit_pct']:+.2f}% | Trades: {res['trade_count']}")
 
@@ -460,7 +466,7 @@ if __name__ == "__main__":
     
     if full_data is not None:
         # 1. 複数期間のサマリーを表示
-        run_multi_period_backtest(test_universe, full_data, df_1321_full, window_days=5, start_date=args.start, end_date=args.end)
+        run_multi_period_backtest(test_universe, full_data, df_1321_full, window_days=5, start_date=args.start, end_date=args.end, interval=args.interval)
         
         # 2. 指定期間（または全期間）の統合サマリーを表示
         print("\n" + "="*40)
@@ -480,7 +486,7 @@ if __name__ == "__main__":
             timeline = all_times[test_start_idx:]
             
         if len(timeline) > 0:
-            res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=args.verbose, show_trades=True)
+            res = run_backtest_session(test_universe, full_data, df_1321_full, timeline, verbose=args.verbose, show_trades=True, interval=args.interval)
         
         print("\n" + "="*40)
         print("Backtest Result Summary")
