@@ -117,7 +117,8 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
         "profit_pct": (total_assets - initial_cash_val) / initial_cash_val * 100, 
         "trade_count": len(trade_history),
         "monthly_win_rate": monthly_win_rate * 100,
-        "m_returns": m_returns
+        "m_returns": m_returns,
+        "monthly_assets": monthly_assets
     }
 
 if __name__ == "__main__":
@@ -151,9 +152,19 @@ if __name__ == "__main__":
     
     res = run_truth_session(univ, bundle, timeline, max_pos=args.max_pos, show_trades=args.verbose)
     
-    m_ret_avg = sum(res['m_returns']) / len(res['m_returns']) if res['m_returns'] else 0
     import numpy as np
+    m_ret_avg = sum(res['m_returns']) / len(res['m_returns']) if res['m_returns'] else 0
     m_ret_std = np.std(res['m_returns']) if res['m_returns'] else 1
     m_sharpe = (m_ret_avg / m_ret_std) if m_ret_std > 0 else 0
 
     print(f"\nFINAL VERIFIED RESULT: Market:{args.stocks.upper()} B:{args.breakout} E:{args.exit} Pos:{args.max_pos} | Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']} | MonthlyWin:{res['monthly_win_rate']:.1f}% Sharpe:{m_sharpe:.3f}")
+
+    print(f"\n--- MONTHLY PERFORMANCE REPORT ---")
+    print(f"{'Month':<7} | {'Total Asset':>15} | {'Return':>10}")
+    print("-" * 40)
+    prev_val = INITIAL_CASH
+    for month in sorted(res['monthly_assets'].keys()):
+        curr_val = res['monthly_assets'][month]
+        m_ret = (curr_val - prev_val) / prev_val * 100
+        print(f"{month:<7} | {int(curr_val):>12,d} JPY | {m_ret:>+8.2f}%")
+        prev_val = curr_val
