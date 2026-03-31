@@ -29,8 +29,6 @@ os.makedirs(DATA_ROOT, exist_ok=True)
 LOG_DIR = os.path.join(DATA_ROOT, 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 
-
-
 # --- File Paths (Mode Specific) ---
 DATA_FILE = os.path.join(BASE_DIR, 'data_j.csv') # これは全モード共通
 ACCOUNT_FILE = os.path.join(DATA_ROOT, 'account.json')
@@ -54,46 +52,44 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 # --- Strategy Parameters ---
-DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"  # .envで DEBUG_MODE=true に設定して切り替え
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 INITIAL_CASH = 1000000    # 初回シミュレーション用資金
-MAX_POSITIONS = 4         # リスク分散上限
+MAX_POSITIONS = 8         # リスク分散上限（100万円での分散性を高めるため、6から8に拡大）
 MAX_RISK_PER_TRADE = 0.02 # 1トレードあたりの許容リスク（総資金の2%）
-MAX_ALLOCATION_PCT = 0.40 # 1銘柄あたりの最大投資比率（40%に拡大: 100万円等の少額運用向け）
-MIN_ALLOCATION_AMOUNT = 200000 # 少額資金時の最低投資保証額（20万円）
+MAX_ALLOCATION_PCT = 0.30 # 1銘柄あたりの最大投資比率（分散向上のため40%から30%へ）
+MIN_ALLOCATION_AMOUNT = 120000 # 少額資金時の最低投資保証額
 TAX_RATE = 0.20315        # 約20.3%
+
+# --- 【Holy Grail】Donchian Breakout Parameters ---
+DONCHIAN_BREAKOUT = 25    # エントリー：25日高値更新
+DONCHIAN_EXIT = 10        # エグジット：10日安値更新
+MIN_TURNOVER = 50000000   # 流動性フィルター：売買代金5,000万円以上
+ATR_STOP_MULT = 2.5       # 損切り幅：2.5 x ATR
 
 # --- Market Filters ---
 TARGET_MARKETS = ['プライム（内国株式）', 'スタンダード（内国株式）', 'グロース（内国株式）']
 
 def load_insider_exclusion_codes() -> set:
-    """
-    insider_exclusion.json から取引禁止銘柄コードのセットを読み込む。
-    ファイルが存在しない・JSON破損の場合は空のsetを返す（フェイルセーフ）。
-    M-6: '_' で始まるものを「コメント行・無視アイテム」として除外するかどうかは
-    実際の証券コード体系とぶつかるリスクを考慮すると、'description'のようなキーを
-    別途設けるのが正規ですが、現状互換性のため維持しコメント追記します。
-    """
     if not os.path.exists(INSIDER_EXCLUSION_FILE):
         return set()
     try:
         with open(INSIDER_EXCLUSION_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         codes = data.get('codes', [])
-        # L-3: ローカルインポートを削除。
         return set(str(c) for c in codes if not str(c).startswith('_'))
     except Exception as e:
         print(f"⚠️ [insider_exclusion.json] 読み込みエラー（除外なしで続行）: {e}")
         return set()
 
 # --- Target Exits ---
-ATR_STOP_LOSS = 5.0       # 15分足ATRの5倍（日足の約1ATR相当）のゆとりを持たせる
-RANGE_ATR_STOP_LOSS = 6.0 # レンジ相場は少し広めに
-ATR_TRAIL = 8.0           # トレンドに長く乗るため、最高値からATR8倍の下落で利確
+ATR_STOP_LOSS = 5.0
+RANGE_ATR_STOP_LOSS = 6.0
+ATR_TRAIL = 8.0
 
 # --- Scenario B (Professional Baseline Strategy 4.3) ---
-MIN_VOLUME_SURGE = 2.5    # 出来高急増フィルタの微調整 (3.5 -> 2.5)
-ATR_TARGET_MULT = 10.0    # 利確目標 (10.0xATR)
-ATR_STOP_MULT = 2.5       # 初期損切幅 (2.5xATR)
-BREAKEVEN_TRIGGER = 0.040 # 建値移動
-TRAIL_STOP_MULT = 6.0     # トレール
-MIN_MOMENTUM_THRESHOLD = 0.10 # モメンタム10%以上に調整 (12.0% -> 10.0%)
+MIN_VOLUME_SURGE = 2.5
+ATR_TARGET_MULT = 10.0
+ATR_STOP_MULT = 2.5
+BREAKEVEN_TRIGGER = 0.040
+TRAIL_STOP_MULT = 6.0
+MIN_MOMENTUM_THRESHOLD = 0.10

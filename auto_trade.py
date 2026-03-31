@@ -131,7 +131,8 @@ def main():
             send_discord_notify(msg)
         except:
             pass
-        time.sleep(10)
+        time.sleep(1)
+        sys.exit(1)
     finally:
         release_lock()
 

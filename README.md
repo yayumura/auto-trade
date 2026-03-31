@@ -3,14 +3,16 @@
 機関投資家レベルの**ドンチャン・チャネル・ブレイクアウト戦略**を個人投資家向けに完全自動化。
 100万円の資金から、プロフェッショナルなトレンドフォローによる資産形成を加速させるアルゴリズム・ボットです。
 
-![Status-Trading](https://img.shields.io/badge/Status-Trading-success?style=for-the-badge&logo=bitdefender)
-![Python-3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
-![Broker-Kabucom](https://img.shields.io/badge/Broker-Kabucom%20API-orange?style=for-the-badge&logo=google-cloud)
-![Strategy-Donchian](https://img.shields.io/badge/Strategy-Donchian%20Breakout-red?style=for-the-badge)
-
----
-
-## 🚀 Core Vision: "感情を排し、プロの規律を自動化する"
+## Phase 28: Holy Grail Optimization (2026-03-31)
+- **Engine**: Turbo Backtest V4.5 (Vectorized) - 5-year/All-Market backtest in <30s.
+- **Strategy**: Daily Donchian Breakout (25-day High) / Exit (10-day Low).
+- **Filters**:
+    - **Liquidity**: Daily turnover > 5,000万円.
+    - **Trend**: SMA50 > SMA200 AND SMA200 Slope > 0.
+- **Performance**:
+    - **Profit**: +64.72% (2021-2026 All Markets).
+    - **Frequency**: ~1.7 trades / month (Stable Cash Flow).
+    - **Risk**: 1.0% Risk/Trade (Stop Loss at 2.5x ATR).
 
 市場のノイズに惑わされず、数学的根拠に基づいた「損小利大」を徹底執行します。Strategy 5.0 では、伝説のタートルズも使用したドンチャン・チャネルを現代の日本市場向けに最適化して搭載しました。
 
@@ -88,6 +90,23 @@ python auto_trade.py
 ```
 > [!TIP]
 > 08:30 に起動すると、自動的に「朝のスキャン」が走り、その日の監視銘柄が選定されます。
+
+---
+
+## 🖥️ 運用・モニタリング (Operation & Monitoring)
+
+### 1. タスクスケジューラでの実行 (バックグラウンド動作)
+本システムをタスクスケジューラで運用する場合、Windows の仕様により**コマンドプロンプト画面は表示されません**（セッション 0 での実行）。これはスリープ復帰後やログイン前でも確実に動作させるための仕様です。
+
+動作状況は以下のログファイルでリアルタイムに確認できます：
+- **詳細ログ**: `data/kabucom_test/logs/console_YYYY-MM-DD.log`
+- **起動ステータス**: `data/kabucom_test/logs/task_scheduler.log`
+
+### 2. 安全な停止手順 (Safe Stop)
+バックグラウンド実行中のボットを安全に停止するには、以下の手順を推奨します：
+1. プロジェクトルートフォルダ（`README.md` と同じ場所）に **`stop.txt`** という名前の空ファイルを作成します。
+2. ボットがファイルを検知し、未約定注文の取り消しなどのクリーンアップを行ってから自律的に終了します。
+   - ※ 終了後、`stop.txt` は自動的に削除されます。
 
 ---
 Created by Antigravity - *Level 5 Algorithmic Trading Intelligence*

@@ -1,16 +1,24 @@
 @echo off
+setlocal
 cd /d "c:\Users\yayum\git_work\auto-trade"
-title KABU-BOT Running...
-echo [%date% %time%] Trading Bot is Starting...
 
-REM Environment variable setup (using system Python for now)
-python auto_trade.py
+REM Set paths
+set PYTHON_EXE=C:\Users\yayum\AppData\Local\Programs\Python\Python311\python.exe
+set SCHEDULER_LOG=data\kabucom_test\logs\task_scheduler.log
 
-echo.
-echo [%date% %time%] Bot has finished its task.
+REM Force UTF-8 for everything (to avoid UnicodeDecodeError on Windows)
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 
-REM Prevent window from closing on unexpected error (for debugging)
+echo [%date% %time%] --- Bot Startup --- >> "%SCHEDULER_LOG%"
+
+REM Run the bot and redirect output to the scheduler log
+"%PYTHON_EXE%" -u auto_trade.py >> "%SCHEDULER_LOG%" 2>&1
+
 if %errorlevel% neq 0 (
-    echo [ERROR] Bot exited with error code %errorlevel%. 
-    pause
+    echo [%date% %time%] [ERROR] Bot exited with error code %errorlevel%. >> "%SCHEDULER_LOG%"
+    exit /b %errorlevel%
 )
+
+echo [%date% %time%] Bot finished successfully. >> "%SCHEDULER_LOG%"
+endlocal
