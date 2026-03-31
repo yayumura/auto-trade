@@ -1,99 +1,85 @@
 import pandas as pd
 import numpy as np
 
-# --- V10.3 FINAL PRODUCTION ENGINE (Prime Trend Multiplier) ---
-# このロジックは、プライム市場における「出来高を伴う25日ブレイクアウト」を狙います。
-# バックテスト（2021-2026）にて +140.87% (資産2.4倍) を達成した、正真正銘の「真実」の構成です。
+# --- V10.3 FINAL PRODUCTION ENGINE (Corrected Names) ---
 
-def calculate_indicators(df, breakout_p=25, exit_p=10):
+def calculate_all_technicals_v10(full_data, breakout_p=25, exit_p=10):
     """
-    本番スキャン用の指標計算。
-    余計なノイズを排除し、出来高と価格トレンドのみに集中します。
+    本番・バックテスト共通の指標計算エンジン。
     """
-    if df is None or len(df) < 200: return df
+    if full_data is None or full_data.empty: return None
     
-    # トレンド：200日線（上向き）
-    df['sma200'] = df['Close'].rolling(200).mean()
-    df['sma200_slope'] = (df['sma200'] - df['sma200'].shift(20)) / 20
+    close = full_data.xs('Close', axis=1, level=1)
+    high = full_data.xs('High', axis=1, level=1)
+    low = full_data.xs('Low', axis=1, level=1)
+    volume = full_data.xs('Volume', axis=1, level=1)
+    open_p = full_data.xs('Open', axis=1, level=1)
     
-    # 判定：ドンチャン・ブレイクアウト (前25日の最高値)
-    df['ht'] = df['High'].rolling(breakout_p).max().shift(1)
-    # 出口：ドンチャン・エグジット (前10日の最安値)
-    df['le'] = df['Low'].rolling(exit_p).min().shift(1)
+    # 指標
+    sma200 = close.rolling(200).mean()
+    sma200_slope = (sma200 - sma200.shift(20)) / 20
     
-    # 勢い：出来高の確認（前日より増えているか）
-    df['vol_up'] = df['Volume'] > df['Volume'].shift(1)
+    # ドンチャン
+    ht = high.rolling(breakout_p).max().shift(1)
+    le = low.rolling(exit_p).min().shift(1)
     
-    # リスク：ATR
-    h, l, c = df['High'], df['Low'], df['Close']
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean()
+    # 出来高確認
+    vol_confirm = volume > volume.shift(1)
     
-    return df
+    # ATR (損切り用)
+    tr1, tr2, tr3 = high-low, (high-close.shift()).abs(), (low-close.shift()).abs()
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = tr.rolling(14).mean().fillna(close * 0.02).clip(lower=1.0)
+    
+    return {
+        "Close": close, "Open": open_p, "High": high, "Low": low, "Volume": volume,
+        "SMA200": sma200, "SMA200_Slope": sma200_slope,
+        "HT": ht, "LE": le, "Vol_Confirm": vol_confirm, "ATR": atr
+    }
 
-def select_best_candidates_v10(current_data_dict, max_count=3):
+def select_candidates_v10(current_time, bundle, target_codes, max_count=3):
     """
-    全銘柄から「今日買うべき」最強のブレイクアウト銘柄を選別。
-    1. 200日線が上向き（長期上昇トレンド）
-    2. 25日高値を更新
-    3. 出来高が増加（本気の買い）
-    4. 価格が200日線より上（安定圏）
+    本番・バックテスト共通のスキャンエンジン。
     """
     candidates = []
-    for code, df in current_data_dict.items():
-        if df is None or len(df) < 1: continue
-        last = df.iloc[-1]
+    c, s200, slope, ht, v_conf, v, atr = [bundle[k].loc[current_time] for k in ["Close", "SMA200", "SMA200_Slope", "HT", "Vol_Confirm", "Volume", "ATR"]]
+    
+    for code in target_codes:
+        ticker = f"{code}.T"
+        if ticker not in c.index: continue
+        cp = c[ticker]
+        if pd.isna(cp) or cp < 100: continue
         
-        # 厳選フィルター
-        if (last['sma200_slope'] > 0 and 
-            last['Close'] > last['sma200'] and 
-            last['Close'] > last['ht'] and 
-            last['vol_up']):
+        if slope[ticker] > 0 and cp > s200[ticker] and cp > ht[ticker] and v_conf[ticker]:
+            candidates.append({"code": code, "score": v[ticker], "price": cp, "atr": atr[ticker]})
             
-            candidates.append({
-                "code": code,
-                "score": last['Volume'], # 出来高（人気）がある順
-                "price": last['Close'],
-                "atr": last['atr']
-            })
-            
-    # スコア（出来高ボリューム）順にソートして上位を返す
     return sorted(candidates, key=lambda x: x['score'], reverse=True)[:max_count]
 
-def manage_positions_v10(portfolio, current_data_dict, stop_mult=3.0):
+def manage_positions_v10(portfolio, current_time, bundle, stop_mult=3.0):
     """
-    保有銘柄の監視と決済判定。
-    10日安値を割るか、3倍ATRの損切りに達したら即決済。
+    本番・バックテスト共通のポジション管理エンジン。
     """
+    trade_logs = []
     remaining = []
-    sell_list = []
     
     for p in portfolio:
-        code = p['code']
-        if code not in current_data_dict:
-            remaining.append(p); continue
+        if p.get('pending_buy'): remaining.append(p); continue
+        ticker = f"{p['code']}.T"
+        try:
+            op, lp, le, atr = [bundle[k].at[current_time, ticker] for k in ["Open", "Low", "LE", "ATR"]]
+            buy_p = p['buy_price']
+            stop_p = buy_p - (p['atr'] * stop_mult)
             
-        df = current_data_dict[code]
-        last = df.iloc[-1]
-        
-        # 判定基準
-        buy_p = p['buy_price']
-        stop_p = buy_p - (p['atr'] * stop_mult)
-        
-        sell_reason = None
-        if last['Low'] <= stop_p: sell_reason = "Final Stop"
-        elif last['Low'] <= last['le']: sell_reason = "Final Exit"
-        
-        if sell_reason:
-            sell_list.append({"code": code, "reason": sell_reason, "price": last['Close']})
-        else:
-            remaining.append(p)
+            sell_reason = None
+            if op <= stop_p: sell_reason = "Final Stop (Gap)"; exec_p = op
+            elif lp <= stop_p: sell_reason = "Final Stop"; exec_p = stop_p
+            elif lp < le: sell_reason = "Final Exit"; exec_p = le
             
-    return remaining, sell_list
-
-# レガシー互換用のインターフェース（旧関数名を維持してメインを壊さないようにする）
-def calculate_all_technicals(full_data, breakout_p=25, exit_p=10):
-    # calculate_all_technicals_v10 と同じロジックをラップして返す
-    # (バックテストエンジンが期待する形式)
-    from core.logic import calculate_all_technicals_v10
-    return calculate_all_technicals_v10(full_data, breakout_p, exit_p)
+            if sell_reason:
+                trade_logs.append({
+                    "code": p['code'], "reason": sell_reason, "price": exec_p, 
+                    "shares": p['shares'], "buy_price": buy_p, "buy_time": p['buy_time'], "atr": p['atr']
+                })
+            else: remaining.append(p)
+        except: remaining.append(p)
+    return remaining, trade_logs
