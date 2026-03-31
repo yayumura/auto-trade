@@ -28,6 +28,8 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
     account = {"cash": float(initial_cash_val)}
     portfolio, trade_history, pending_exits = [], [], []
     
+    monthly_assets = {}
+    
     for i in range(len(timeline)):
         current_time = timeline[i]
         
@@ -67,7 +69,6 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
                         curr_v = sum(bundle["Close"].at[current_time, f"{p_['code']}.T"] * p_['shares'] for p_ in portfolio if not p_.get('pending_buy'))
                         total_equity = account['cash'] + curr_v
                         
-                        # 3ポジション集中: 資産の1/3投入
                         alloc = total_equity / max_pos
                         shares = int( (alloc * 0.95) // buy_p ) # 5%余裕
                         shares = (shares // 100) * 100
@@ -91,10 +92,33 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
                     portfolio.append({"code": best['code'], "buy_price": 0, "shares": 0, "buy_time": timeline[i+1], "atr": best['atr'], "pending_buy": True})
                     held_count += 1
 
+        # 月末資産記録
+        if i == len(timeline) - 1 or timeline[i].month != timeline[i+1].month:
+            curr_v_close = sum(bundle["Close"].at[current_time, f"{p_['code']}.T"] * p_['shares'] for p_ in portfolio if not p_.get('pending_buy'))
+            monthly_assets[current_time.strftime("%Y-%m")] = account['cash'] + curr_v_close
+
     last_dt = timeline[-1]
     final_stock_val = sum(bundle["Close"].get(f"{p['code']}.T", pd.Series([0])).at[last_dt] * p['shares'] for p in portfolio if not p.get('pending_buy'))
     total_assets = account['cash'] + final_stock_val
-    return {"profit_pct": (total_assets - initial_cash_val) / initial_cash_val * 100, "trade_count": len(trade_history)}
+    
+    # 月次収益率
+    m_keys = sorted(monthly_assets.keys())
+    m_returns = []
+    prev_val = initial_cash_val
+    for k in m_keys:
+        curr_val = monthly_assets[k]
+        m_returns.append((curr_val - prev_val) / prev_val)
+        prev_val = curr_val
+        
+    win_months = len([r for r in m_returns if r > 0])
+    monthly_win_rate = win_months / len(m_returns) if m_returns else 0
+    
+    return {
+        "profit_pct": (total_assets - initial_cash_val) / initial_cash_val * 100, 
+        "trade_count": len(trade_history),
+        "monthly_win_rate": monthly_win_rate * 100,
+        "m_returns": m_returns
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -106,7 +130,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     df_sym = pd.read_csv(DATA_FILE)
-    univ = [str(c) for i, c in enumerate(df_sym['コード']) if df_sym.iloc[i]['市場・商品区分'] == 'プライム（内国株式）']
+    if args.stocks == 'prime':
+        univ = [str(c) for i, c in enumerate(df_sym['コード']) if df_sym.iloc[i]['市場・商品区分'] == 'プライム（内国株式）']
+    else:
+        univ = [str(c) for c in df_sym['コード']]
         
     all_data = get_historical_data(univ)
     if all_data.index.tzinfo is None: all_data.index = all_data.index.tz_localize('UTC').tz_convert(JST)
@@ -116,4 +143,10 @@ if __name__ == "__main__":
     timeline = bundle["Close"].index.unique().sort_values()
     
     res = run_truth_session(univ, bundle, timeline, max_pos=args.max_pos, show_trades=args.verbose)
-    print(f"\nFINAL VERIFIED RESULT: Market:PRIME B:{args.breakout} E:{args.exit} Pos:{args.max_pos} | Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']}")
+    
+    m_ret_avg = sum(res['m_returns']) / len(res['m_returns']) if res['m_returns'] else 0
+    import numpy as np
+    m_ret_std = np.std(res['m_returns']) if res['m_returns'] else 1
+    m_sharpe = (m_ret_avg / m_ret_std) if m_ret_std > 0 else 0
+
+    print(f"\nFINAL VERIFIED RESULT: Market:PRIME B:{args.breakout} E:{args.exit} Pos:{args.max_pos} | Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']} | MonthlyWin:{res['monthly_win_rate']:.1f}% Sharpe:{m_sharpe:.3f}")

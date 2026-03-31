@@ -10,12 +10,12 @@ TRUTH_TRADES_V10 = 187
 
 # 市場設定
 STOCKS_TYPE = 'prime' # 高純度・高信頼のプライム市場に限定
-MAX_POSITIONS = 3     # 3銘柄に強気の集中投資 (資産の33%ずつ)
+MAX_POSITIONS = 5     # 5銘柄に分散し、リスクと収益のベストバランス
 MAX_DAILY_BUYS = 1    # 1日に1銘柄ずつの厳選
 
 # ロジック・パラメータ
 BREAKOUT_PERIOD = 25  # 25日最高値更新（王道の波動）
-EXIT_PERIOD = 10      # 10日安値（安定したトレンド追い）
+EXIT_PERIOD = 15      # 15日安値（トレンドを最後まで取り切る設定）
 STOP_LOSS_MULT = 3.0 # ATRの3倍で不測の事態を防ぐ
 
 # データ・時間設定
