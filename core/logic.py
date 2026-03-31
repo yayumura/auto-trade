@@ -4,7 +4,7 @@ import os
 import json
 from datetime import datetime
 import yfinance as yf
-from core.config import EXCLUSION_CACHE_FILE, JST
+from core.config import EXCLUSION_CACHE_FILE, JST, BREAKOUT_PERIOD, EXIT_PERIOD
 
 # ==========================================
 # V10.7.1 FINAL PRODUCTION (The Golden Path)
@@ -38,7 +38,7 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None, v
         return "BEAR" if cl < s200 else "BULL"
     except: return "RANGE"
 
-def calculate_all_technicals_v10(full_data, breakout_p=20, exit_p=10):
+def calculate_all_technicals_v10(full_data, breakout_p=BREAKOUT_PERIOD, exit_p=EXIT_PERIOD):
     if full_data is None or full_data.empty: return None
     if isinstance(full_data.columns, pd.MultiIndex):
         close, high, low, volume, open_p = full_data.xs('Close', axis=1, level=1), full_data.xs('High', axis=1, level=1), full_data.xs('Low', axis=1, level=1), full_data.xs('Volume', axis=1, level=1), full_data.xs('Open', axis=1, level=1)
@@ -107,7 +107,7 @@ def manage_positions(portfolio, account, broker, regime="RANGE", is_simulation=T
         try:
             buffer = realtime_buffers.get(code)
             if buffer and not buffer.df.empty:
-                df_tech = calculate_all_technicals_v10(buffer.df, breakout_p=25, exit_p=15)
+                df_tech = calculate_all_technicals_v10(buffer.df, breakout_p=BREAKOUT_PERIOD, exit_p=EXIT_PERIOD)
                 op, lp, le, atr = df_tech["Open"].iloc[-1], df_tech["Low"].iloc[-1], df_tech["LE"].iloc[-1], df_tech["ATR"].iloc[-1]
                 bp, stop_p = p['buy_price'], p['buy_price'] - (p['atr'] * 3.0)
                 sell_reason, exec_p = None, df_tech["Close"].iloc[-1]
