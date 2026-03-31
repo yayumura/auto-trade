@@ -12,7 +12,8 @@ from core.logic import (
     calculate_all_technicals_v10, manage_positions_v10, select_candidates_v10
 )
 from core.config import (
-    INITIAL_CASH, DATA_FILE, JST, TAX_RATE
+    INITIAL_CASH, DATA_FILE, JST, TAX_RATE,
+    STOCKS_TYPE, BREAKOUT_PERIOD, EXIT_PERIOD, MAX_POSITIONS
 )
 
 def get_historical_data(target_codes):
@@ -123,10 +124,10 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--stocks', type=str, default='prime')
-    parser.add_argument('--breakout', type=int, default=20)
-    parser.add_argument('--exit', type=int, default=10)
-    parser.add_argument('--max_pos', type=int, default=5)
+    parser.add_argument('--stocks', type=str, default=STOCKS_TYPE)
+    parser.add_argument('--breakout', type=int, default=BREAKOUT_PERIOD)
+    parser.add_argument('--exit', type=int, default=EXIT_PERIOD)
+    parser.add_argument('--max_pos', type=int, default=MAX_POSITIONS)
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
 

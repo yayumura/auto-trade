@@ -11,7 +11,7 @@ TRUTH_TRADES_V10 = 316
 
 # 市場設定
 STOCKS_TYPE = 'prime'
-TARGET_MARKETS = ['プライム（内国株式）', 'スタンダード（内国株式）'] # 拡大の余地あり
+TARGET_MARKETS = ['プライム（内国株式）'] # 最高益を記録した「プライム専用」黄金比設定
 MAX_POSITIONS = 5
 MAX_DAILY_BUYS = 5
 
