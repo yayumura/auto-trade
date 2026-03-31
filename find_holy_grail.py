@@ -1,49 +1,42 @@
 import subprocess
-import os
 
-# パラメータ設定 (Phase 28)
-breakout_values = [15, 20, 25]
-exit_values = [7, 10]
-liquidity_values = [50000000, 100000000] # 50M, 100M
-stop_mult = 2.5 # 2.0は狭すぎたので2.5で固定
+# --- 聖杯ハンター (V10.2 真実のトレンド検索版) ---
+# このスクリプトは、プライム市場に絞って「最も利益が出る設定」をお客様自身で探るためのツールです。
 
-start_date = "2021-01-01"
-end_date = "2026-03-29"
+# 検証するパラメータ候補
+breakouts = [20, 25, 30]
+exits = [5, 10, 15]
+positions = [3, 4] # 集中投資 vs 標準分散
+
+print("Holy Grail Hunter (Peak Hunt Phase V10.2)...")
+print("Target: PRIME Market Only")
 
 results = []
-print(f"Sweep Start (Phase 28): {len(breakout_values) * len(exit_values) * len(liquidity_values)} combinations")
 
-for liq in liquidity_values:
-    for b in breakout_values:
-        for e in exit_values:
-            if e >= b: continue 
-            
+for b in breakouts:
+    for e in exits:
+        for p in positions:
             cmd = [
-                "python", "-u", "backtest.py",
-                "--all",
-                "--start", start_date,
-                "--end", end_date,
+                "python", "backtest.py",
+                "--stocks", "prime",
                 "--breakout", str(b),
                 "--exit", str(e),
-                "--liquidity", str(liq),
-                "--stop_mult", str(stop_mult)
+                "--max_pos", str(p)
             ]
+            print(f"[Testing B:{b} E:{e} Pos:{p}] ...")
             
-            liq_label = f"{int(liq/1000000)}M"
-            print(f"\n[Testing] B={b}, E={e}, Liq={liq_label} ...")
-            
+            # 結果取得
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            
-            last_result = ""
+            last_line = ""
             for line in process.stdout:
-                if "RESULT:" in line:
-                    last_result = line.strip()
-                    print(f"  -> {last_result}")
+                if "FINAL VERIFIED RESULT:" in line:
+                    last_line = line.strip()
+                    print(f"  -> {last_line}")
             process.wait()
-            results.append((b, e, liq_label, last_result))
+            results.append(last_line)
 
-print("\n\n" + "="*60)
-print("PHASE 28 FINAL PARAMETER SWEEP RESULTS")
-print("="*60)
-for b, e, liq, res in results:
-    print(f"B:{b:2d} E:{e:2d} Liq:{liq:<4s} | {res}")
+print("\n" + "="*70)
+print("SEARCH COMPLETE - TOP RESULTS RANKING")
+print("="*70)
+for r in results:
+    if r: print(r)
