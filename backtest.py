@@ -123,16 +123,23 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--stocks', type=str, default='prime')
-    parser.add_argument('--breakout', type=int, default=25)
+    parser.add_argument('--breakout', type=int, default=20)
     parser.add_argument('--exit', type=int, default=10)
-    parser.add_argument('--max_pos', type=int, default=3)
+    parser.add_argument('--max_pos', type=int, default=5)
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
 
     df_sym = pd.read_csv(DATA_FILE)
     if args.stocks == 'prime':
         univ = [str(c) for i, c in enumerate(df_sym['コード']) if df_sym.iloc[i]['市場・商品区分'] == 'プライム（内国株式）']
+    elif args.stocks == 'hybrid':
+        # プライム + スタンダード (内国株式のみ)
+        univ = [str(c) for i, c in enumerate(df_sym['コード']) if df_sym.iloc[i]['市場・商品区分'] in ['プライム（内国株式）', 'スタンダード（内国株式）']]
+    elif args.stocks == 'stocks':
+        # 全株式 (Growth含む、ETF/PRO除外)
+        univ = [str(c) for i, c in enumerate(df_sym['コード']) if '（内国株式）' in str(df_sym.iloc[i]['市場・商品区分'])]
     else:
+        # 完全全銘柄 (ETF等含む)
         univ = [str(c) for c in df_sym['コード']]
         
     all_data = get_historical_data(univ)
@@ -149,4 +156,4 @@ if __name__ == "__main__":
     m_ret_std = np.std(res['m_returns']) if res['m_returns'] else 1
     m_sharpe = (m_ret_avg / m_ret_std) if m_ret_std > 0 else 0
 
-    print(f"\nFINAL VERIFIED RESULT: Market:PRIME B:{args.breakout} E:{args.exit} Pos:{args.max_pos} | Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']} | MonthlyWin:{res['monthly_win_rate']:.1f}% Sharpe:{m_sharpe:.3f}")
+    print(f"\nFINAL VERIFIED RESULT: Market:{args.stocks.upper()} B:{args.breakout} E:{args.exit} Pos:{args.max_pos} | Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']} | MonthlyWin:{res['monthly_win_rate']:.1f}% Sharpe:{m_sharpe:.3f}")
