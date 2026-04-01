@@ -106,7 +106,7 @@ def run_dual_session(target_codes, bundle, timeline, initial_cash_val=1000000, m
         # 4. Scan
         held_count = len([p for p in portfolio if not p.get('pending_buy')])
         if held_count < max_pos and i + 1 < len(timeline):
-            candidates = select_candidates_v10(current_time, bundle, univ, max_count=max_pos-held_count, overheat_threshold=overheat)
+            candidates = select_candidates_v10(current_time, bundle, target_codes, max_count=max_pos-held_count, overheat_threshold=overheat)
             for best in candidates:
                 if held_count >= max_pos: break
                 if not any(str(p['code']) == str(best['code']) for p in portfolio):
@@ -165,5 +165,15 @@ if __name__ == "__main__":
     print(f" {'Final Assets (JPY)':<20} | {int(res_gross['final_assets']):>11,d} | {int(res_net['final_assets']):>11,d}")
     print(f" {'Total Trades':<20} | {res_gross['trade_count']:>11} | {res_net['trade_count']:>11}")
     print(f" {'Monthly Win Rate':<20} | {res_gross['monthly_win_rate']:>11.1f}% | {res_net['monthly_win_rate']:>11.1f}%")
+    print(f"="*50)
     print(f" {'Sharpe Ratio':<20} | {'-':>11} | {m_sharpe:>11.3f}")
-    print(f"="*50 + "\n")
+    print(f"="*50)
+
+    print("\nMONTHLY BREAKDOWN (NET PRODUCTION)")
+    print("-" * 40)
+    sorted_months = sorted(res_net['monthly_assets'].keys())
+    for i, month in enumerate(sorted_months):
+        rev = res_net['m_returns'][i] * 100
+        asset = res_net['monthly_assets'][month]
+        print(f" {month} | {rev:>+7.2f}% | Assets: {int(asset):>11,d}")
+    print("-" * 40 + "\n")
