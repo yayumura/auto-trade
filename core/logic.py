@@ -108,7 +108,7 @@ def manage_positions_v10(portfolio, current_time, bundle, use_shield=True, use_p
         except: remaining.append(p)
     return remaining, trade_logs
 
-def select_candidates_v10(current_time, bundle, target_codes, max_count=3, overheat_threshold=30.0, use_shield=True):
+def select_candidates_v10(current_time, bundle, target_codes, max_count=3, overheat_threshold=25.0, use_shield=True):
     if use_shield:
         try:
             etf = "1321.T"

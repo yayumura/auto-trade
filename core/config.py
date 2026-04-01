@@ -16,9 +16,9 @@ TRUTH_TRADES_V10 = 316
 
 # --- 運用パラメータ (V11.0 Ultimate Winner Optimized) ---
 STOCKS_TYPE = "prime"      # ターゲット市場 (prime)
-BREAKOUT_PERIOD = 25       # 最強の25日ブレイク (V11.0 Ultimate)
-EXIT_PERIOD = 10           # 10日安値エグジット (Speed確定)
-MAX_POSITIONS = 3          # 3銘柄集中投資 (Concentration Alpha)
+BREAKOUT_PERIOD = 30       # 最強の30日ブレイク (V11.1 Ultimate Winner)
+EXIT_PERIOD = 15           # 15日安値エグジット (Trend Capture)
+MAX_POSITIONS = 2          # 2銘柄集中投資 (Concentration Alpha)
 OVERHEAT_THRESHOLD = 25.0  # 乖離率25.0%まで制限 (Safety Edge)
 MAX_DAILY_BUYS = 5
 
@@ -27,7 +27,7 @@ STOP_LOSS_MULT = 3.0
 ATR_STOP_LOSS = 3.0
 RANGE_ATR_STOP_LOSS = 2.0
 MAX_RISK_PER_TRADE = 0.05  # リスク許容度を5%に引き上げ (33%配分を妨げないための調整)
-MAX_ALLOCATION_PCT = 0.33   # 1銘柄最大33%まで (分散3銘柄で資金を使い切る設定)
+MAX_ALLOCATION_PCT = 0.50   # 1銘柄最大50%まで (分散2銘柄で資金を使い切る設定)
 MIN_ALLOCATION_AMOUNT = 100000
 
 # 動作モード (環境変数から取得、なければデフォルト)
