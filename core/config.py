@@ -79,7 +79,7 @@ INITIAL_CASH = 1000000
 
 # ログ設定
 LOG_LEVEL = "INFO"
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
+LOG_DIR = os.path.join(DATA_DIR, 'logs')
 if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
 
 def load_insider_exclusion_codes():

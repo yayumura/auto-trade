@@ -10,6 +10,15 @@ REM Force UTF-8 for everything (to avoid UnicodeDecodeError on Windows)
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 
+REM --- ログ肥大化対策: 5MBを超えていたらリセット ---
+if exist "%SCHEDULER_LOG%" (
+    for %%I in ("%SCHEDULER_LOG%") do (
+        if %%~zI GTR 5242880 (
+            echo [%date% %time%] [INFO] Log file exceeded 5MB. Resetting log. > "%SCHEDULER_LOG%"
+        )
+    )
+)
+
 echo [%date% %time%] --- Bot Startup --- >> "%SCHEDULER_LOG%"
 
 REM Run the bot and redirect output to the scheduler log
