@@ -5,10 +5,8 @@ import os
 import sys
 import argparse
 import numpy as np
-import time
 
 sys.path.append(os.getcwd())
-
 from core.logic import (
     calculate_all_technicals_v10, manage_positions_v10, select_candidates_v10
 )
@@ -26,15 +24,26 @@ def get_historical_data(target_codes):
         return all_data.loc[:, (valid_tickers, slice(None))]
     return None
 
-def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, max_pos=5, overheat=30.0, show_trades=False):
+def run_dual_session(target_codes, bundle, timeline, initial_cash_val=1000000, max_pos=3, overheat=30.0, apply_tax=True):
     account = {"cash": float(initial_cash_val)}
     portfolio, trade_history, pending_exits = [], [], []
     monthly_assets = {}
     
+    # 納税管理
+    annual_profit = 0
+    tax_paid_this_year = 0
+    current_year = timeline[0].year
+
     for i in range(len(timeline)):
         current_time = timeline[i]
         
-        # 1. 決済執行 (Open)
+        # 年が変わったら納税実績をリセット
+        if current_time.year != current_year:
+            annual_profit = 0
+            tax_paid_this_year = 0
+            current_year = current_time.year
+
+        # 1. Exit Exec
         if pending_exits:
             still_pending = []
             for pe in pending_exits:
@@ -43,47 +52,61 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
                     open_p = bundle["Open"].at[current_time, ticker]
                     if not pd.isna(open_p):
                         exec_p = pe['price']
-                        gross = (exec_p - pe['buy_price']) * pe['shares']
-                        tax = max(0, int(gross * TAX_RATE)) if gross > 0 else 0
-                        account['cash'] += (exec_p * pe['shares']) - tax
-                        trade_history.append({"code": pe['code'], "profit": gross-tax})
-                        if show_trades: print(f"    [{current_time.date()}] SELL: {pe['code']} @ {exec_p:.1f} ({pe['reason']})")
+                        realized_profit = (exec_p - pe['buy_price']) * pe['shares']
+                        
+                        if apply_tax:
+                            # 特定口座（源泉徴収あり）のロジック:
+                            # 1. 通算利益加算
+                            old_annual_profit = annual_profit
+                            annual_profit += realized_profit
+                            
+                            # 2. 新しい累積納税額を計算 (マイナスの場合は0)
+                            new_total_tax = max(0, int(annual_profit * TAX_RATE))
+                            
+                            # 3. 今回の徴収額（または還付額）を計算
+                            tax_diff = new_total_tax - tax_paid_this_year
+                            tax_paid_this_year = new_total_tax
+                            
+                            account['cash'] += (exec_p * pe['shares']) - tax_diff
+                        else:
+                            account['cash'] += (exec_p * pe['shares'])
+                            
+                        trade_history.append({"code": pe['code'], "profit": realized_profit})
                     else: still_pending.append(pe)
                 except: still_pending.append(pe)
             pending_exits = still_pending
 
-        # 2. ポジション管理
+        # 2. Position Check
         if portfolio:
             held = [p for p in portfolio if not p.get('pending_buy')]
             remaining, logs = manage_positions_v10(held, current_time, bundle)
             pending_exits.extend(logs)
             portfolio = [p for p in portfolio if str(p['code']) not in [str(l['code']) for l in logs]]
 
-        # 3. 買付予約執行
+        # 3. Buy Exec
         for p in portfolio:
             if p.get('pending_buy') and p.get('buy_time') == current_time:
                 ticker = f"{p['code']}.T"
                 try:
                     buy_p = bundle["Open"].at[current_time, ticker]
                     if not pd.isna(buy_p):
-                        curr_v = sum(bundle["Close"].at[current_time, f"{p_['code']}.T"] * p_['shares'] for p_ in portfolio if not p_.get('pending_buy'))
+                        prev_time = timeline[max(0, i-1)]
+                        curr_v = sum(bundle["Close"].at[prev_time, f"{p_['code']}.T"] * p_['shares'] for p_ in portfolio if not p_.get('pending_buy'))
                         total_equity = account['cash'] + curr_v
-                        alloc = total_equity / max_pos
-                        shares = int( (alloc * 0.95) // buy_p )
+                        shares = int( (total_equity / max_pos) // buy_p )
                         shares = (shares // 100) * 100
                         if shares >= 100:
                             p.update({"buy_price": buy_p, "shares": shares, "pending_buy": False})
                             account['cash'] -= float(buy_p * shares)
-                            if show_trades: print(f"    [{current_time.date()}] BUY:  {p['code']} @ {buy_p:.1f}")
                         else: p['ignore'] = True
                     else: p['ignore'] = True
                 except: p['ignore'] = True
         portfolio = [p for p in portfolio if not p.get('ignore')]
         
-        # 4. 新規スキャン
+        # 4. Scan
         held_count = len([p for p in portfolio if not p.get('pending_buy')])
         if held_count < max_pos and i + 1 < len(timeline):
-            candidates = select_candidates_v10(current_time, bundle, target_codes, max_count=max_pos-held_count, overheat_threshold=overheat)
+            candidates = select_candidates_v10(current_time, bundle, univ, max_count=max_pos-held_count, overheat_threshold=overheat)
             for best in candidates:
                 if held_count >= max_pos: break
                 if not any(str(p['code']) == str(best['code']) for p in portfolio):
@@ -101,14 +124,7 @@ def run_truth_session(target_codes, bundle, timeline, initial_cash_val=1000000, 
         curr_val = monthly_assets[k]
         m_returns.append((curr_val - prev_val) / prev_val)
         prev_val = curr_val
-        
-    return {
-        "profit_pct": (total_assets - initial_cash_val) / initial_cash_val * 100, 
-        "trade_count": len(trade_history),
-        "monthly_win_rate": (len([r for r in m_returns if r > 0]) / len(m_returns) * 100) if m_returns else 0,
-        "m_returns": m_returns,
-        "monthly_assets": monthly_assets
-    }
+    return {"profit_pct": (total_assets - initial_cash_val) / initial_cash_val * 100, "trade_count": len(trade_history), "monthly_win_rate": (len([r for r in m_returns if r > 0]) / len(m_returns) * 100) if m_returns else 0, "m_returns": m_returns, "monthly_assets": monthly_assets, "final_assets": total_assets}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -117,37 +133,37 @@ if __name__ == "__main__":
     parser.add_argument('--exit', type=int, default=EXIT_PERIOD)
     parser.add_argument('--max_pos', type=int, default=MAX_POSITIONS)
     parser.add_argument('--overheat', type=float, default=OVERHEAT_THRESHOLD)
-    parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args()
 
-    print(f"\n[Launcher] Starting Backtest...")
-    print(f"  [System Mode] Alpha-Multiplier Active")
-    print(f"  [Config]      Market:{args.stocks.upper()} | B:{args.breakout} | E:{args.exit} | Pos:{args.max_pos} | Overheat:{args.overheat}%")
-    print(f"  [Target]      +200% Growth Path (V10.5 Momentum Engine Ready)\n")
+    print(f"\n[Launcher] Starting Proper Taxation Backtest...")
+    print(f"  [Config] Market:{args.stocks.upper()} | B:{args.breakout} | E:{args.exit} | Pos:{args.max_pos}")
 
     df_sym = pd.read_csv(DATA_FILE)
     univ = [str(c) for i, c in enumerate(df_sym['コード']) if df_sym.iloc[i]['市場・商品区分'] == 'プライム（内国株式）']
     all_data = get_historical_data(univ)
-    if all_data.index.tzinfo is None: all_data.index = all_data.index.tz_localize('UTC').tz_convert(JST)
-    else: all_data.index = all_data.index.tz_convert(JST)
+    all_data.index = all_data.index.tz_localize('UTC').tz_convert(JST)
     
     bundle = calculate_all_technicals_v10(all_data, breakout_p=args.breakout, exit_p=args.exit)
     timeline = bundle["Close"].index.unique().sort_values()
     
-    res = run_truth_session(univ, bundle, timeline, max_pos=args.max_pos, overheat=args.overheat, show_trades=args.verbose)
+    print("  Calculating REAL Net Results (With Annual Profit Loss Offset)...")
+    res_net = run_dual_session(univ, bundle, timeline, max_pos=args.max_pos, overheat=args.overheat, apply_tax=True)
+    print("  Calculating Gross Results (Tax-Free)...")
+    res_gross = run_dual_session(univ, bundle, timeline, max_pos=args.max_pos, overheat=args.overheat, apply_tax=False)
     
-    m_ret_avg = sum(res['m_returns']) / len(res['m_returns']) if res['m_returns'] else 0
-    m_ret_std = np.std(res['m_returns']) if res['m_returns'] else 1
-    m_sharpe = (m_ret_avg / m_ret_std) if m_ret_std > 0 else 0
+    # 指標計算 (Net)
+    m_avg = sum(res_net['m_returns']) / len(res_net['m_returns']) if res_net['m_returns'] else 0
+    m_std = np.std(res_net['m_returns']) if res_net['m_returns'] else 1
+    m_sharpe = m_avg / m_std if m_std > 0 else 0
 
-    print(f"\n[RESULT] Profit:{res['profit_pct']:+.2f}% Trades:{res['trade_count']} | MonthlyWin:{res['monthly_win_rate']:.1f}% Sharpe:{m_sharpe:.3f}")
-
-    print(f"\n--- MONTHLY PERFORMANCE REPORT ---")
-    print(f"{'Month':<7} | {'Total Asset':>15} | {'Return':>10}")
-    print("-" * 40)
-    prev_val = INITIAL_CASH
-    for month in sorted(res['monthly_assets'].keys()):
-        curr_val = res['monthly_assets'][month]
-        m_ret = (curr_val - prev_val) / prev_val * 100
-        print(f"{month:<7} | {int(curr_val):>12,d} JPY | {m_ret:>+8.2f}%")
-        prev_val = curr_val
+    print(f"\n" + "="*50)
+    print(f" FINAL PERFORMANCE SUMMARY (CORRECTED) ")
+    print(f"="*50)
+    print(f" {'METRIC':<20} | {'TAX-FREE (GROSS)':>12} | {'PRODUCTION (NET)':>12}")
+    print(f" {'-'*20} + {'-'*12} + {'-'*12}")
+    print(f" {'Total Profit (%)':<20} | {res_gross['profit_pct']:>+11.2f}% | {res_net['profit_pct']:>+11.2f}%")
+    print(f" {'Final Assets (JPY)':<20} | {int(res_gross['final_assets']):>11,d} | {int(res_net['final_assets']):>11,d}")
+    print(f" {'Total Trades':<20} | {res_gross['trade_count']:>11} | {res_net['trade_count']:>11}")
+    print(f" {'Monthly Win Rate':<20} | {res_gross['monthly_win_rate']:>11.1f}% | {res_net['monthly_win_rate']:>11.1f}%")
+    print(f" {'Sharpe Ratio':<20} | {'-':>11} | {m_sharpe:>11.3f}")
+    print(f"="*50 + "\n")

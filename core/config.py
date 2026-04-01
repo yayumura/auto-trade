@@ -16,10 +16,10 @@ TRUTH_TRADES_V10 = 316
 
 # --- 運用パラメータ (V10.8 Absolute Champion Optimized) ---
 STOCKS_TYPE = "prime"      # ターゲット市場 (prime)
-BREAKOUT_PERIOD = 25       # 最強の25日ブレイク
-EXIT_PERIOD = 10           # 安定の10日安値割れ
-MAX_POSITIONS = 3          # 爆発力を高める3銘柄集中投資
-OVERHEAT_THRESHOLD = 25.0  # 厳格な高値掴み防止
+BREAKOUT_PERIOD = 25       # 最強の25日ブレイク (Absolute Champion)
+EXIT_PERIOD = 15           # 15日安値エグジット (Trend Follower)
+MAX_POSITIONS = 3          # 3銘柄集中投資 (Alpha Multiplier)
+OVERHEAT_THRESHOLD = 30.0  # 乖離率30.0%まで許容 (Power Entry)
 MAX_DAILY_BUYS = 5
 
 # ロジック・パラメータ

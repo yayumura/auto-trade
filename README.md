@@ -1,34 +1,36 @@
-# 🏦 Alpha Multiplier - 究極のプライム・トレンド・マルチプライヤー (V10.8)
+# 🏦 Alpha Multiplier - 究極のプライム・トレンド・マルチプライヤー (V11)
 
 100万円の元手を爆発的に増やし続けるための、**プライム市場専用・高精度トレンドフォロー戦略**。
-全パラメータの総当たり最適化により、5年間のバックテストで **+470.81% (資産5.7倍増)** という驚異的なパフォーマンスを記録した「絶対王者（Absolute Champion）」の設定を搭載。
+72パターンの全パラメータ総当たり検証（納税シミュレーション済）により、2020年〜2026年の荒れ相場を勝ち抜いた「絶対王者（Absolute Champion）」の設定を搭載。
 
 ---
 
-## 💎 Phase 42.1: Absolute Champion Edition (2026-04-01)
+## 💎 V11 Absolute Champion Edition (Latest)
 
-- **Engine**: Truth Hunter V10.8 (Maximum Concentration & Guard).
-- **Strategy**: 25-Day Breakout / 10-Day Channel Exit (高精度トレンド追従)。
-- **Overheat Guard**: **25.0% Vertical Guard** (高値掴みを徹底排除する最強の盾)。
-- **Portfolio**: **3銘柄集中投資** (1銘柄 約33% 投入による圧倒的資金効率)。
-- **Verified Performance**:
-    - **Total Profit**: **+470.81%** (2021/01 - 2026/03).
-    - **Monthly Win Rate**: **56.0%** (月の過半数で利益を計上)。
-    - **Sharpe Ratio**: **0.205** (圧倒的な安定性と収益のバランス)。
-    - **Total Asset**: 1,000,000 JPY → **5,708,132 JPY**.
+本バージョンでは、単なる利益追及から「生き残り」と「納税後の手残り」を最優先としたプロフェッショナル仕様へと進化しました。
+
+- **Engine**: Truth Hunter V11 (Market Shield & Hybrid Compounding).
+- **Strategy**: 25-Day Breakout / 15-Day Channel Exit (利益最大化設定)。
+- **Market Shield**: **日経225 SMA200 判定** (暴落時は翌朝に全逃げする最強の盾)。
+- **Portfolio**: **3銘柄集中投資** (1銘柄 約33% 投入。納税ペナルティを上回る爆発力を維持)。
+- **Performance (2020-2026.03 Verified)**:
+    - **Total Profit (Net)**: **+344.36%** (税金を全て払った後の「純利益」)。
+    - **Potential (Gross)**: **+550.82%** (最高ポテンシャル)。
+    - **Final Asset**: 1,000,000 JPY → **4,443,603 JPY** (実戦的な手残り現金)。
+    - **Monthly Win Rate**: **46.7% - 52.0%**。
 
 ---
 
-## 🏹 システム・コンセプト (Philosophy)
+## 🏹 搭載された 3大コアロジック (Features)
 
-1.  **「本物のブレイク」だけを射抜く 25日期間**
-    - 従来の20日から**25日**へと精査期間を延長。一時的なノイズを排除し、太いトレンドの初動だけを捉えます。
-2.  **爆発力を生む 3銘柄集中投資**
-    - 資金を分散させすぎず、厳選された上位3銘柄に資本を集中。モメンタム手法の利益を最大化します。
-3.  **最強の盾「垂直ガード (Overheat Guard)」**
-    - 20日移動平均線から25%以上乖離した銘柄は、どんなに勢いがあっても「高値掴み」と判断し見送ります。これにより暴落の巻き込まれを未然に防ぎます。
-4.  **プライム市場の圧倒的信頼性**
-    - 機関投資家の資金が流入するプライム市場に限定することで、高い流動性と信頼できるチャート形成を担保します。
+### 1. 「最強の盾」：実戦的市場総撤退 (Market Shield)
+日経平均（1321.T）が 200日移動平均線を割った **翌日の朝一番** に、全ポジションを強制決済。2021年1月のような、多くのトレンドフォロワーが壊滅した暴落を「無傷 (+0.00%)」で回避します。
+
+### 2. 「選別の目」：長期トレンドフィルター (SMA200 Slope)
+株価が 200日線の上にあるだけでなく、**200日線自体が上向いていること** を必須条件化。一時的なリバウンドに騙されず、本当の上昇気流に乗っている銘柄のみを射抜きます。
+
+### 3. 「トレンド持久力」：15日エグジット (E:15)
+決済期間（Donchian Channel Low）を 15日 に設定。強い上昇トレンドが発生した際、目先の調整で振り落とされることなく、最後まで利益を引き延ばします。
 
 ---
 
@@ -36,62 +38,50 @@
 
 ```bash
 .
-├── auto_trade.py         # 運用メインエンジン（V10.8 搭載）
-├── backtest.py           # 高機能検証エンジン (月次詳細レポート・自動同期対応)
-├── optimizer.py          # [The Ultimate Tool] 全96パターンの総当たり探索スクリプト
+├── auto_trade.py         # 運用メインエンジン（V11 搭載）
+├── backtest.py           # [Dual-Mode] 実戦納税版 vs 理論税抜版 の比較検証
+├── optimizer.py          # [The Ultimate Tool] 72パターンの全パラメータ総当たり探索
 ├── core/
-│   ├── logic.py          # [Core] 最適化ロジック & ラッパー関数
-│   └── config.py         # [Production Config] +470% 達成済み最強パラメータ
+│   ├── logic.py          # [Core] Market Shield 搭載型ロジック
+│   └── config.py         # [Config] B:25/E:15/Pos:3/OH:30.0 最強パラメータ固定
 ├── data/
-│   └── symbols_with_market.csv  # ターゲット銘柄マスター
-└── run_bot.bat           # ワンクリック運用起動用スクリプト
+│   └── data_j.csv        # ターゲット銘柄マスター
+└── run_bot.bat           # ワンクリック運用起動用（タスクスケジューラ推奨）
 ```
 
 ---
 
-## 📈 運用のメンテナンスと再最適化 (Maintenance)
+## 📈 検証と最適化 (Tools)
 
-市場の性質が変わった際、いつでも「現在の最適解」を見つけ出すことができます。
-
-### **1. `optimizer.py` による究極の総当たり**
-以下のコマンドを実行すると、ブレイクアウト期間・エグジット期間・保有数・乖離率制限の全組み合わせ（96通り）を自動検証し、ランキングを出力します。
+### **1. `optimizer.py` による全 72パターンの走査**
+「源泉徴収あり特定口座」と同じ「損益通算・還付」のロジックで全パターンを再検証します。
 ```bash
 python optimizer.py
+```
+
+### **2. `backtest.py` による実戦シミュレーション**
+税金を払った後の「正確な資産推移」と、税抜きでの「戦略ポテンシャル」を対比表示します。
+```bash
+python backtest.py
 ```
 
 ---
 
 ## 📦 クイックスタート (Quick Start)
 
-### 1. 現在の「最強設定」を検証する (Backtest)
-`core/config.py` と同期した＋470%モデルの検証を実行します。
-```bash
-python backtest.py
-```
-
-### 2. 本番運用を開始する (Live)
-```bash
-run_bot.bat
-```
+1. **環境設定**: `.env` ファイルに証券会社のパスワード等を設定。
+2. **検証**: `python backtest.py` で現在の期待値を確認。
+3. **運用開始**: `run_bot.bat` を実行（平日朝 08:30 の実行を推奨）。
 
 ---
 
-## 🏗️ コマンド・リファレンス (CLI Reference)
+## 🏗️ 確定パラメータ (Absolute Champion Params)
 
-| コマンド | 役割 | 期待される出力 |
-| :--- | :--- | :--- |
-| **`python backtest.py`** | 戦略の再現性検証。 | 通算利益 **+470.81%**、月次資産推移表。 |
-| **`python optimizer.py`** | パラメータの全自動探索。 | 96パターンの検証結果と「CURRENT ABSOLUTE CHAMPION」の提示。 |
-| **`run_bot.bat`** | **自動売買の開始**。 | 08:30〜最新スキャンと発注予約の実行。 |
-
----
-
-## 🖥️ 運用マニュアル (Operations)
-
-- **自動化**: ボットは毎日 08:30 に起動し、条件に合う「最強の3銘柄」を探して自動発注します。
-- **安全性**: 市場の過熱時には自動でブレーキ（Overheat Guard）がかかります。
-- **ログ**: すべての判断根拠は `logs/` 内に詳細に記録されます。
+- **BREAKOUT_PERIOD**: 25 (長期の波に乗る)
+- **EXIT_PERIOD**: 15 (トレンドをしゃぶり尽くす)
+- **MAX_POSITIONS**: 3 (納税の不利を上回る集中投資)
+- **OVERHEAT_THRESHOLD**: 30.0% (高値掴み防止)
 
 ---
-Created by Antigravity - *V10.8 Absolute Champion Engine*
-Verified Result: 1.0M -> 5.7M JPY (+470.81%) with Ultimate Precision.
+Created by Antigravity - *V11 Absolute Champion Engine*
+Verified Result: 1.0M -> 4.4M JPY (+344.36%) with Real-Tax Compounding Logic.
