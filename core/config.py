@@ -14,15 +14,15 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 TRUTH_PROFIT_V10 = 200.06
 TRUTH_TRADES_V10 = 316
 
-# 市場設定
-STOCKS_TYPE = 'prime'
-TARGET_MARKETS = ['プライム（内国株式）'] # 最高益を記録した「プライム専用」黄金比設定
-MAX_POSITIONS = 5
+# --- 運用パラメータ (V10.8 Absolute Champion Optimized) ---
+STOCKS_TYPE = "prime"      # ターゲット市場 (prime)
+BREAKOUT_PERIOD = 25       # 最強の25日ブレイク
+EXIT_PERIOD = 10           # 安定の10日安値割れ
+MAX_POSITIONS = 3          # 爆発力を高める3銘柄集中投資
+OVERHEAT_THRESHOLD = 25.0  # 厳格な高値掴み防止
 MAX_DAILY_BUYS = 5
 
 # ロジック・パラメータ
-BREAKOUT_PERIOD = 20
-EXIT_PERIOD = 10
 STOP_LOSS_MULT = 3.0
 ATR_STOP_LOSS = 3.0
 RANGE_ATR_STOP_LOSS = 2.0
