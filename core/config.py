@@ -14,12 +14,12 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 TRUTH_PROFIT_V10 = 200.06
 TRUTH_TRADES_V10 = 316
 
-# --- 運用パラメータ (V10.8 Absolute Champion Optimized) ---
+# --- 運用パラメータ (V11.0 Ultimate Winner Optimized) ---
 STOCKS_TYPE = "prime"      # ターゲット市場 (prime)
-BREAKOUT_PERIOD = 25       # 最強の25日ブレイク (Absolute Champion)
-EXIT_PERIOD = 15           # 15日安値エグジット (Trend Follower)
-MAX_POSITIONS = 3          # 3銘柄集中投資 (Alpha Multiplier)
-OVERHEAT_THRESHOLD = 30.0  # 乖離率30.0%まで許容 (Power Entry)
+BREAKOUT_PERIOD = 25       # 最強の25日ブレイク (V11.0 Ultimate)
+EXIT_PERIOD = 10           # 10日安値エグジット (Speed確定)
+MAX_POSITIONS = 3          # 3銘柄集中投資 (Concentration Alpha)
+OVERHEAT_THRESHOLD = 25.0  # 乖離率25.0%まで制限 (Safety Edge)
 MAX_DAILY_BUYS = 5
 
 # ロジック・パラメータ

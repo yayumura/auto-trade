@@ -410,7 +410,12 @@ def _main_exec():
         
         actions_taken.extend(sell_actions)
         for log in trade_logs_from_manage:
+            if not is_sim:
+                print(f"OMS: [SELL EXEC] {log['code']} {log['shares']} shares ({log['reason']})")
+                broker.execute_chase_order(log['code'], log['shares'], side="1")
+                send_discord_notify(f"SELL EXEC: {log['code']} | {log['shares']} shares ({log['reason']})")
             if hasattr(broker, 'log_trade'): broker.log_trade(log)
+        
         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
         if hasattr(broker, 'save_account'): broker.save_account(account)
 

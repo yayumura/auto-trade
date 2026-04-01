@@ -11,10 +11,17 @@ from .config import BREAKOUT_PERIOD, EXIT_PERIOD, MAX_POSITIONS, OVERHEAT_THRESH
 
 def calculate_all_technicals_v10(full_data, breakout_p=BREAKOUT_PERIOD, exit_p=EXIT_PERIOD):
     if full_data is None or full_data.empty: return None
-    close = full_data.xs('Close', axis=1, level=1) if 'Close' in full_data.columns.get_level_values(1) else full_data
-    high = full_data.xs('High', axis=1, level=1) if 'High' in full_data.columns.get_level_values(1) else full_data
-    low = full_data.xs('Low', axis=1, level=1) if 'Low' in full_data.columns.get_level_values(1) else full_data
-    volume = full_data.xs('Volume', axis=1, level=1) if 'Volume' in full_data.columns.get_level_values(1) else full_data
+    close, high, low, volume, open_p = [full_data.xs(k, axis=1, level=1) for k in ["Close", "High", "Low", "Volume", "Open"]]
+    
+    # Daily Gap Guard (データ異常・分割修正漏れ検知)
+    # 前日終値と当日始値の間に50%以上の乖離がある銘柄を「不完全データ」として全期間除隊
+    abs_gap = (open_p / close.shift(1) - 1).abs()
+    invalid_mask = (abs_gap > 0.50).any()
+    valid_tickers = invalid_mask[~invalid_mask].index.tolist()
+    
+    if len(valid_tickers) < len(close.columns):
+        close, high, low, volume, open_p = [df.loc[:, valid_tickers] for df in [close, high, low, volume, open_p]]
+
     sma200 = close.rolling(200).mean()
     sma200_slope = sma200.diff(5)
     ht = high.rolling(breakout_p).max().shift(1)
@@ -22,11 +29,20 @@ def calculate_all_technicals_v10(full_data, breakout_p=BREAKOUT_PERIOD, exit_p=E
     vol_confirm = volume > volume.shift(1)
     sma20 = close.rolling(20).mean()
     div = (close / sma20 - 1) * 100
+    
+    # ATR (Average True Range) - Period 14
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = tr.rolling(14).mean()
+
     return {
         "Close": close, "High": high, "Low": low, "Volume": volume,
         "SMA200": sma200, "SMA200_Slope": sma200_slope,
         "HT": ht, "LE": le, "Vol_Confirm": vol_confirm, "Divergence": div,
-        "Open": full_data.xs('Open', axis=1, level=1) if 'Open' in full_data.columns.get_level_values(1) else full_data
+        "ATR": atr,
+        "Open": open_p
     }
 
 def manage_positions_v10(portfolio, current_time, bundle, use_shield=True, use_profit_guard=False):
@@ -46,23 +62,44 @@ def manage_positions_v10(portfolio, current_time, bundle, use_shield=True, use_p
     for p in portfolio:
         code = str(p['code']); ticker = f"{code}.T"
         try:
-            op, lp, le_std = [bundle[k].at[current_time, ticker] for k in ["Open", "Low", "LE"]]
+            op, lp, hp, le_std = [bundle[k].at[current_time, ticker] for k in ["Open", "Low", "High", "LE"]]
             cp = bundle["Close"].at[current_time, ticker]
+            atr = bundle["ATR"].at[current_time, ticker]
+            
+            # 内部状態の管理 (最高値と保有日数)
+            if 'max_p' not in p or p['max_p'] < hp: p['max_p'] = hp
+            if 'held_days' not in p: p['held_days'] = 0
+            p['held_days'] += 1
+
+            # 1. ブレークイーブン・ストップ (最高値が買値 + 1.5*ATR を超えたら建値に)
+            le = le_std
+            is_be_active = False
+            if (p['max_p'] - p['buy_price']) > (1.5 * atr):
+                le = max(le, p['buy_price'])
+                is_be_active = True
+
+            # 利確ガード (legacy v10)
             gain = (cp / p['buy_price']) - 1
             if gain > 0.30 and use_profit_guard:
                 try:
-                    le = bundle["Low"].loc[:current_time, ticker].iloc[-6:-1].min()
-                except: le = le_std
-            else:
-                le = le_std
+                    le = max(le, bundle["Low"].loc[:current_time, ticker].iloc[-6:-1].min())
+                except: pass
 
             r, ep = (None, 0)
-            if is_bear:
-                r = "Market Shield Exit"; ep = op
-            elif op < le:
-                r = "Gap Exit"; ep = op
-            elif lp < le:
-                r = "Trend Exit"; ep = le
+            
+            # 2. タイムストップ (10営業日経過で 0.5*ATR の含み益がなければ撤退)
+            if p['held_days'] >= 10:
+                if (cp - p['buy_price']) < (0.5 * atr):
+                    r = "Time Stop"; ep = op
+
+            if not r:
+                if is_bear:
+                    r = "Market Shield Exit"; ep = op
+                elif op < le:
+                    r = "Gap Exit"; ep = op
+                elif lp < le:
+                    r = "Trend Exit" if not is_be_active else "Break-even Exit"
+                    ep = le
                 
             if r:
                 trade_logs.append({"code": code, "reason": r, "price": ep, "shares": p['shares'], "buy_price": p['buy_price'], "buy_time": p['buy_time']})
@@ -104,25 +141,66 @@ def detect_market_regime(bundle, current_time):
         return "BULL" if cp > sma200 else "BEAR"
     except: return "BULL"
 
-def manage_positions(portfolio, account, regime="BULL", is_simulation=True, realtime_buffers=None):
-    """ 本番運用用の損切り・ポジション管理 """
+def manage_positions(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None):
+    """ 本番運用用の損切り・ポジション管理 (防衛ロジック搭載) """
     sell_actions, trade_logs = [], []
     is_panic = (regime == "BEAR")
     new_portfolio = []
     
+    # 営業日の計算用 (シンプルに日付の差を見る)
+    now_dt = datetime.now(JST)
+
     for p in portfolio:
         code = str(p['code'])
-        # 損切り価格(Low Exit)を過去データ(bundle等)から取得し、保有時に記録している想定
-        # ここでは簡易的に、現在の価格がLE(損切ライン)を割ったかを判定
+        ticker = f"{code}.T"
         cp = p.get('current_price', p['buy_price'])
+        
+        # 1. リアルタイム価格と指標の取得
+        atr = 0
         if realtime_buffers and code in realtime_buffers:
-            cp = realtime_buffers[code].last_price or cp
+            buffer = realtime_buffers[code]
+            cp = buffer.last_price or cp
+            # ATRの算出 (簡易的に最新のATRを使用)
+            try:
+                df = buffer.data
+                if not df.empty:
+                    tr = np.maximum(np.maximum(df['High']-df['Low'], (df['High']-df['Close'].shift(1)).abs()), (df['Low']-df['Close'].shift(1)).abs())
+                    atr = tr.rolling(14).mean().iloc[-1]
+            except: pass
             
-        le = p.get('low_exit', 0)
+        # 2. 最高値の更新
+        if cp > p.get('highest_price', 0):
+            p['highest_price'] = cp
+            
+        # 3. 保有日数の計算 (buy_time文字列から)
+        try:
+            buy_dt = datetime.strptime(p['buy_time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=JST)
+            held_days = (now_dt - buy_dt).days
+        except: held_days = 0
+
+        # --- 防衛ロジックの判定 ---
+        le = p.get('low_exit', 0) # 基準の損切りライン
         reason = None
+        
+        # A. ブレークイーブン・ストップ (最高値が 1.5*ATR を超えたら建値に)
+        if atr > 0 and (p['highest_price'] - p['buy_price']) > (1.5 * atr):
+            # 買値 + 0.1% (手数料分) を新しい下限にする
+            safe_le = p['buy_price'] * 1.001
+            if le < safe_le:
+                le = safe_le
+                # ロ引上げの通知などはここでは行わず、判定のみ
+
+        # B. タイムストップ (10日経過で 0.5*ATR 以下の含み益ならエグジット)
+        if held_days >= 10:
+            if atr > 0 and (cp - p['buy_price']) < (0.5 * atr):
+                reason = "Time Stop (Stagnation)"
+
+        # C. 相場急変 (Market Shield)
         if is_panic:
             reason = "Market Shield Exit (BEAR Regime)"
-        elif le > 0 and cp < le:
+            
+        # D. 通常の損切り判定
+        if not reason and le > 0 and cp < le:
             reason = "Trend Exit (Break Stop Loss)"
             
         if reason:
@@ -133,8 +211,10 @@ def manage_positions(portfolio, account, regime="BULL", is_simulation=True, real
             })
             if is_simulation:
                 account['cash'] += cp * p['shares']
+            # 実運用の場合は、呼び出し元の auto_trade.py 側で注文を出す
         else:
             p['current_price'] = cp
+            p['low_exit'] = le # 損切りラインを保持
             new_portfolio.append(p)
             
     return new_portfolio, account, sell_actions, trade_logs

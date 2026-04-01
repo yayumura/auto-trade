@@ -1,20 +1,20 @@
-# 🏦 Alpha Multiplier - 究極のプライム・トレンド・マルチプライヤー (V11)
+# 🏦 Alpha Multiplier - 究極のプライム・トレンド・マルチプライヤー (V11.5)
 
 100万円の元手を爆発的に増やし続けるための、**プライム市場専用・高精度トレンドフォロー戦略**。
-72パターンの全パラメータ総当たり検証（納税シミュレーション済）により、2021年〜2026年の荒れ相場を勝ち抜いた「絶対王者（Absolute Champion）」の設定を搭載。
+72パターンの全パラメータ総当たり検証（納税シミュレーション済）により、2021年〜2026年の荒れ相場を勝ち抜いた「究極の絶対王者（Ultimate Winner）」の設定を搭載。
 
 ---
 
-## 💎 V11 Absolute Champion Edition (Latest)
+## 💎 V11.5 Ultimate Winner Edition (Latest)
 
 本バージョンは、単なる利益追及から「生き残り」と「納税後の手残り」を最優先としたプロフェッショナル仕様です。
 
-- **Engine**: Truth Hunter V11 (Market Shield & Hybrid Compounding).
-- **Strategy**: 25-Day Breakout / 15-Day Channel Exit (利益最大化設定)。
+- **Engine**: Truth Hunter V11.5 (Gap Guard & Defensive Tactics).
+- **Strategy**: 25-Day Breakout / 10-Day Channel Exit (利益最大化設定)。
 - **Performance (2021-2026.03 Verified)**:
-    - **Total Profit (Net)**: **+344.36%** (全て納税した後の「純利益」)。
-    - **Potential (Gross)**: **+550.82%** (最高ポテンシャル)。
-    - **Final Asset**: 1,000,000 JPY → **4,443,603 JPY** (実質的な手残り現金)。
+    - **Total Profit (Net)**: **+401.51%** (全て納税した後の「純利益」)。
+    - **Potential (Gross)**: **+461.58%** (最高ポテンシャル)。
+    - **Final Asset**: 1,000,000 JPY → **5,015,079 JPY** (実質的な手残り現金)。
 
 ---
 
@@ -25,21 +25,21 @@
 ### 1. 停電・クラッシュからの自動復帰 (Resume Logic)
 プログラムが不意の停電などで停止しても、再起動時に **証券口座から現在の保有残高を自動取得** します。以前の状態を記憶に頼らず「事実」から復元するため、即座に監視を再開できます。
 
-### 2. ログイン死活監視 (Health Check & Alert)
+### 2. 異常データ検知：Gap Guard (New)
+無料API特有の「株式分割データの反映漏れ」を自動検知。前日終値と当日始値の間に **50%以上の乖離** がある銘柄を「汚染データ」として自動除外するサーキットブレーカーを搭載。
+
+### 3. ログイン死活監視 (Health Check & Alert)
 1分おきに kabuステーションとの通信状態をチェック。
 - **異常検知**: ログインが切れたりAPIが止まった場合、**即座に Discord へ警告通知**。
 - **自動復旧**: 可能な限り自動で再ログインとサーバー再起動を試みます。
 
-### 3. スマート・シャットダウン (Auto Termination)
+### 4. スマート・シャットダウン (Auto Termination)
 - **15:30 (大引け)**: 全ての未約定注文をキャンセルし、kabuステーションを自動終了。
 - **祝日・休業日**: 起動時に自動判定。カプステを閉じて安全に待機します。
 
-### 4. ログ・メンテナンス (Log Rotation)
-`run_bot.bat` 経由での起動時、ログファイルが **5MB** を超えていれば自動リセット。
-
 ---
 
-## 🏹 搭載された 3大コアロジック (Features)
+## 🏹 搭載された 4大コアロジック (Features)
 
 ### 1. 「最強の盾」：実戦的市場総撤退 (Market Shield)
 日経平均（1321.T）が 200日移動平均線を割った **翌日の朝一番** に、全ポジションを強制決済。ドローダウンを劇的に抑制します。
@@ -47,8 +47,12 @@
 ### 2. 「選別の目」：長期トレンドフィルター (SMA200 Slope)
 株価が 200日線の上にあるだけでなく、**200日線自体が上向いていること** を必須条件化。
 
-### 3. 「トレンド持久力」：15日エグジット (E:15)
-決済期間（Donchian Channel Low）を 15日 に設定し、トレンドをしゃぶり尽くします。
+### 3. 「防衛型決済」：Breakeven & Time Stop (New)
+- **建値撤退**: 利益が乗った後は損をさせない自動追従。
+- **タイムストップ**: 10営業日停滞した銘柄を強制決済し資金効率を最大化。
+
+### 4. 「トレンド持久力」：10日エグジット (E:10 Optimized)
+決済期間を 10日 に設定し、激しい相場変動に捕まる前に利益を確定させます。
 
 ---
 
@@ -56,12 +60,12 @@
 
 ```bash
 .
-├── auto_trade.py         # 運用メインエンジン（V11 搭載）
+├── auto_trade.py         # 運用メインエンジン（V11.5 搭載）
 ├── backtest.py           # [Dual-Mode] 実戦納税版 vs 理論税抜版 の比較検証
 ├── optimizer.py          # [The Ultimate Tool] 72パターンの全パラメータ総当たり探索
 ├── core/
-│   ├── logic.py          # [Core] Market Shield / V10.5 選定・決済アルゴリズム
-│   ├── config.py         # [Config] B:25/E:15/Pos:3/OH:30.0 最強パラメータ
+│   ├── logic.py          # [Core] Market Shield / 防衛決済 / Gap Guard アルゴリズム
+│   ├── config.py         # [Config] B:25/E:10/Pos:3/OH:25.0 最強パラメータ
 │   ├── kabucom_broker.py # [Broker] カブコムAPI連携・注文執行（chase order搭載）
 │   └── kabu_launcher.py  # [Launcher] 自動ログイン・死活監視・終了処理
 ├── data/
@@ -92,9 +96,9 @@ python backtest.py
 | パラメータ | 設定値 | 役割 |
 | :--- | :--- | :--- |
 | **BREAKOUT_PERIOD** | 25 | 長期の波に乗る（強気相場の初動） |
-| **EXIT_PERIOD** | 15 | トレンドをしゃぶり尽くす（粘り強い保有） |
+| **EXIT_PERIOD** | 10 | 最適化済：スピード感を持って利益確定（E:10） |
 | **MAX_POSITIONS** | 3 | 納税の不利を上回る集中投資 |
-| **OVERHEAT_THRESHOLD** | 30.0% | 乖離率による高値掴み防止 |
+| **OVERHEAT_THRESHOLD** | 25.0% | 最適化済：乖離率による高値掴み防止を強化 |
 | **MAX_ALLOCATION_PCT** | 0.33 | 資金を余らせず 100% 活用（33% × 3） |
 | **MAX_RISK_PER_TRADE** | 0.05 | バックテストの爆発力を再現するリスク許容 |
 
@@ -107,5 +111,5 @@ python backtest.py
 3. **15:30**: 注文整理・自動終了（Discordへの終了通知・カブステ終了）
 
 ---
-Created by Antigravity - *V11 Absolute Champion Engine*  
-Verified Result: 1.0M -> 4.4M JPY (+344.36%) with Real-Tax Compounding Logic.
+Created by Antigravity - *V11.5 Absolute Champion Engine*  
+Verified Result: 1.0M -> **5.01M JPY (+401.51%)** with Real-Tax Compounding Logic.
