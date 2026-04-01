@@ -348,7 +348,8 @@ def _main_exec():
             for code in new_codes:
                 print(f"[NEW] 新規銘柄をバッファに追加: {code}")
                 # 5日分の15分足を初期データとして取得
-                hist = yf.download(str(code)+".T", period="5d", interval="15m", progress=False, threads=False)
+                # [Professional Audit] 15分足バッファの初期シードを5日から10日に拡大（SMA設定等への対応）
+                hist = yf.download(str(code)+".T", period="10d", interval="15m", progress=False, threads=False)
                 realtime_buffers[code] = RealtimeBuffer(code, hist, interval_mins=15)
             
             # 監視対象外のパージ（メモリリーク防止）
@@ -370,7 +371,8 @@ def _main_exec():
         # --- 2. 相場環境（レジーム）判定 (Phase 1) ---
         try:
             # バッファを渡すことで、日内での yf.download の重複を排除
-            regime = detect_market_regime(broker=broker, buffer=realtime_buffers.get("1321"))
+            # [Professional Audit] マクロ相場判定は日足ベースで行うため、15分足バッファを渡さず強制リロードさせる
+            regime = detect_market_regime(broker=broker, buffer=None)
         except Exception as e:
             msg = f"[WARNING] 【警告】レジーム判定に失敗: {e}\n安全のためRANGE戦略に切り替え、保有監視のみ継続します。"
             print(msg)
@@ -469,8 +471,10 @@ def _main_exec():
                     # [Professional Audit] 規則的なアクセスによる外部検知を回避するため、0.5〜1.5秒の揺らぎ（Jitter）を付与
                     if i > 0: time.sleep(random.uniform(0.5, 1.5))
                     try:
-                        # モーニングスキャンなら日足、日中なら15分足
-                        dl_period = "3mo" if is_morning_scan else "5d"
+                        # [Professional Audit] SMA200等 200 本前後の計算を前提とする指標を安定させるため、
+                        # スキャン時は最低でも 200 本以上のデータが必要。
+                        # 日足なら最低 10ヶ月 (安全を見て 2y)、15分足なら最低 10営業日 (安全を見て 1mo) 取得。
+                        dl_period = "2y" if is_morning_scan else "1mo" 
                         dl_interval = "1d" if is_morning_scan else "15m"
                         # [Professional Audit] auto_adjust=False を明示し、Tickデータ（未調整価格）との整合性を 100% 保証する
                         chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', 
@@ -712,6 +716,12 @@ def _main_exec():
                             exec_p = float(details.get('Price', 0)) or buy_price
                             print(f"[OK] Buy Done: {best_target['code']} {actual_qty} @ {exec_p:,.1f}")
                             send_discord_notify(f"BUY EXEC: {best_target['code']} | {exec_p:,.1f} x {actual_qty}")
+                            
+                            # 検証モード(TEST)の場合は仮想残高を更新
+                            if not broker.is_production:
+                                account['cash'] -= exec_p * actual_qty
+                                if hasattr(broker, 'save_account'): broker.save_account(account)
+
                             portfolio.append({
                                 "code": best_target['code'], "name": best_target['name'],
                                 "buy_time": datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),

@@ -16,6 +16,20 @@ def normalize_tick_size(price: float, is_buy: bool) -> int:
     tick = 1.0 if p <= 3000 else 5.0 if p <= 5000 else 10.0 if p <= 10000 else 50.0
     return int((p + tick - 0.0001) // tick * tick) if is_buy else int(p // tick * tick)
 
+def load_invalid_tickers():
+    if os.path.exists(EXCLUSION_CACHE_FILE):
+        try:
+            with open(EXCLUSION_CACHE_FILE, 'r') as f:
+                return set(json.load(f))
+        except: return set()
+    return set()
+
+def save_invalid_tickers(invalid_tickers):
+    try:
+        with open(EXCLUSION_CACHE_FILE, 'w') as f:
+            json.dump(list(invalid_tickers), f)
+    except: pass
+
 class RealtimeBuffer:
     def __init__(self, code, history_df, interval_mins=15):
         self.code = code
@@ -32,11 +46,38 @@ def detect_market_regime(broker=None, buffer=None, current_time_override=None, v
             df = buffer.df
         else:
             if broker is None: return "BULL"
-            df = yf.download('1321.T', period='1y', interval='1d', progress=False)
-        if df.empty: return "BULL"
-        cl, s200 = df['Close'].iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
-        return "BEAR" if cl < s200 else "BULL"
-    except: return "RANGE"
+            # 指数データの取得 (1321: 日経225ETF)
+            df = yf.download('1321.T', period='2y', interval='1d', progress=False)
+            
+        if df is None or df.empty:
+            if verbose: print("⚠️ [Regime] Index data could not be acquired. Defaulting to RANGE.")
+            return "RANGE"
+
+        # yfinanceのデータ形式(MultiIndex等)に依存せず、'Close'列の最後の値を取り出す
+        if 'Close' in df.columns:
+            # MultiIndex (Ticker, Column) のケースを考慮
+            close_data = df['Close']
+            if isinstance(close_data, pd.DataFrame):
+                close_data = close_data.iloc[:, 0]
+            
+            if len(close_data) < 200:
+                if verbose: print(f"⚠️ [Regime] Data volume is insufficient ({len(close_data)}). Defaulting to RANGE.")
+                return "RANGE"
+
+            cl = float(close_data.iloc[-1])
+            s200 = float(close_data.rolling(200).mean().iloc[-1])
+            
+            if pd.isna(s200):
+                if verbose: print("⚠️ [Regime] SMA200 calculation resulted in NaN. Defaulting to RANGE.")
+                return "RANGE"
+                
+            return "BEAR" if cl < s200 else "BULL"
+        else:
+            if verbose: print("⚠️ [Regime] 'Close' column not found in data.")
+            return "RANGE"
+    except Exception as e:
+        if verbose: print(f"⚠️ [Regime] Error occurred: {e}. Defaulting to RANGE.")
+        return "RANGE"
 
 def calculate_all_technicals_v10(full_data, breakout_p=BREAKOUT_PERIOD, exit_p=EXIT_PERIOD):
     if full_data is None or full_data.empty: return None
@@ -116,7 +157,14 @@ def manage_positions(portfolio, account, broker, regime="RANGE", is_simulation=T
                 elif lp < le: sell_reason = "Final Exit"; exec_p = le
                 if sell_reason:
                     actions.append({"code": code, "type": "SELL", "price": exec_p, "shares": p['shares'], "reason": sell_reason})
-                    trade_logs.append({"code": code, "profit": (exec_p - bp) * p['shares'], "reason": sell_reason})
+                    # 現金残高を更新 (シミュレーションおよび検証モード用)
+                    gross = exec_p * p['shares']
+                    profit = (exec_p - bp) * p['shares']
+                    # 簡易的な税金計算 (利益の20.315%)
+                    tax = max(0, int(profit * 0.20315)) if profit > 0 else 0
+                    account['cash'] += (gross - tax)
+                    
+                    trade_logs.append({"code": code, "profit": profit - tax, "reason": sell_reason})
                 else: remaining.append(p)
             else: remaining.append(p)
         except: remaining.append(p)

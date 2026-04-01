@@ -142,14 +142,34 @@ class KabucomBroker(BaseBroker):
             return []
 
     def get_account_balance(self) -> dict:
-        """ 現金残高（買付余力）の取得 """
+        """ 
+        [Professional Audit] モードに応じた残高取得。
+        - 本番モード: APIから本物の資産情報を取得。
+        - 検証モード: APIの固定値を無視し、ローカルファイル(account.json)で仮想資金を管理。
+        """
         if not self.token: return {"cash": 0}
         
+        # 検証モード(TEST)の場合はローカルファイルを優先
+        if not self.is_production:
+            from core.config import ACCOUNT_FILE, INITIAL_CASH
+            from core.file_io import safe_read_json, atomic_write_json
+            account = safe_read_json(ACCOUNT_FILE)
+            # 残高が0円、または情報がない場合はINITIAL_CASHで初期化
+            if not account or account.get('cash', 0) <= 0:
+                print(f"💰 [Account] 仮想資金を初期化します: {INITIAL_CASH:,.0f}円")
+                account = {"cash": float(INITIAL_CASH)}
+                atomic_write_json(ACCOUNT_FILE, account)
+            return account
+
+        # 本番モード(LIVE)の場合はAPIから取得
         res = self._api_request("GET", "wallet/cash", timeout=10)
         if res and res.status_code == 200:
             data = res.json()
-            cash = data.get('StockAccountWallet')
-            return {"cash": float(cash) if cash is not None else 0.0}
+            margin = data.get('MarginAccountWallet')
+            stock = data.get('StockAccountWallet')
+            m_val = float(margin) if margin is not None else 0.0
+            s_val = float(stock) if stock is not None else 0.0
+            return {"cash": max(m_val, s_val)}
         
         print(f"⚠️ 余力取得エラー: {res.text if res else 'No Response'}")
         return {"cash": 0}
