@@ -258,7 +258,7 @@ class KabucomBroker(BaseBroker):
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
             "CashMargin": cash_margin,
-            "MarginTradeType": 3,
+            "MarginTradeType": 1,
             "DelivType": 0,
             "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),
             "Qty": shares,
@@ -487,7 +487,7 @@ class KabucomBroker(BaseBroker):
             else:
                 force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
                 
-            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price, hold_ids=hold_ids if side == "1" else None)
+            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price)
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:

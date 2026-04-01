@@ -15,7 +15,7 @@ import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
-from core.kabu_launcher import ensure_kabu_station_running
+from core.kabu_launcher import ensure_kabu_station_running, terminate_kabu_station, check_api_health
 from core.utils import calculate_effective_age, get_previous_business_day
 
 class MarketPhase(Enum):
@@ -219,6 +219,15 @@ def _main_exec():
         now_time = server_datetime.time()
 
         phase = get_market_phase(now_time)
+        
+        # [Expert Safety Device] カブステーションの死活監視
+        if not is_sim and not check_api_health():
+            msg = "⚠️ 【警告】kabuステーションのAPI応答がありません。ログインが切れた、または通信エラーの可能性があります！"
+            print(f"\n{msg}")
+            send_discord_notify(msg)
+            # 再ログインを試行
+            ensure_kabu_station_running()
+            
         print(f"\n[{datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
 
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
@@ -233,6 +242,9 @@ def _main_exec():
                     if oid:
                         print(f"🧹 [Closing Cleanup] 未約定注文 {oid} を取り消します...")
                         broker.cancel_order(oid)
+            
+            # [Expert Addition] カブステーションの自動終了
+            terminate_kabu_station()
             break
 
         if not DEBUG_MODE:
@@ -242,6 +254,7 @@ def _main_exec():
             if is_weekend or is_holiday:
                 reason = "土日" if is_weekend else f"祝日({jpholiday.is_holiday_name(server_datetime.date())})"
                 print(f"💤 本日は市場休業日（{reason}）です。")
+                terminate_kabu_station()
                 break
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:

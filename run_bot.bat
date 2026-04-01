@@ -5,10 +5,13 @@ cd /d "c:\Users\yayum\git_work\auto-trade"
 REM Set paths
 set PYTHON_EXE=C:\Users\yayum\AppData\Local\Programs\Python\Python311\python.exe
 set SCHEDULER_LOG=data\kabucom_test\logs\task_scheduler.log
+set LOG_ROOT=data\kabucom_test\logs
 
 REM Force UTF-8 for everything (to avoid UnicodeDecodeError on Windows)
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
+REM --- フォルダがなければ作成 (重要: これがないと起動前にエラー落ちする) ---
+if not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%"
 
 REM --- ログ肥大化対策: 5MBを超えていたらリセット ---
 if exist "%SCHEDULER_LOG%" (

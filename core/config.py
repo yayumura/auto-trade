@@ -26,8 +26,8 @@ MAX_DAILY_BUYS = 5
 STOP_LOSS_MULT = 3.0
 ATR_STOP_LOSS = 3.0
 RANGE_ATR_STOP_LOSS = 2.0
-MAX_RISK_PER_TRADE = 0.01
-MAX_ALLOCATION_PCT = 0.20
+MAX_RISK_PER_TRADE = 0.05  # リスク許容度を5%に引き上げ (33%配分を妨げないための調整)
+MAX_ALLOCATION_PCT = 0.33   # 1銘柄最大33%まで (分散3銘柄で資金を使い切る設定)
 MIN_ALLOCATION_AMOUNT = 100000
 
 # 動作モード (環境変数から取得、なければデフォルト)

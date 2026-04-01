@@ -172,3 +172,39 @@ def _wait_for_api_server(timeout_sec=60, silent=False):
     if not silent:
         print("❌ APIサーバーの起動確認がタイムアウトしました。")
     return False
+
+def terminate_kabu_station():
+    """
+    起動中のkabuステーションのプロセスを終了させる。
+    """
+    print("\n[Launcher] 🛑 kabuステーションを終了します...")
+    target_processes = ['KabuS.exe', 'kabu.station.exe']
+    found = False
+    
+    for proc in psutil.process_iter(['name']):
+        try:
+            if proc.info['name'] in target_processes:
+                print(f"📦 プロセス {proc.info['name']} (PID: {proc.pid}) を終了しています...")
+                proc.terminate() # 優しく終了
+                # 3秒待っても終わらなければ強制終了
+                try:
+                    proc.wait(timeout=3)
+                except psutil.TimeoutExpired:
+                    print(f"⚠️ 終了が遅いため強制終了します (PID: {proc.pid})")
+                    proc.kill()
+                found = True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+            
+    if found:
+        print("✅ kabuステーションを終了しました。")
+        send_discord_notify("🛑 [システム終了] kabuステーションを正常に終了しました。")
+    else:
+        print("ℹ️ 起動中のkabuステーションは見つかりませんでした。")
+    return found
+
+def check_api_health():
+    """
+    APIサーバーが現在稼働中（ログイン済み）かを確認する。
+    """
+    return _wait_for_api_server(timeout_sec=2, silent=True)
