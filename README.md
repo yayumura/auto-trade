@@ -97,6 +97,34 @@ python backtest.py --breakout 25 --exit 10 --max_pos 3
 | **OVERHEAT_THRESHOLD** | 25.0% | 乖離率による高値掴み防止 |
 | **MAX_ALLOCATION_PCT** | 0.50 | 資金を余らせず 2銘柄で使い切る（50% × 2） |
 
+## 🚀 運用ガイド (Operations Guide)
+
+本ツールを自動運用するための準備と実行手順です。
+
+### 1. 環境準備
+Python 3.11 がインストールされていることを確認し、必要なライブラリをインストールします。
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 設定の構成 (.env)
+プロジェクトルートにある `.env` ファイルを編集し、以下の項目を設定します。
+- `TRADE_MODE`: `SIMULATION` (仮想), `KABUCOM_TEST` (検証用), `KABUCOM_LIVE` (本番)
+- `KABUCOM_API_PASSWORD`: kabuステーションAPIのパスワード
+- `KABUCOM_LOGIN_PASSWORD`: kabuステーション本体のログインパスワード
+- `DISCORD_WEBHOOK_URL`: 指定のチャンネルに通知を送るためのURL（任意）
+
+### 3. ロボットの起動
+`run_bot.bat` をダブルクリックするか、Windows タスクスケジューラに登録して実行します。
+- **実行ファイル**: `run_bot.bat`
+- **ログの確認**: 
+  - **全体ログ**: `data/kabucom_test/logs/task_scheduler.log`（起動・停止の記録。5MB制限あり）
+  - **日別詳細**: `data/kabucom_test/logs/console_YYYY-MM-DD.log`（スキャン内容や売買理由の詳細。30日で自動クリーンアップ）
+
+
+> [!TIP]
+> `run_bot.bat` 内の `PYTHON_EXE` パスは、自身の環境における `python.exe` の絶対パスに書き換えて使用してください。
+
 ---
 
 Created by Antigravity - *V11.1 Ultimate Winner Max*  
