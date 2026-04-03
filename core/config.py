@@ -16,8 +16,17 @@ TRUTH_TRADES_V10 = 316
 
 # --- 運用パラメータ (V11.0 Ultimate Winner Optimized) ---
 STOCKS_TYPE = "prime"      # ターゲット市場 (prime)
+if STOCKS_TYPE == "prime":
+    TARGET_MARKETS = ["プライム（内国株式）"]
+elif STOCKS_TYPE == "standard":
+    TARGET_MARKETS = ["スタンダード（内国株式）"]
+elif STOCKS_TYPE == "growth":
+    TARGET_MARKETS = ["グロース（内国株式）"]
+else:
+    TARGET_MARKETS = ["プライム（内国株式）"]
+
 BREAKOUT_PERIOD = 30       # 最強の30日ブレイク (V11.1 Ultimate Winner)
-EXIT_PERIOD = 15           # 15日安値エグジット (Trend Capture)
+EXIT_PERIOD = 10           # 10日安値エグジット (Quick Recovery)
 MAX_POSITIONS = 2          # 2銘柄集中投資 (Concentration Alpha)
 OVERHEAT_THRESHOLD = 25.0  # 乖離率25.0%まで制限 (Safety Edge)
 MAX_DAILY_BUYS = 5

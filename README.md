@@ -97,6 +97,8 @@ python backtest.py --breakout 25 --exit 10 --max_pos 3
 | **OVERHEAT_THRESHOLD** | 25.0% | 乖離率による高値掴み防止 |
 | **MAX_ALLOCATION_PCT** | 0.50 | 資金を余らせず 2銘柄で使い切る（50% × 2） |
 
+---
+
 ## 🚀 運用ガイド (Operations Guide)
 
 本ツールを自動運用するための準備と実行手順です。
@@ -129,3 +131,11 @@ pip install -r requirements.txt
 
 Created by Antigravity - *V11.1 Ultimate Winner Max*  
 Verified Result: 1.0M -> **7.00M JPY (+600.36%)** across 6 Years Market Data.
+
+---
+
+## 🎯 V11.2 [Synchronized Update] (2026.04.03)
+最後に、今回の修正で得られた同期済みデータの記録を末尾に添えます。
+- 修正内容: 現金残高の厳格管理 (Strict Cash Management) / 本番API同期
+- 最新期待値: **資産 6,702,520 JPY (+570.25%)** / 2026.03完結データ
+- 最新設定: `EXIT_PERIOD = 10` (高回転型に最適化)

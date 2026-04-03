@@ -61,8 +61,35 @@ def ensure_kabu_station_running():
         return False
 
     try:
-        subprocess.Popen(kabu_path)
-        print(f"🖥️  プロセスを起動しました: {kabu_path}")
+        # 古い残存プロセスがあれば一度掃除する（二重起動防止とクリーンな状態の確保）
+        for proc in psutil.process_iter(['name']):
+            try:
+                if proc.info['name'] in ['KabuS.exe', 'kabu.station.exe']:
+                     proc.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        time.sleep(1)
+
+        # 起動の安定性を高めるため、カレントディレクトリを実行ファイルの場所に設定する
+        kabu_dir = os.path.dirname(kabu_path)
+        # os.startfile は Explore でダブルクリックしたのと同等の挙動となり、依存関係のあるアプリの起動に強い
+        os.chdir(kabu_dir)
+        os.startfile(kabu_path)
+        print(f"🖥️  アプリケーションを起動しました: {kabu_path} (CWD: {kabu_dir})")
+        
+        # 少し待ってからプロセスが本当に存在するか軽くチェック
+        time.sleep(3)
+        found_pid = None
+        for proc in psutil.process_iter(['pid', 'name']):
+            if proc.info['name'] in ['KabuS.exe', 'kabu.station.exe']:
+                found_pid = proc.info['pid']
+                break
+        
+        if not found_pid:
+            print("⚠️ プロセスを開始しましたが、psutilで確認できませんでした。起動に時間がかかっているか、失敗した可能性があります。")
+        else:
+            print(f"✅ プロセスを確認しました (PID: {found_pid})")
+
     except Exception as e:
         print(f"❌ アプリケーションの起動に失敗しました: {e}")
         return False
