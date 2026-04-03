@@ -344,6 +344,13 @@ def _main_exec():
                 continue
             if not is_sim:
                 broker.execute_chase_order(log['code'], log['shares'], side="1")
+            else:
+                # [SIM追加] 売却額を口座残高に戻す
+                exit_p = float(log.get('exit_price', log.get('price', 0)))
+                qty = int(log.get('shares', 0))
+                account['cash'] += (exit_p * qty)
+                print(f"💰 [SIM Cash Return] {log['name']} 売却額 {int(exit_p * qty):,}円 を口座に戻しました。")
+                
             if hasattr(broker, 'log_trade'): broker.log_trade(log)
         
         if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
