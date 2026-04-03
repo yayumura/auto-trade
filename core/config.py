@@ -22,9 +22,9 @@ else:
 # --- Trading Parameters (V12.0 Growth Monster Optimized Rank #1) ---
 STOCKS_TYPE = "growth" 
 BREAKOUT_PERIOD = 5   # Hyper-breakout (standardized)
-EXIT_PERIOD = 3       # Optimized Time-limit (Rank #2, most stable)
+EXIT_PERIOD = 3       # Optimized Time-limit (Rank #1, most stable)
 MAX_POSITIONS = 5     # Optimized Concentration
-TARGET_PROFIT = 0.05  # Optimized Take-Profit (Rank #1)
+TARGET_PROFIT = 0.07  # Optimized Take-Profit (Rank #1)
 INITIAL_CASH = 1000000 
 MAX_DAILY_BUYS = 5
 STOP_LOSS_RATE = 0.03 # Optimized Stop-Loss
@@ -69,6 +69,8 @@ EXCLUSION_CACHE_FILE = "invalid_tickers.json"
 # --- Position Sizing (ATR-based, live trading only) ---
 MAX_RISK_PER_TRADE    = 0.02   # 総資産の2%をリスク許容額とする
 MAX_ALLOCATION_PCT    = 0.20   # 1銘柄に総資産の最大20%まで
+MAX_ALLOCATION_AMOUNT = 5000000 # 1銘柄の最大投資額（スリッページ防止: 500万円）
+LIQUIDITY_LIMIT_RATE  = 0.01    # 1銘柄の購入額を平均売買代金の1%以内に抑える
 MIN_ALLOCATION_AMOUNT = 100000 # 最低10万円以上でないと購入しない
 ATR_STOP_LOSS         = 2.0    # ATR × 2.0 を損切り幅とする
 RANGE_ATR_STOP_LOSS   = 1.5    # レンジ相場時は ATR × 1.5 に縮小

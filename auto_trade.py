@@ -49,7 +49,7 @@ from core.config import (
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
-    MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT,
+    MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
     load_insider_exclusion_codes
 )
@@ -522,7 +522,11 @@ def _main_exec():
                         sm = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
                         rps = a * sm
                         is_sh = int(ra // rps) if rps > 0 else 100
-                        ma = max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT)
+                        ma = min(max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
+                        adv = item.get('adv_yen', 0)
+                        if adv > 0:
+                            ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
+                        
                         ms_a = int(ma // tp)
                         ms_c = int((account['cash'] / 1.0001) // tp)
                         ts = (min(is_sh, ms_a, ms_c) // 100) * 100

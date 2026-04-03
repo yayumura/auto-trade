@@ -8,7 +8,8 @@ from datetime import datetime
 sys.path.append(os.getcwd())
 from core.config import (
     INITIAL_CASH, DATA_FILE, JST, TAX_RATE, MIN_PRICE, MAX_PRICE,
-    STOCKS_TYPE, BREAKOUT_PERIOD, EXIT_PERIOD, MAX_POSITIONS, TARGET_PROFIT, STOP_LOSS_RATE
+    STOCKS_TYPE, BREAKOUT_PERIOD, EXIT_PERIOD, MAX_POSITIONS, TARGET_PROFIT, STOP_LOSS_RATE,
+    MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE
 )
 from core.logic import calculate_all_technicals_v12
 
@@ -18,7 +19,8 @@ from core.logic import calculate_all_technicals_v12
 # ============================================================
 def run_backtest_with_monthly(univ_indices, bundle_np, timeline, tickers_list,
                                initial_cash=1000000, max_pos=5,
-                               tp=0.07, sl=0.03, time_limit=3, apply_tax=True):
+                               tp=0.07, sl=0.03, time_limit=3, apply_tax=True,
+                               max_allocation=5000000, liquidity_rate=0.01):
     """
     optimizer.py の run_numpy_backtest_v12 と完全同一ロジック。
     月次資産トラッキングを追加した拡張版。
@@ -40,6 +42,7 @@ def run_backtest_with_monthly(univ_indices, bundle_np, timeline, tickers_list,
     volume_np = bundle_np['Volume']
     sma20_vol_np = bundle_np['SMA20_Vol']
     ht_np     = bundle_np['HT']
+    adv_np    = bundle_np['ADV']
 
     warmup, T = 25, len(timeline)
 
@@ -144,7 +147,13 @@ def run_backtest_with_monthly(univ_indices, bundle_np, timeline, tickers_list,
                     total_eq = cash + sum(
                         close_np[i, p['s_idx']] * p['shares'] for p in portfolio
                     )
-                    max_cap = total_eq / max_pos
+                    max_cap = min(total_eq / max_pos, max_allocation)
+                    
+                    # Dynamic Liquidity Cap (ADV * 1%)
+                    adv_yen = adv_np[i, s_idx]
+                    if adv_yen > 0:
+                        max_cap = min(max_cap, adv_yen * liquidity_rate)
+
                     buy_p = open_np[i + 1, s_idx]
                     if not np.isnan(buy_p):
                         sh = int(min(cash // buy_p, max_cap // buy_p))
@@ -213,6 +222,10 @@ if __name__ == "__main__":
 
     # 2. テクニカル計算
     bundle_static = calculate_all_technicals_v12(all_data, breakout_p=args.breakout)
+    # --- ADV (Turnover) 5-day average calculation ---
+    turnover = (bundle_static['Volume'] * bundle_static['Close']).rolling(5).mean()
+    bundle_static['ADV'] = turnover
+
     tickers_list = bundle_static['Close'].columns.tolist()
     timeline = bundle_static["Close"].index.unique().sort_values()
     univ_indices = np.array([tickers_list.index(t) for t in valid_tickers])
@@ -222,12 +235,12 @@ if __name__ == "__main__":
     fa_net,   tc_net,   ma_net   = run_backtest_with_monthly(
         univ_indices, bundle_np, timeline, tickers_list,
         max_pos=args.max_pos, tp=args.tp, sl=args.sl, time_limit=args.exit,
-        apply_tax=True
+        apply_tax=True, max_allocation=MAX_ALLOCATION_AMOUNT, liquidity_rate=LIQUIDITY_LIMIT_RATE
     )
     fa_gross, tc_gross, ma_gross = run_backtest_with_monthly(
         univ_indices, bundle_np, timeline, tickers_list,
         max_pos=args.max_pos, tp=args.tp, sl=args.sl, time_limit=args.exit,
-        apply_tax=False
+        apply_tax=False, max_allocation=MAX_ALLOCATION_AMOUNT, liquidity_rate=LIQUIDITY_LIMIT_RATE
     )
 
     pct_net   = (fa_net   - INITIAL_CASH) / INITIAL_CASH * 100
