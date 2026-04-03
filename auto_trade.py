@@ -518,6 +518,7 @@ def _main_exec():
                         
                         tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
                         te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                        ra = te * MAX_RISK_PER_TRADE
                         # 3%の固定損失（STOP_LOSS_RATE）を1株あたりのリスクとして株数を計算
                         rps = p * STOP_LOSS_RATE 
                         is_sh = int(ra // rps) if rps > 0 else 100
