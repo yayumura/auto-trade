@@ -137,12 +137,23 @@ def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffer
     if bundle is None: return []
     current_time = data_df.index[-1]
     candidates = select_candidates_v12(current_time, bundle, targets, max_count=MAX_POSITIONS)
+    # Calculate ADV (Average Daily Volume) in Yen for last 5 samples
+    # Usually data_df is daily or 15m. If daily, 5 samples = 1 week.
+    vol = bundle["Volume"]
+    close = bundle["Close"]
+    turnover = (vol * close).rolling(5).mean().loc[current_time]
+
     # Convert to expected dictionaries for auto_trade.py
     results = []
     for c in candidates:
+        ticker = f"{c['code']}.T"
         name = df_symbols[df_symbols['コード'].astype(str) == str(c['code'])]['銘柄名'].values[0] if not df_symbols.empty else "Unknown"
+        adv_yen = float(turnover.get(ticker, 0)) if not pd.isna(turnover.get(ticker)) else 0
+        
         results.append({
-            "code": c['code'], "name": name, "price": c['price'], "score": c['score'], "atr": bundle["ATR"].at[current_time, f"{c['code']}.T"]
+            "code": c['code'], "name": name, "price": c['price'], 
+            "score": c['score'], "atr": bundle["ATR"].at[current_time, ticker],
+            "adv_yen": adv_yen
         })
     return results
 

@@ -5,10 +5,10 @@ import sys
 from datetime import datetime
 
 sys.path.append(os.getcwd())
-from core.config import DATA_FILE, JST, TAX_RATE, MIN_PRICE, MAX_PRICE
+from core.config import DATA_FILE, JST, TAX_RATE, MIN_PRICE, MAX_PRICE, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE
 from core.logic import calculate_all_technicals_v12
 
-def run_numpy_backtest_v12(univ_indices, bundle_np, timeline, initial_cash=1000000, max_pos=5, tp=0.07, sl=0.03, time_limit=3):
+def run_numpy_backtest_v12(univ_indices, bundle_np, timeline, initial_cash=1000000, max_pos=5, tp=0.07, sl=0.03, time_limit=3, max_allocation=5000000, liquidity_rate=0.01):
     cash_net, cash_gross = float(initial_cash), float(initial_cash)
     port_net, port_gross = [], []
     t_net, t_gross = 0, 0
@@ -19,6 +19,7 @@ def run_numpy_backtest_v12(univ_indices, bundle_np, timeline, initial_cash=10000
     sma20_np, ret3_np = bundle_np['SMA20'], bundle_np['Ret3']
     volume_np, sma20_vol_np = bundle_np['Volume'], bundle_np['SMA20_Vol']
     ht_np = bundle_np['HT']
+    adv_np = bundle_np['ADV']
     warmup, T = 25, len(timeline)
     
     for i in range(warmup, T):
@@ -121,7 +122,13 @@ def run_numpy_backtest_v12(univ_indices, bundle_np, timeline, initial_cash=10000
                         if s_idx in [pw['s_idx'] for pw in port_net]: continue
                         
                         total_eq_net = cash_net + sum(close_np[i, p['s_idx']] * p['shares'] for p in port_net)
-                        max_cap = total_eq_net / max_pos
+                        max_cap = min(total_eq_net / max_pos, max_allocation)
+                        
+                        # Dynamic Liquidity Cap
+                        adv_yen = adv_np[i, s_idx]
+                        if adv_yen > 0:
+                            max_cap = min(max_cap, adv_yen * liquidity_rate)
+
                         buy_p = open_np[i+1, s_idx]
                         if not np.isnan(buy_p):
                             sh = int(min(cash_net // buy_p, max_cap // buy_p))
@@ -138,7 +145,13 @@ def run_numpy_backtest_v12(univ_indices, bundle_np, timeline, initial_cash=10000
                         if s_idx in [pw['s_idx'] for pw in port_gross]: continue
                         
                         total_eq_gross = cash_gross + sum(close_np[i, p['s_idx']] * p['shares'] for p in port_gross)
-                        max_cap = total_eq_gross / max_pos
+                        max_cap = min(total_eq_gross / max_pos, max_allocation)
+                        
+                        # Dynamic Liquidity Cap
+                        adv_yen = adv_np[i, s_idx]
+                        if adv_yen > 0:
+                            max_cap = min(max_cap, adv_yen * liquidity_rate)
+
                         buy_p = open_np[i+1, s_idx]
                         if not np.isnan(buy_p):
                             sh = int(min(cash_gross // buy_p, max_cap // buy_p))
@@ -177,6 +190,10 @@ if __name__ == "__main__":
     
     print(f"Universe Size: {len(valid_tickers)} stocks (Filtered from {len(univ_codes)} initial codes)")
     bundle_static = calculate_all_technicals_v12(all_data) 
+    # --- ADV (Turnover) 5-day average calculation ---
+    turnover = (bundle_static['Volume'] * bundle_static['Close']).rolling(5).mean()
+    bundle_static['ADV'] = turnover
+
     tickers = bundle_static['Close'].columns.tolist()
     timeline = bundle_static["Close"].index.unique().sort_values()
     univ_indices = np.array([tickers.index(t) for t in valid_tickers])
@@ -191,7 +208,7 @@ if __name__ == "__main__":
         for sl in sl_list:
             for p in pos_list:
                 for t in time_list:
-                    p_net, p_gross, t_cnt = run_numpy_backtest_v12(univ_indices, bundle_np, timeline, max_pos=p, tp=tp, sl=sl, time_limit=t)
+                    p_net, p_gross, t_cnt = run_numpy_backtest_v12(univ_indices, bundle_np, timeline, max_pos=p, tp=tp, sl=sl, time_limit=t, max_allocation=MAX_ALLOCATION_AMOUNT, liquidity_rate=LIQUIDITY_LIMIT_RATE)
                     results.append({"tp":tp, "sl":sl, "p":p, "t":t, "p_net":p_net, "p_gross":p_gross, "trades":t_cnt})
                     print(f"Tested: TP:{tp*100:>2.0f}% SL:{sl*100:>2.0f}% POS:{p:<2} T:{t:<2} -> NET:{p_net:>+10.2f}% | GROSS:{p_gross:>+10.2f}% | TRADES:{t_cnt}", flush=True)
 
