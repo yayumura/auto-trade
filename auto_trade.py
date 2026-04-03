@@ -92,7 +92,7 @@ def release_lock():
             print(f"[WARNING] ロックファイルの削除に失敗しました: {e}")
 
 from core.logic import (
-    detect_market_regime, manage_positions, select_best_candidates, 
+    detect_market_regime, manage_positions_live, select_best_candidates, 
     load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
     RealtimeBuffer
 )
@@ -329,13 +329,19 @@ def _main_exec():
 
         print(f"[STAT] 現在のレジーム: 【{regime}】")
         
-        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions(
+        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
             realtime_buffers=realtime_buffers
         )
         
         actions_taken.extend(sell_actions)
         for log in trade_logs_from_manage:
+            timing = log.get('timing', 'immediate')
+            if timing == 'next_open':
+                # タイムリミット → 翌朝始値で売却（即時執行しない）
+                print(f"⏰ [DEFERRED] {log['code']}: タイムリミット → 翌朝始値で売却予定")
+                if hasattr(broker, 'log_trade'): broker.log_trade(log)
+                continue
             if not is_sim:
                 broker.execute_chase_order(log['code'], log['shares'], side="1")
             if hasattr(broker, 'log_trade'): broker.log_trade(log)
@@ -525,7 +531,7 @@ def _main_exec():
                             if is_sim:
                                 print(f"🛒 [BUY SIM] {item['code']} {ts} shares @ {tp}")
                                 account['cash'] -= tp * ts
-                                portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(tp, 1), "highest_price": round(tp, 1), "current_price": round(tp, 1), "shares": ts})
+                                portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(tp, 1), "highest_price": round(tp, 1), "current_price": round(tp, 1), "shares": ts, "buy_atr": a})
                                 num_filled += 1
                             else:
                                 print(f"🚀 [OMS] Chase: {item['code']} ({ts} shares)")
@@ -534,7 +540,7 @@ def _main_exec():
                                     actual_qty = int(details.get('Qty', 0))
                                     exec_p = float(details.get('Price', 0)) or tp
                                     if not broker.is_production: account['cash'] -= exec_p * actual_qty
-                                    portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "current_price": round(exec_p, 1), "shares": actual_qty})
+                                    portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "current_price": round(exec_p, 1), "shares": actual_qty, "buy_atr": a})
                                     num_filled += 1
                             if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                             if hasattr(broker, 'save_account'): broker.save_account(account)
