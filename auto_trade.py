@@ -50,7 +50,7 @@ from core.config import (
     GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
+    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, STOP_LOSS_RATE,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -518,9 +518,8 @@ def _main_exec():
                         
                         tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
                         te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
-                        ra = te * MAX_RISK_PER_TRADE
-                        sm = RANGE_ATR_STOP_LOSS if regime == "RANGE" else ATR_STOP_LOSS
-                        rps = a * sm
+                        # 3%の固定損失（STOP_LOSS_RATE）を1株あたりのリスクとして株数を計算
+                        rps = p * STOP_LOSS_RATE 
                         is_sh = int(ra // rps) if rps > 0 else 100
                         ma = min(max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
                         adv = item.get('adv_yen', 0)
