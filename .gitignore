@@ -6,7 +6,7 @@ insider_exclusion.json
 
 # 自動生成ファイル（トレードBOTの出力）
 account.json
-virtual_portfolio.csv
+portfolio.json
 trade_history.csv
 execution_log.csv
 .bot_sim.lock

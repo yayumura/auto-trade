@@ -1,0 +1,110 @@
+import pandas as pd
+import numpy as np
+import os
+import sys
+import pickle
+
+# Append current directory to sys.path
+sys.path.append(os.getcwd())
+from core.logic import calculate_all_technicals_v12
+
+from core.config import (
+    INITIAL_CASH, MAX_POSITIONS, ATR_STOP_LOSS, TARGET_PROFIT_MULT, BREADTH_THRESHOLD
+)
+
+def run_jp_broad_backtest(cache_path):
+    if not os.path.exists(cache_path):
+        print(f"Error: Cache not found at {cache_path}")
+        return
+
+    print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
+    with open(cache_path, 'rb') as f:
+        data = pickle.load(f)
+
+    # REPAIR DATA: Flatten MultiIndex columns if necessary
+    # Example columns: ('3836.T', 'Open') or ('1321.T', ('Open', '1321.T'))
+    new_cols = []
+    for col in data.columns:
+        ticker, field = col[0], col[1]
+        if isinstance(field, tuple): # Handle the ('Open', '1321.T') case
+            field = field[0]
+        new_cols.append((ticker, field))
+    data.columns = pd.MultiIndex.from_tuples(new_cols)
+
+    # Extract clean bundle
+    bundle = {
+        'Open': data.xs('Open', axis=1, level=1),
+        'High': data.xs('High', axis=1, level=1),
+        'Low': data.xs('Low', axis=1, level=1),
+        'Close': data.xs('Close', axis=1, level=1),
+        'Volume': data.xs('Volume', axis=1, level=1),
+    }
+
+    # Verify 1321.T inclusion
+    if '1321.T' in bundle['Close'].columns:
+        print("✅ 1321.T Found and Normalized.")
+    else:
+        print("⚠️ 1321.T not found in primary close columns!")
+
+    # Universe Selection
+    all_tickers = bundle['Close'].columns
+    univ_indices = np.array([i for i, t in enumerate(all_tickers) if t != '1321.T'], dtype=int)
+    
+    # Bundle Tickers for Index Lookup in engine
+    bundle_np = {k: v.values for k, v in bundle.items()}
+    bundle_np['tickers'] = list(all_tickers)
+
+    # Indicators
+    print("🧪 Calculating Technical Indicators for JP Universe...")
+    indicator_bundle = calculate_all_technicals_v12(data) # Pass full dataframe
+    bundle_np.update({k: v.values for k, v in indicator_bundle.items()})
+
+    # Breadth (Prime-Exclusive SMA100 Sync V17.0)
+    from jp_scanner import get_prime_tickers
+    prime_ref = get_prime_tickers()
+    elite_indices = [i for i, t in enumerate(all_tickers) if t in prime_ref]
+    
+    breadth_matrix = bundle['Close'].values[:, elite_indices] > indicator_bundle['SMA100'].values[:, elite_indices]
+    breadth_series = np.nanmean(breadth_matrix.astype(float), axis=1)
+    timeline = bundle['Close'].index
+    
+    # RUN BACKTEST (V17.0 IMPERIAL ORACLE SYNC)
+    from backtest import run_backtest_v16_production
+    
+    print("\n🚀 Starting Japan IMPERIAL ORACLE Backtest (V17.0 Pullback Sync)...")
+    final_assets, trade_count, monthly_assets = run_backtest_v16_production(
+        univ_indices=univ_indices,
+        bundle_np=bundle_np,
+        timeline=timeline,
+        breadth_ratio=breadth_series,
+        initial_cash=INITIAL_CASH,
+        max_pos=MAX_POSITIONS,
+        sl_mult=ATR_STOP_LOSS,
+        tp_mult=TARGET_PROFIT_MULT,
+        breadth_threshold=BREADTH_THRESHOLD,
+        slippage=0.001
+    )
+
+    # Report
+    print("="*50)
+    print("🇯🇵 JAPAN IMPERIAL ORACLE PERFORMANCE (V17.0)")
+    print("="*50)
+    print(f"PERIOD:        {timeline[0].date()} to {timeline[-1].date()}")
+    print(f"INITIAL CASH:  ¥{10000000:,.0f}")
+    print(f"FINAL EQUITY:  ¥{final_assets:,.0f}")
+    print(f"TOTAL RETURN:  {((final_assets/10000000)-1)*100:+.2f}%")
+    print(f"TOTAL TRADES:  {trade_count}")
+    print("-" * 50)
+    
+    print("HISTORICAL EQUITY PROGRESS:")
+    sorted_months = sorted(monthly_assets.keys())
+    for m in sorted_months:
+        is_dec = m.endswith("-12")
+        is_recent = m in sorted_months[-12:]
+        if is_dec or is_recent:
+            val = monthly_assets[m]
+            print(f" {m:15} | ¥{val:12,.0f}")
+    print("="*50 + "\n")
+
+if __name__ == "__main__":
+    run_jp_broad_backtest('data_cache/jp_broad/jp_mega_cache.pkl')

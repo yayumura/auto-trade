@@ -3,12 +3,10 @@ import sys
 import io
 import random
 import datetime
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
-import re
-import warnings
+import pickle
 import json
 import signal
 import jpholiday
@@ -45,12 +43,13 @@ def get_market_phase(now_time) -> MarketPhase:
 
 # --- ファイルパス・設定・APIキー設定 (core.configより一括取得) ---
 from core.config import (
+    PROJECT_ROOT, DATA_ROOT,
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE, 
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
-    GEMINI_API_KEY, GROQ_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
+    GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, RANGE_ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, STOP_LOSS_RATE,
+    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -105,7 +104,7 @@ def handle_shutdown(signum, frame):
         send_discord_notify("[STOP] 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
     except: pass
     release_lock()
-    sys.exit(0)
+    os._exit(0)
 
 # --- メインループ ---
 def main():
@@ -136,6 +135,15 @@ def _main_exec():
         if not ensure_kabu_station_running():
             print("❌ kabuステーションの準備が整わなかったため、システムを終了します。")
             return
+
+    # --- [Imperial Sanctuary Audit] 実行時の各ファイルパスを最終点検 ---
+    if True: # DEBUG_MODEに関わらず起動時に一度だけ表示
+        print(f"📂 [Sanctuary Audit] PROJECT_ROOT: {PROJECT_ROOT}")
+        print(f"📂 [Sanctuary Audit] DATA_ROOT:    {DATA_ROOT}")
+        print(f"📂 [Sanctuary Audit] ACCOUNT:      {ACCOUNT_FILE}")
+        print(f"📂 [Sanctuary Audit] PORTFOLIO:    {PORTFOLIO_FILE}")
+        print(f"📂 [Sanctuary Audit] EXEC_LOG:     {EXECUTION_LOG_FILE}")
+        print(f"📂 [Sanctuary Audit] HISTORY:      {HISTORY_FILE}")
 
     if not pre_flight_check():
         print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
@@ -183,6 +191,25 @@ def _main_exec():
     SCAN_INTERVAL_SEC = 900
     MONITOR_INTERVAL_SEC = 30
     
+    # --- [Imperial Persistence] JQuants Cache Management ---
+    JQUANTS_CACHE_FILE = os.path.join("data_cache", "jp_broad", "jp_mega_cache.pkl")
+    jp_cache = {}
+    if os.path.exists(JQUANTS_CACHE_FILE):
+        try:
+            with open(JQUANTS_CACHE_FILE, 'rb') as f:
+                jp_cache_df = pickle.load(f)
+            # multi-index Columns -> Dict for fast lookup
+            # columns: (Ticker, Metric)
+            jp_cache = {}
+            for col in jp_cache_df.columns:
+                ticker = col[0]
+                if ticker not in jp_cache: jp_cache[ticker] = {}
+                # Metric is Metric
+                jp_cache[ticker][col[1]] = jp_cache_df[col].iloc[-1]
+            print(f"✅ Loaded JQuants Cache: {len(jp_cache)} tickers secured.")
+        except Exception as e:
+            print(f"⚠️ Error loading JQuants Cache: {e}")
+
     # --- [Hybrid Monitoring State] ---
     watchlist = []
     special_quote_watchlist = {} # { "code": item_dict }
@@ -305,8 +332,19 @@ def _main_exec():
             
             for code in new_codes:
                 print(f"[NEW] 新規銘柄をバッファに追加: {code}")
-                hist = yf.download(str(code)+".T", period="10d", interval="15m", progress=False, threads=False)
-                realtime_buffers[code] = RealtimeBuffer(code, hist, interval_mins=15)
+                try:
+                    ticker_with_t = str(code) + ".T" if not str(code).endswith(".T") else str(code)
+                    prev_close = 0
+                    if ticker_with_t in jp_cache:
+                        prev_close = jp_cache[ticker_with_t].get('Close', 0)
+                    
+                    # V17.1 Buffer: No yfinance download. Init with cache stats.
+                    realtime_buffers[code] = RealtimeBuffer(code, None, interval_mins=15)
+                    if prev_close > 0:
+                        realtime_buffers[code].update(prev_close, 0, server_datetime)
+                except Exception as e:
+                    print(f"⚠️ [Buffer Error] {code} 加盟失敗: {e}")
+                    continue
             
             for code in removed_codes:
                 realtime_buffers.pop(code, None)
@@ -329,32 +367,17 @@ def _main_exec():
 
         print(f"[STAT] 現在のレジーム: 【{regime}】")
         
-        portfolio, account, sell_actions, trade_logs_from_manage = manage_positions_live(
+        # [V17.0 Imperial Sync] Position management and auto-reporting
+        portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
             realtime_buffers=realtime_buffers
         )
-        
         actions_taken.extend(sell_actions)
-        for log in trade_logs_from_manage:
-            timing = log.get('timing', 'immediate')
-            if timing == 'next_open':
-                # タイムリミット → 翌朝始値で売却（即時執行しない）
-                print(f"⏰ [DEFERRED] {log['code']}: タイムリミット → 翌朝始値で売却予定")
-                if hasattr(broker, 'log_trade'): broker.log_trade(log)
-                continue
-            if not is_sim:
-                broker.execute_chase_order(log['code'], log['shares'], side="1")
-            else:
-                # [SIM追加] 売却額を口座残高に戻す
-                exit_p = float(log.get('exit_price', log.get('price', 0)))
-                qty = int(log.get('shares', 0))
-                account['cash'] += (exit_p * qty)
-                print(f"💰 [SIM Cash Return] {log['name']} 売却額 {int(exit_p * qty):,}円 を口座に戻しました。")
-                
-            if hasattr(broker, 'log_trade'): broker.log_trade(log)
         
-        if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
-        if hasattr(broker, 'save_account'): broker.save_account(account)
+        # [V17.0 Final Persistence]
+        # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
+        broker.save_account(account)
+        broker.save_portfolio(portfolio)
 
         should_scan = True
         if regime == "BEAR": should_scan = False
@@ -377,69 +400,55 @@ def _main_exec():
             print("\n=> 🔍 定期スキャン処理（銘柄探索）を開始します...")
             
             should_continue_scan = True
+            # [V17.0 Imperial Sync] Use JQuants Cache instead of yfinance
             try:
-                df_symbols = pd.read_csv(DATA_FILE)
-                if '市場・商品区分' in df_symbols.columns:
-                    df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
-                invalid_tickers = load_invalid_tickers()
-                if invalid_tickers:
-                    df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
-                insider_codes = load_insider_exclusion_codes()
-                if insider_codes:
-                    df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
-                held_codes = [str(p['code']) for p in portfolio]
-                targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
-                tickers = [f"{code}.T" for code in targets]
+                if os.path.exists(JQUANTS_CACHE_FILE):
+                    with open(JQUANTS_CACHE_FILE, 'rb') as f:
+                        data_df = pickle.load(f)
+                    
+                    # Clean MultiIndex columns
+                    new_cols = []
+                    for col in data_df.columns:
+                        ticker, field = col[0], col[1]
+                        if isinstance(field, tuple): field = field[0]
+                        new_cols.append((ticker, field))
+                    data_df.columns = pd.MultiIndex.from_tuples(new_cols)
+                    
+                    # Filtering targets
+                    df_symbols = pd.read_csv(DATA_FILE)
+                    if '市場・商品区分' in df_symbols.columns:
+                        df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
+                    
+                    invalid_tickers = load_invalid_tickers()
+                    if invalid_tickers:
+                        df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
+                    
+                    insider_codes = load_insider_exclusion_codes()
+                    if insider_codes:
+                        df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
+                    
+                    held_codes = [str(p['code']) for p in portfolio]
+                    targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
+                    
+                    # ticker check
+                    existing_tickers = set(data_df.columns.get_level_values(0))
+                    targets = [t for t in targets if (t + ".T") in existing_tickers]
+                    
+                    print(f"✅ Scanning {len(targets)} tickers from JQuants Cache.")
+                else:
+                    print("❌ JQuants Cache not found. Skipping scan.")
+                    should_continue_scan = False
             except Exception as e:
-                print(f"[WARNING] 銘柄リスト読込エラー: {e}")
+                print(f"[WARNING] JQuants Cache 読込エラー: {e}")
                 should_continue_scan = False
 
             if should_continue_scan:
-                data_dfs = []
-                chunk_size = 100 
-                for i in range(0, len(tickers), chunk_size):
-                    chunk = tickers[i:i + chunk_size]
-                    if i > 0: time.sleep(random.uniform(0.5, 1.5))
-                    try:
-                        dl_period = "2y" if is_morning_scan else "1mo" 
-                        dl_interval = "1d" if is_morning_scan else "15m"
-                        chunk_df = yf.download(chunk, period=dl_period, interval=dl_interval, group_by='ticker', 
-                                               auto_adjust=False, threads=False, progress=False)
-                        if chunk_df is not None and not chunk_df.empty:
-                            if isinstance(chunk_df.columns, pd.MultiIndex):
-                                data_dfs.append(chunk_df)
-                            elif len(chunk) == 1:
-                                chunk_df.columns = pd.MultiIndex.from_product([[chunk[0]], chunk_df.columns])
-                                data_dfs.append(chunk_df)
-                    except: pass
-                    finally: time.sleep(random.uniform(1.0, 2.5))
-
-                if not data_dfs: should_continue_scan = False
-            
-            if should_continue_scan:
-                data_df = pd.concat(data_dfs, axis=1, sort=False) if len(data_dfs) > 1 else data_dfs[0]
-                # [Step 1.3] Real-time injection
-                if not is_sim and hasattr(broker, 'get_board_data'):
-                    print("🚀 [OMS] テクニカル計算に最新の板情報を反映します...")
-                    try:
-                        board_res = broker.get_board_data(tickers)
-                        now_jst = datetime.datetime.now(JST)
-                        for t_id in tickers:
-                            # tickersは "7203.T", board_resのキーは "7203"
-                            code_only = t_id.replace(".T", "")
-                            if code_only in board_res:
-                                bx = board_res[code_only]
-                                px = bx.get('price')
-                                if px and px > 0:
-                                    data_df.loc[now_jst, (t_id, 'Close')] = px
-                                    data_df.loc[now_jst, (t_id, 'High')] = bx.get('high') or px
-                                    data_df.loc[now_jst, (t_id, 'Low')] = bx.get('low') or px
-                                    data_df.loc[now_jst, (t_id, 'Volume')] = bx.get('volume', 0)
-                                    data_df.loc[now_jst, (t_id, 'Open')] = bx.get('open') or px
-                        data_df.sort_index(inplace=True)
-                    except Exception as e:
-                        print(f"[WARNING] リアルタイム価格の注入に失敗しました: {e}")
-
+                # [Optimization] We cannot fetch 3400+ board prices sequentially via kabucom REST API (exhausts quota and takes 15 mins).
+                # We rely purely on highly accurate JQuants EOD cache for the initial heavy Perfect Order scan.
+                # Live validation is done on the top 50 candidates in the next step.
+                if not is_sim:
+                     print("🚀 [OMS] 一次スキャンはJQuantsキャッシュ(EOD)速度を優先して実行します...")
+                
                 try:
                     last_update = data_df.index[-1]
                     if last_update.tzinfo is None: last_update = last_update.replace(tzinfo=JST)
@@ -459,14 +468,19 @@ def _main_exec():
                     watchlist = [c['code'] for c in top_candidates[:max_watchlist]]
                     has_morning_scanned = True
                     realtime_buffers = {}
-                    for code in watchlist: realtime_buffers[code] = RealtimeBuffer(code, data_df)
+                    empty_df = pd.DataFrame()
+                    for code in watchlist: 
+                        realtime_buffers[code] = RealtimeBuffer(code, empty_df)
                     for p in portfolio:
                         c = str(p['code'])
-                        if c not in realtime_buffers: realtime_buffers[c] = RealtimeBuffer(c, data_df)
+                        if c not in realtime_buffers: 
+                            realtime_buffers[c] = RealtimeBuffer(c, empty_df)
                     if '1321' not in realtime_buffers:
                         try:
-                            df_1321 = yf.download('1321.T', period='1mo', interval='15m', progress=False)
-                            realtime_buffers['1321'] = RealtimeBuffer('1321', df_1321)
+                            # 1321.T base from cache if available
+                            if '1321.T' in jp_cache:
+                                realtime_buffers['1321'] = RealtimeBuffer('1321', None)
+                                realtime_buffers['1321'].latest_price = jp_cache['1321.T'].get('Close', 0)
                         except: pass
                     if not is_sim:
                         broker.unregister_all()
@@ -526,8 +540,8 @@ def _main_exec():
                         tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
                         te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
                         ra = te * MAX_RISK_PER_TRADE
-                        # 3%の固定損失（STOP_LOSS_RATE）を1株あたりのリスクとして株数を計算
-                        rps = p * STOP_LOSS_RATE 
+                        # ATRベースのリスク許容度に基づく株数計算 (V15.1 Oracle仕様)
+                        rps = a * ATR_STOP_LOSS 
                         is_sh = int(ra // rps) if rps > 0 else 100
                         ma = min(max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
                         adv = item.get('adv_yen', 0)

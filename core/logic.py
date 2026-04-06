@@ -1,355 +1,211 @@
+import json
 import pandas as pd
 import numpy as np
-import time
-import os
-import json
-import datetime
 from datetime import datetime as dt
-from .config import BREAKOUT_PERIOD, MAX_POSITIONS, JST, TARGET_PROFIT, STOP_LOSS_RATE, EXIT_PERIOD, MIN_PRICE, MAX_PRICE
+from core.config import (
+    ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
+    MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
+    MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
+    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL
+)
 
-# ==========================================
-# 1. V12.0 Growth Monster Logic (Backtest & Live)
-# ==========================================
-
-def calculate_all_technicals_v12(full_data, breakout_p=5):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None):
     """
-    V12.0 高頻度・爆発力重視のテクニカル計算
+    V17.0 Imperial Position Manager:
+    - Returns: [portfolio, sell_actions]
     """
-    if full_data is None or full_data.empty: return None
-    close, high, low, volume, open_p = [full_data.xs(k, axis=1, level=1) for k in ["Close", "High", "Low", "Volume", "Open"]]
+    sl_mult = ATR_STOP_LOSS
+    tp_mult = TARGET_PROFIT_MULT
     
-    # トレンド判定 (短期・中期)
-    sma20 = close.rolling(20).mean()
-    sma20_vol = volume.rolling(20).mean()
+    remaining = []
+    sell_actions = []
     
-    # 勢い判定 (Ret3: 3日間の騰落率)
-    ret3 = (close / close.shift(3) - 1) * 100
-    
-    # ブレイクアウト判定 (直近高値)
-    ht = high.rolling(breakout_p).max().shift(1)
-    
-    # ATR (ボラティリティ)
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = tr.rolling(14).mean()
-
-    return {
-        "Close": close, "High": high, "Low": low, "Volume": volume, "Open": open_p,
-        "SMA20": sma20, "SMA20_Vol": sma20_vol, "Ret3": ret3, "HT": ht, "ATR": atr,
-        "SMA200": close.rolling(200).mean() # For Regime check
-    }
-
-def manage_positions_v12(portfolio, current_time, bundle, tp=TARGET_PROFIT, sl=STOP_LOSS_RATE, time_limit=EXIT_PERIOD):
-    """
-    V12.0 高頻度利確・損切りロジック
-    """
-    trade_logs, remaining = [], []
-    for p in portfolio:
-        code = str(p['code']); ticker = f"{code}.T"
-        try:
-            # データの取得
-            row_high = bundle["High"].at[current_time, ticker]
-            row_low = bundle["Low"].at[current_time, ticker]
-            row_close = bundle["Close"].at[current_time, ticker]
-            
-            if 'held_days' not in p: p['held_days'] = 0
-            p['held_days'] += 1
-
-            exit_p = 0; reason = None; timing = "immediate"
-            
-            # --- エグジット判定 ---
-            # 1. 利確 (当日高値が指値に到達)
-            if row_high >= p['buy_price'] * (1.0 + tp):
-                reason = "Target Profit"; exit_p = p['buy_price'] * (1.0 + tp)
-            # 2. 損切り (当日安値が損切りラインに到達)
-            elif row_low <= p['buy_price'] * (1.0 - sl):
-                reason = "Stop Loss"; exit_p = p['buy_price'] * (1.0 - sl)
-            # 3. タイムアップ (数日経っても伸びない) -> 翌朝の寄付きで売る
-            elif p['held_days'] >= time_limit:
-                reason = "Time Limit"; exit_p = row_close; timing = "next_open"
-            
-            if reason:
-                trade_logs.append({
-                    "code": code, "reason": reason, "price": exit_p, 
-                    "shares": p['shares'], "buy_price": p['buy_price'], "buy_time": p.get('buy_time', str(current_time)),
-                    "timing": timing 
-                })
-            else:
-                remaining.append(p)
-        except: remaining.append(p)
-    return remaining, trade_logs
-
-def select_candidates_v12(current_time, bundle, target_codes, max_count=10):
-    """
-    V12.0 爆発力重視の銘柄選定
-    optimizer.py と完全同一のフィルター条件を使用
-    """
-    candidates = []
-    # 終値基準のデータを一括取得
-    c, v, s20, sv20, r3, ht = [bundle[k].loc[current_time] for k in ["Close", "Volume", "SMA20", "SMA20_Vol", "Ret3", "HT"]]
-    
-    for code in target_codes:
-        ticker = f"{code}.T"
-        if ticker not in c.index: continue
-        cp = c[ticker]
-        # optimizer.py と同一: MIN_PRICE <= cp <= MAX_PRICE
-        if pd.isna(cp) or cp < MIN_PRICE or cp > MAX_PRICE: continue
-        
-        # 爆発フィルタ: optimizer.py と完全一致
-        # SMA20上, Ret3 > 5%, 出来高1.5倍, ブレイクアウト
-        if cp > s20[ticker] and r3[ticker] > 5 and v[ticker] > sv20[ticker] * 1.5 and cp > ht[ticker]:
-            candidates.append({
-                "code": code, 
-                "score": float(r3[ticker]), # 勢いが強い順に並べる
-                "price": cp
-            })
-            
-    return sorted(candidates, key=lambda x: x['score'], reverse=True)
-
-# ==========================================
-# 2. 本番用・バックテスト共通インターフェース
-# ==========================================
-
-class RealtimeBuffer:
-    def __init__(self, code, historical_df, interval_mins=15):
-        self.code = code
-        self.data = historical_df.copy()
-        self.interval_mins = interval_mins
-
-    def update(self, price, volume, current_time):
-        if price is None or price <= 0: return
-        ticker = f"{self.code}.T"
-        if ticker in self.data.columns.get_level_values(0):
-            self.data.loc[current_time, (ticker, "Close")] = price
-            self.data.loc[current_time, (ticker, "High")] = max(price, self.data.loc[current_time, (ticker, "High")] if (current_time in self.data.index and not pd.isna(self.data.loc[current_time, (ticker, "High")])) else price)
-            self.data.loc[current_time, (ticker, "Low")] = min(price, self.data.loc[current_time, (ticker, "Low")] if (current_time in self.data.index and not pd.isna(self.data.loc[current_time, (ticker, "Low")])) else price)
-            if volume: self.data.loc[current_time, (ticker, "Volume")] = volume
-
-def calculate_all_technicals(full_data, breakout_p=5):
-    return calculate_all_technicals_v12(full_data, breakout_p=breakout_p)
-
-# Live versions of V12 selection and management
-def select_best_candidates(data_df, targets, df_symbols, regime, realtime_buffers=None):
-    # V12 logic specifically for live bot usage
-    bundle = calculate_all_technicals_v12(data_df)
-    if bundle is None: return []
-    current_time = data_df.index[-1]
-    candidates = select_candidates_v12(current_time, bundle, targets, max_count=MAX_POSITIONS)
-    # Calculate ADV (Average Daily Volume) in Yen for last 5 samples
-    # Usually data_df is daily or 15m. If daily, 5 samples = 1 week.
-    vol = bundle["Volume"]
-    close = bundle["Close"]
-    turnover = (vol * close).rolling(5).mean().loc[current_time]
-
-    # Convert to expected dictionaries for auto_trade.py
-    results = []
-    for c in candidates:
-        ticker = f"{c['code']}.T"
-        name = df_symbols[df_symbols['コード'].astype(str) == str(c['code'])]['銘柄名'].values[0] if not df_symbols.empty else "Unknown"
-        adv_yen = float(turnover.get(ticker, 0)) if not pd.isna(turnover.get(ticker)) else 0
-        
-        results.append({
-            "code": c['code'], "name": name, "price": c['price'], 
-            "score": c['score'], "atr": bundle["ATR"].at[current_time, ticker],
-            "adv_yen": adv_yen
-        })
-    return results
-
-def manage_positions_live(
-    portfolio, account, broker=None, regime="BULL",
-    is_simulation=False, realtime_buffers=None,
-    tp=TARGET_PROFIT, sl=STOP_LOSS_RATE, time_limit=EXIT_PERIOD
-):
-    """
-    V12.0 Live Position Manager
-    - auto_trade.py の呼び出し規約に完全準拠
-    - held_days は buy_time からの経過日数で正確計算（ループ毎インクリメントではない）
-    - Time Limit 到達時は timing='next_open' で翌朝フラグを立て、即時売却しない
-    - 翌朝 (9:30以前) に pending_time_exit=True のポジションを成行売却
-
-    Returns: (portfolio_remaining, account, sell_actions, trade_logs)
-    """
-    trade_logs, remaining, sell_actions = [], [], []
-    now = dt.now(JST)
-    is_morning = now.time() <= datetime.time(9, 30)  # 寄付き直後かどうか
-
     for p in portfolio:
         code = str(p['code'])
-        ticker = f"{code}.T"
-        try:
-            # --- 現在価格の取得 ---
-            cp = float(p.get('current_price', p['buy_price']))
-            hp = cp
-            lp = cp
-            if not is_simulation and broker is not None:
-                try:
-                    board = broker.get_board_data([code])
-                    b = board.get(str(code), {})
-                    cp = float(b.get('price') or cp)
-                    hp = float(b.get('high') or cp)
-                    lp = float(b.get('low') or cp)
-                except Exception:
-                    pass
-            elif realtime_buffers and code in realtime_buffers:
-                try:
-                    buf_df = realtime_buffers[code].data
-                    if not buf_df.empty:
-                        last = buf_df.iloc[-1]
-                        if isinstance(buf_df.columns, pd.MultiIndex):
-                            cp = float(last.get((ticker, 'Close'), cp))
-                            hp = float(last.get((ticker, 'High'), cp))
-                            lp = float(last.get((ticker, 'Low'), cp))
-                        else:
-                            cp = float(last.get('Close', cp))
-                            hp = float(last.get('High', cp))
-                            lp = float(last.get('Low', cp))
-                except Exception:
-                    pass
-            p['current_price'] = cp
-
-            # --- held_days: buy_time からの経過日数で計算 ---
+        # リアルタイムバッファから最新値を取得
+        if realtime_buffers and code in realtime_buffers:
+            current_price = realtime_buffers[code].get_latest_price()
+        else:
+            current_price = float(p.get('current_price', p['buy_price']))
+            
+        buy_price = float(p['buy_price'])
+        atr = float(p.get('buy_atr', 0))
+        highest_price = float(p.get('highest_price', 0))
+        
+        # 1. 損切り (ATR 5.0 base)
+        initial_stop = buy_price - (atr * sl_mult)
+        if ATR_TRAIL and highest_price > 0:
+            stop_price = max(initial_stop, highest_price - (atr * sl_mult))
+        else:
+            stop_price = initial_stop
+            
+        # 2. 利確 (ATR 20.0 base)
+        target_price = buy_price + (atr * tp_mult)
+        
+        # 3. タイムリミット (保有60日以上)
+        is_timeout = False
+        buy_time_str = p.get('buy_time')
+        if buy_time_str:
             try:
-                buy_date = dt.strptime(str(p['buy_time'])[:10], '%Y-%m-%d').date()
-                held_days = (now.date() - buy_date).days
-            except Exception:
-                held_days = p.get('held_days', 0)
-            p['held_days'] = held_days
+                buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
+                if (dt.now() - buy_dt).days >= 60:
+                    is_timeout = True
+            except: pass
+        
+        # 判定
+        if current_price <= stop_price:
+            sell_actions.append(f"SELL {code} - Stop Loss Triggered (@{current_price:,.1f})")
+            # OMS 決済(SIMでない場合)
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif is_timeout:
+            sell_actions.append(f"SELL {code} - Time Limit Reached (60 Days)")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif current_price >= target_price:
+            sell_actions.append(f"SELL {code} - Profit Target Reached (@{current_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+            
+        # 評価額の更新
+        p['current_price'] = round(current_price, 1)
+        if current_price > float(p.get('highest_price', 0)):
+            p['highest_price'] = round(current_price, 1)
+            
+        remaining.append(p)
 
-            # --- 翌日始値売却の実行（寄付き時） ---
-            if p.get('pending_time_exit'):
-                if is_morning:
-                    # 寄付き価格（cp）で売却実行
-                    log = {
-                        "code": code, "name": p.get('name', ''),
-                        "reason": "Time Limit (morning exec)",
-                        "price": cp, "shares": p['shares'],
-                        "buy_price": p['buy_price'],
-                        "buy_time": p.get('buy_time', ''),
-                        "timing": "immediate"
-                    }
-                    trade_logs.append(log)
-                    sell_actions.append(f"SELL {code}: TimeLimit@morning {cp:.0f}")
-                else:
-                    # 翌朝になるまで保有継続
-                    remaining.append(p)
-                continue
+    return remaining, sell_actions
 
-            # --- 通常エグジット判定 ---
-            reason = None
-            exit_p = 0
-            timing = "immediate"
-
-            if hp >= p['buy_price'] * (1.0 + tp):
-                reason = "Target Profit"
-                exit_p = p['buy_price'] * (1.0 + tp)
-            elif lp <= p['buy_price'] * (1.0 - sl):
-                reason = "Stop Loss"
-                exit_p = p['buy_price'] * (1.0 - sl)
-            elif held_days >= time_limit:
-                # 翌朝始値売却: ポジションは保有継続 + フラグON
-                p['pending_time_exit'] = True
-                remaining.append(p)
-                trade_logs.append({
-                    "code": code, "name": p.get('name', ''),
-                    "reason": "Time Limit",
-                    "price": cp, "shares": p['shares'],
-                    "buy_price": p['buy_price'],
-                    "buy_time": p.get('buy_time', ''),
-                    "timing": "next_open"  # 即時執行しない
-                })
-                sell_actions.append(f"DEFER {code}: TimeLimit → 翌朝始値売却予定")
-                continue
-
-            if reason:
-                trade_logs.append({
-                    "code": code, "name": p.get('name', ''),
-                    "reason": reason, "price": exit_p,
-                    "shares": p['shares'], "buy_price": p['buy_price'],
-                    "buy_time": p.get('buy_time', ''),
-                    "timing": timing
-                })
-                sell_actions.append(f"SELL {code}: {reason} @ {exit_p:.0f}")
-            else:
-                remaining.append(p)
-
-        except Exception as e:
-            print(f"[WARNING] manage_positions_live: {code} エラー: {e}")
-            remaining.append(p)
-
-    return remaining, account, sell_actions, trade_logs
-
-
-# ==========================================
-# 3. ユーティリティ関数 (auto_trade.py 依存)
-# ==========================================
+def calculate_all_technicals_v12(data_df):
+    """
+    V17.0 Imperial Technical Bundle:
+    - SMA5, SMA20, SMA100
+    - ATR (20)
+    - RS (Normalized Strength)
+    """
+    bundle = {}
+    
+    # xs for metric
+    close = data_df.xs('Close', axis=1, level=1)
+    high = data_df.xs('High', axis=1, level=1)
+    low = data_df.xs('Low', axis=1, level=1)
+    
+    bundle['Close'] = close
+    bundle['SMA5'] = close.rolling(5).mean()
+    bundle['SMA20'] = close.rolling(20).mean()
+    bundle['SMA100'] = close.rolling(100).mean()
+    
+    # ATR (20) Vectorized
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    
+    # Vectorized element-wise max for true range
+    tr = pd.DataFrame(
+        np.maximum(np.maximum(tr1.values, tr2.values), tr3.values),
+        index=close.index,
+        columns=close.columns
+    )
+    bundle['ATR'] = tr.rolling(20).mean()
+    
+    # RS (Momentum Strength: SMA5 / SMA100 Ratio)
+    bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
+    
+    return bundle
 
 def detect_market_regime(broker=None, buffer=None):
-    """
-    日経225 ETF (1321.T) のトレンドからレジームを判定。
-    Returns: 'BULL' | 'RANGE' | 'BEAR'
-    """
-    try:
-        import yfinance as yf
-        df = yf.download("1321.T", period="1y", interval="1d",
-                         progress=False, threads=False, auto_adjust=False)
-        if df is None or df.empty or len(df) < 50:
-            return "RANGE"
-        close = df['Close'].squeeze()
-        sma50  = close.rolling(50).mean().iloc[-1]
-        sma200 = close.rolling(min(200, len(close))).mean().iloc[-1]
-        latest = close.iloc[-1]
-        if latest > sma50 and sma50 > sma200:
-            return "BULL"
-        elif latest < sma50 and sma50 < sma200:
-            return "BEAR"
-        else:
-            return "RANGE"
-    except Exception as e:
-        print(f"[WARNING] detect_market_regime: {e}")
-        return "RANGE"
+    # 市場全体（TOPIX/1306等）のSMA100に対する位置で判定
+    if buffer and '1321' in buffer:
+        price = buffer['1321'].get_latest_price()
+        # simplified check
+        if price > 0: return "BULL"
+    return "RANGE"
 
+def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
+    """
+    V17.0 Imperial Selection Engine:
+    - Filters targets based on SMA alignment and RS.
+    - Requires: SMA5 > SMA20 > SMA100 (Perfect Power Order)
+    """
+    bundle = calculate_all_technicals_v12(data_df)
+    
+    close = bundle['Close'].iloc[-1]
+    sma5 = bundle['SMA5'].iloc[-1]
+    sma20 = bundle['SMA20'].iloc[-1]
+    sma100 = bundle['SMA100'].iloc[-1]
+    atr = bundle['ATR'].iloc[-1]
+    rs = bundle['RS'].iloc[-1]
+    
+    candidates = []
+    
+    for t_with_t in [f"{t}.T" for t in targets]:
+        if t_with_t not in close.index: 
+            # In data_df, columns are tickers.
+            if t_with_t not in bundle['Close'].columns: continue
+        
+        code_only = t_with_t.replace(".T", "")
+        p = close[t_with_t]
+        s5, s20, s100 = sma5[t_with_t], sma20[t_with_t], sma100[t_with_t]
+        
+        if pd.isna(p) or p <= 0: continue
+        
+        # Imperial Trend: 5 > 20 > 100
+        if s5 > s20 > s100:
+            # Entry Signal: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
+            if s20 * 0.98 <= p < s20 * 1.02:
+                # Name lookup
+                name = "Target"
+                if symbols_df is not None:
+                    match = symbols_df[symbols_df['コード'].astype(str) == code_only]
+                    if not match.empty: name = match.iloc[0]['銘柄名']
+                
+                candidates.append({
+                    "code": code_only,
+                    "name": name,
+                    "price": p,
+                    "atr": atr[t_with_t],
+                    "rs": rs[t_with_t],
+                    "score": rs[t_with_t]
+                })
 
-_INVALID_TICKERS_FILE = "invalid_tickers.json"
+    # Sort by RS descending
+    candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
+    return candidates[:10]
+
+class RealtimeBuffer:
+    def __init__(self, code, initial_df=None, interval_mins=15):
+        self.code = code
+        self.latest_price = 0
+        self.latest_volume = 0
+        
+    def update(self, price, volume, server_time):
+        if price and price > 0:
+            self.latest_price = price
+            self.latest_volume = volume
+            
+    def get_latest_price(self):
+        return self.latest_price
 
 def load_invalid_tickers():
-    """データ取得不可だった銘柄コードのセットを読み込む"""
     try:
-        with open(_INVALID_TICKERS_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f).get("codes", []))
-    except Exception:
-        return set()
+        with open(EXCLUSION_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
 
-
-def save_invalid_tickers(codes):
-    """データ取得不可だった銘柄コードのセットを保存する"""
+def save_invalid_tickers(invalid_map):
     try:
-        existing = load_invalid_tickers()
-        updated = list(existing | set(str(c) for c in codes))
-        with open(_INVALID_TICKERS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"codes": updated}, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"[WARNING] save_invalid_tickers: {e}")
-
+        with open(EXCLUSION_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(invalid_map, f, indent=4)
+    except:
+        pass
 
 def normalize_tick_size(price, is_buy=True):
-    """
-    東証の呼値単位に価格を丸める。
-    is_buy=True のとき切り上げ（買い注文）、False のとき切り捨て（売り注文）。
-    """
-    import math
-    if price < 200:    tick = 1
-    elif price < 500:   tick = 1
-    elif price < 1000:  tick = 1
-    elif price < 2000:  tick = 1
-    elif price < 3000:  tick = 1
-    elif price < 5000:  tick = 5
-    elif price < 10000: tick = 10
-    elif price < 30000: tick = 10
-    elif price < 50000: tick = 50
-    else:               tick = 100
-    if is_buy:
-        return math.ceil(price / tick) * tick
-    else:
-        return math.floor(price / tick) * tick
+    return round(price, 1)

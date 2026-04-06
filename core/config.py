@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
@@ -7,80 +8,87 @@ from zoneinfo import ZoneInfo
 load_dotenv()
 
 # --- Basic Settings ---
-STOCKS_TYPE = "prime"  # "prime", "standard", "growth"
 JST = ZoneInfo("Asia/Tokyo")
 DATA_FILE = "data/symbols_with_market.csv"
-INITIAL_CASH = 1000000  # 100万円
+INITIAL_CASH = 10000000 # 1000万円基準
+TAX_RATE = 0.20315      # 日本 株取引所得税
 
-if STOCKS_TYPE == "standard":
-    TARGET_MARKETS = ["スタンダード（内国株式）"]
-elif STOCKS_TYPE == "growth":
-    TARGET_MARKETS = ["グロース（内国株式）"]
-else:
-    TARGET_MARKETS = ["グロース（内国株式）"]
-
-# --- Trading Parameters (V12.0 Growth Monster Optimized Rank #1) ---
-STOCKS_TYPE = "growth" 
-BREAKOUT_PERIOD = 5   # Hyper-breakout (standardized)
-EXIT_PERIOD = 3       # Optimized Time-limit (Rank #1, most stable)
-MAX_POSITIONS = 5     # Optimized Concentration
-TARGET_PROFIT = 0.07  # Optimized Take-Profit (Rank #1)
-INITIAL_CASH = 1000000 
-MAX_DAILY_BUYS = 5
-STOP_LOSS_RATE = 0.03 # Optimized Stop-Loss
-RANK_METRIC = "Ret3"  # Momentum Score
-MIN_PRICE = 200
-MAX_PRICE = 10000
-VOL_MULTIPLIER = 1.5
-
-# --- Risk Management ---
-ATR_PERIOD = 20
-STOP_LOSS_ATR = 2.0  # 2*ATR stop
-TAX_RATE = 0.20315   # Japan Capital Gains Tax
+# 日本株全市場をターゲット
+TARGET_MARKETS = [
+    "プライム（内国株式）",
+    "スタンダード（内国株式）",
+    "グロース（内国株式）"
+]
 
 # --- Discord Settings ---
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # --- API Settings ---
-KABUCOM_API_PASSWORD = os.getenv("KABU_API_PASSWORD", "your_password")
-KABUCOM_LOGIN_PASSWORD = os.getenv("KABU_LOGIN_PASSWORD", "your_login_password")
+KABUCOM_API_PASSWORD = os.getenv("KABUCOM_API_PASSWORD", "your_password")
+KABUCOM_LOGIN_PASSWORD = os.getenv("KABUCOM_LOGIN_PASSWORD", "your_login_password")
 KABUCOM_API_TOKEN_FILE = ".kabu_token"
 KABUCOM_PORT_LIVE = 18080
 KABUCOM_PORT_TEST = 18081
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
-GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Bot Execution Mode ---
-# SIM: ローカルCSVシミュレーション / KABUCOM_TEST: 検証API / KABUCOM_LIVE: 本番API
 TRADE_MODE = os.getenv("TRADE_MODE", "SIM")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
-# --- File Paths ---
-BASE_DIR            = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_ROOT           = os.path.join("data", "kabucom_test")
-LOG_DIR             = os.path.join("data", "kabucom_test", "logs")
-PORTFOLIO_FILE      = "portfolio.json"
-HISTORY_FILE        = "trade_history.csv"
-ACCOUNT_FILE        = "account.csv"
-EXECUTION_LOG_FILE  = "execution_log.csv"
-EXCLUSION_CACHE_FILE = "invalid_tickers.json"
+# --- [Imperial Proclamation] 黄金の絶対座標 (Project Root Discovery) ---
+# コンフィグファイルの場所(coreフォルダ)から、プロジェクトルートを絶対パスで特定
+CONFIG_DIR = Path(os.path.abspath(os.path.dirname(__file__)))
+PROJECT_ROOT = CONFIG_DIR.parent
 
-# --- Position Sizing (ATR-based, live trading only) ---
-MAX_RISK_PER_TRADE    = 0.02   # 総資産の2%をリスク許容額とする
-MAX_ALLOCATION_PCT    = 0.20   # 1銘柄に総資産の最大20%まで
-MAX_ALLOCATION_AMOUNT = 5000000 # 1銘柄の最大投資額（スリッページ防止: 500万円）
-LIQUIDITY_LIMIT_RATE  = 0.01    # 1銘柄の購入額を平均売買代金の1%以内に抑える
-MIN_ALLOCATION_AMOUNT = 100000 # 最低10万円以上でないと購入しない
-ATR_STOP_LOSS         = 2.0    # ATR × 2.0 を損切り幅とする
-RANGE_ATR_STOP_LOSS   = 1.5    # レンジ相場時は ATR × 1.5 に縮小
-ATR_TRAIL             = False  # トレーリングストップ（未使用）
+# データ保存聖域の決定
+if TRADE_MODE == "SIM":
+    DATA_ROOT = PROJECT_ROOT / "data" / "simulation"
+else:
+    DATA_ROOT = PROJECT_ROOT / "data" / "kabucom_test"
+
+# [Imperial Safeguard] 実行時に保存先を絶対的に宣言する
+if DEBUG_MODE:
+    print(f"📡 [IMPERIAL_CONFIG] PROJECT_ROOT -> {PROJECT_ROOT}")
+    print(f"📡 [IMPERIAL_CONFIG] DATA_ROOT -> {DATA_ROOT}")
+
+# すべて絶対パスに変換
+DATA_ROOT_STR       = str(DATA_ROOT)
+LOG_DIR             = str(DATA_ROOT / "logs")
+PORTFOLIO_FILE      = str(DATA_ROOT / "portfolio.json")
+HISTORY_FILE        = str(DATA_ROOT / "trade_history.csv")
+ACCOUNT_FILE        = str(DATA_ROOT / "account.json")
+EXECUTION_LOG_FILE  = str(DATA_ROOT / "execution_log.csv")
+EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
+INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
+WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
+
+# --- Imperial Oracle V17.0 (Ultimate Apex Configuration) ---
+MAX_POSITIONS         = 5      # 5 stocks (20% concentration)
+BREADTH_THRESHOLD     = 0.35    # 35% market breadth trigger
+MAX_RISK_PER_TRADE    = 0.02   # 2% Risk per trade
+MAX_ALLOCATION_PCT    = 0.20   # 1/5 equity per pos
+MAX_ALLOCATION_AMOUNT = 10000000 
+LIQUIDITY_LIMIT_RATE  = 0.01   
+MIN_ALLOCATION_AMOUNT = 50000  
+ATR_STOP_LOSS         = 5.0    # ATR * 5 safety net
+TARGET_PROFIT_MULT    = 20.0   # ATR * 20 profit target
+RS_THRESHOLD          = 10.0   # Minimum Relative Strength
+MIN_PRICE             = 200    # Minimum stock price
+MAX_PRICE             = 10000  # Maximum stock price
+ATR_TRAIL             = True   # Trailing stop enabled
+SMA_SHORT_PERIOD      = 5
+SMA_MEDIUM_PERIOD     = 20
+SMA_LONG_PERIOD       = 100
+SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():
     """インサイダー取引疑義銘柄の除外リストを読み込む"""
     try:
-        with open("insider_exclusion.json", "r", encoding="utf-8") as f:
+        with open(INSIDER_FILE, "r", encoding="utf-8") as f:
             return json.load(f).get("codes", [])
     except Exception:
         return []

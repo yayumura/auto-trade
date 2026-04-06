@@ -17,6 +17,7 @@ class TeeLogger:
     def write(self, message):
         self.stream.write(message)
         self.file.write(message)
+        self.stream.flush()
         self.file.flush()
 
     def flush(self):
@@ -43,8 +44,8 @@ def setup_logging():
         orig_stderr = sys.stderr
         
         # WindowsのUnicodeEncodeError対策のためにTextIOWrapperでラップしてからTeeLoggerに渡す
-        wrapped_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        wrapped_stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        wrapped_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+        wrapped_stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
         
         tee_out = TeeLogger(wrapped_stdout, LOG_FILE)
         tee_err = TeeLogger(wrapped_stderr, LOG_FILE)

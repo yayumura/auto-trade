@@ -51,9 +51,8 @@ class SimulationBroker(BaseBroker):
         return True
 
     def log_trade(self, trade_record: dict):
-        write_header = not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) == 0
         df = pd.DataFrame([trade_record])
-        df.to_csv(HISTORY_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+        atomic_write_csv(HISTORY_FILE, df)
 
     def log_execution_summary(self, summary_record: dict):
         # UI表示用のコンソール出力
@@ -87,11 +86,7 @@ class SimulationBroker(BaseBroker):
         print(f" [Total] 合計資産額: {total_assets:>10,.0f}円")
         print("="*50 + "\n")
         
-        # CSVへの記録作成
-        write_header = not os.path.exists(EXECUTION_LOG_FILE) or os.path.getsize(EXECUTION_LOG_FILE) == 0
         actions_str = " | ".join(actions) if actions else "アクションなし"
-        
-        # [Professional Audit] ログ出力用のデータフレームを作成
         df_log = pd.DataFrame([{
             "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "regime": summary_record.get('regime', 'UNKNOWN'),
@@ -100,8 +95,7 @@ class SimulationBroker(BaseBroker):
             "stock_value": summary_record.get('stock_value_yen', 0),
             "actions": actions_str
         }])
-        
-        df_log.to_csv(EXECUTION_LOG_FILE, mode='a', header=write_header, index=False, encoding='utf-8-sig')
+        atomic_write_csv(EXECUTION_LOG_FILE, df_log)
         
         # [Professional Audit] 実行ログの肥大化防止（ローテーション）
         from core.file_io import rotate_csv_if_large
