@@ -163,14 +163,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 entry_p = buy_v * (1.0 + slippage if direction == 'LONG' else 1.0 - 0.002)
                 entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
                 
-                # [V22.2] Risk Parity Sizing: (TotalEquity * 0.5%) / ATR
-                # This ensures each position has the same dollar risk per unit move.
-                target_risk_amount = total_equity * 0.005
-                sh = (int(target_risk_amount / entry_atr) // 100) * 100
+                # [V22.2 Tuning] Aggressive Risk Parity Sizing
+                # Risk allowance: 2.0% of Total Equity per 1*ATR move.
+                target_risk_amount = total_equity * 0.02 
+                shares_by_risk = target_risk_amount / entry_atr
                 
-                # Safety check for buying power
-                if sh * entry_p > cash * 5.0: # Hard cap of 5x cash for any single position
-                    sh = (int((cash * 2.0) / entry_p) // 100) * 100
+                # Allocation Cap: (TotalEquity * Leverage) / MaxPositions
+                max_alloc_yen = (total_equity * leverage_rate) / max_pos
+                shares_by_cap = max_alloc_yen / entry_p
+                
+                sh = (int(min(shares_by_risk, shares_by_cap)) // 100) * 100
                 
                 if sh >= 100:
                     p_item = {

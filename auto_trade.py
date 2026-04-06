@@ -598,17 +598,13 @@ def _main_exec():
                         current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
                         buying_power = (te * dynamic_lev) - current_exposure
                         
-                        ra = te * MAX_RISK_PER_TRADE
-                        rps = a * ATR_STOP_LOSS 
-                        is_sh = int(ra // rps) if rps > 0 else 100
+                        # [V22.2 Tuning] Aggressive Risk Parity Sizing (2.0% Risk)
+                        from core.logic import calculate_position_size
+                        ts = calculate_position_size(te, p, a, leverage=dynamic_lev, max_pos=MAX_POSITIONS, risk_rate=0.02)
                         
-                        ma = min(max((te * dynamic_lev / MAX_POSITIONS), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
-                        adv = item.get('adv_yen', 0)
-                        if adv > 0: ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
-                        
-                        ms_a = int(ma // p)
+                        # Buying power safety cap
                         ms_bp = int((buying_power / 1.0001) // p)
-                        ts = (min(is_sh, ms_a, ms_bp) // 100) * 100
+                        ts = (min(ts, ms_bp) // 100) * 100
                         
                         if ts >= 100:
                             if is_sim:

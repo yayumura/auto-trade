@@ -38,14 +38,19 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         
         # 2. 逆指値 (Stop Loss) 計算
         # [V22.2] 3*ATR Profit Protection (Move SL to Break-even)
+        sl_price = float(p.get('sl_price', 0))
         if direction == 'LONG':
-            p['sl_price'] = max(p['sl_price'], today_high - (atr * sl_mult))
+            # sl_price trailing update
+            sl_price = max(sl_price, current_price - (atr * sl_mult))
             if current_price >= buy_price + (atr * 3.0):
-                p['sl_price'] = max(p['sl_price'], buy_price * 1.001) # Break-even + buffer
+                sl_price = max(sl_price, buy_price * 1.001) # Break-even + buffer
         else: # SHORT
-            p['sl_price'] = min(p['sl_price'], today_low + (atr * sl_mult))
+            sl_price = min(sl_price, current_price + (atr * sl_mult))
             if current_price <= buy_price - (atr * 3.0):
-                p['sl_price'] = min(p['sl_price'], buy_price * 0.999) # Break-even + buffer
+                sl_price = min(sl_price, buy_price * 0.999) # Break-even + buffer
+        
+        p['sl_price'] = sl_price
+        stop_price = sl_price
 
         # 3. 利確 (Profit Target)
         target_price = buy_price + (atr * tp_mult) if direction == 'LONG' else buy_price - (atr * tp_mult)
@@ -313,6 +318,27 @@ def save_invalid_tickers(invalid_map):
             json.dump(invalid_map, f, indent=4)
     except:
         pass
+
+def calculate_position_size(total_equity, entry_price, atr, leverage=3.0, max_pos=10, risk_rate=0.02):
+    """
+    V22.2 Tuning: Maximum Capital Efficiency (Aggressive Risk Parity)
+    - Risk allowance: 2.0% of Total Equity per 1*ATR move.
+    - Allocation Cap: (TotalEquity * Leverage) / MaxPositions
+    """
+    if atr <= 0 or entry_price <= 0: return 0
+    
+    # 1. Risk based sizing (TotalEquity * 2.0%) / ATR
+    target_risk_amount = total_equity * risk_rate
+    shares_by_risk = target_risk_amount / atr
+    
+    # 2. Allocation Cap (Liquidity/Leverage safety)
+    max_alloc_yen = (total_equity * leverage) / max_pos
+    shares_by_cap = max_alloc_yen / entry_price
+    
+    final_shares = min(shares_by_risk, shares_by_cap)
+    
+    # Return 100-share unit formatted quantity
+    return (int(final_shares) // 100) * 100
 
 def normalize_tick_size(price, is_buy=True):
     return round(price, 1)
