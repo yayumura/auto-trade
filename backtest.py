@@ -93,7 +93,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
         # 2. Entry
         if i + 1 >= T: continue
-        if breadth_ratio[i] < breadth_threshold: continue
+        br = breadth_ratio[i]
+        if br < breadth_threshold: continue
+        
+        # --- [V21 Dynamic Leverage Sync] ---
+        # Breadthに応じたリアルタイム・レバレッジ決定
+        current_leverage = 1.0 # Default (防衛)
+        if br >= 0.50: current_leverage = 3.0
+        elif br >= 0.40: current_leverage = 2.0
+        elif br >= 0.30: current_leverage = 1.0
         
         # [V17.2 Enhancement] Global Market SMA100 Filter (Nikkei 225 Check)
         if idx_1321 is not None:
@@ -104,7 +112,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # --- Update total equity and exposure for buying power calculation ---
             held_value = sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
             total_equity = cash + held_value
-            buying_power = (total_equity * leverage_rate) - held_value
+            buying_power = (total_equity * current_leverage) - held_value
             
             c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
             
@@ -136,9 +144,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         entry_p = buy_v * (1.0 + slippage)
                         entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
                         
-                        # --- 複利・レバレッジによる株数算出 (V19 Backtest Sync) ---
-                        # 1銘柄割当額 = (総資産 * レバレッジ) / 最大保持数
-                        allocation = (total_equity * leverage_rate) / max_pos
+                        # --- 複利・動的レバレッジによる株数算出 (V21 Sync) ---
+                        # 1銘柄割当額 = (総資産 * 当日のレバレッジ) / 最大保持数
+                        allocation = (total_equity * current_leverage) / max_pos
                         # 実際の購入可能上限 = 購買力の残りと割当額の小さい方
                         actual_ma = min(allocation, buying_power)
                         

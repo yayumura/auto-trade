@@ -65,13 +65,14 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V17.0 (Optimized Apex Configuration) ---
+# --- Imperial Oracle V21.0 (Dynamic Risk Management Sync) ---
+USE_DYNAMIC_LEVERAGE  = True   # ★NEW: 市場環境（Breadth）に応じてレバレッジを自動調整
 MAX_POSITIONS         = 7      # ★NEW: 7 stocks (超集中投資)
-BREADTH_THRESHOLD     = 0.30   # 地合いの初動から積極的に乗る設定
+BREADTH_THRESHOLD     = 0.30   # 資金退避のデッドライン (0.3未満でノーエントリー)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
-LEVERAGE_RATE         = 3.0    # ★NEW: 信用レバレッジ3.0倍 (限界突破)
-MAX_ALLOCATION_PCT    = 0.428  # ★NEW: (LEVERAGE 3.0 / 7 POS ≒ 0.428)
-MAX_ALLOCATION_AMOUNT = 10000000 # 複利の邪魔をしないよう1000万設定
+LEVERAGE_RATE         = 3.0    # 最大レバレッジ (Breadth >= 0.5 の時)
+MAX_ALLOCATION_PCT    = 0.428  # (LEVERAGE 3.0 / 7 POS ≒ 0.428)
+MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
 ATR_STOP_LOSS         = 10.0   # ★NEW: 10.0 (ノイズを完全に無視する超広域ストップ)
