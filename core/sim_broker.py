@@ -46,6 +46,11 @@ class SimulationBroker(BaseBroker):
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
         return self.execute_market_order(code, shares, side)
 
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
+        """ 逆指値（ストップロス）のダミー関数（Brokerインターフェース互換性用） """
+        import time
+        return f"SIM-STOP-{int(time.time())}"
+
     def cancel_order(self, order_id: str) -> bool:
         """ シミュレーションでは即キャンセル成功とする """
         return True

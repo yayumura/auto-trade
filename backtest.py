@@ -135,6 +135,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 "tp_price": entry_p + (entry_atr * tp_mult)
                             })
                             cash -= entry_p * sh
+                        else:
+                            # [V18.2 Sync] 資金不足または単位未満のスキップ理由を表示（ライブ環境と同期）
+                            print(f"⏭️ [BT Skip] {bundle_np['tickers'][s_idx]} skipped: Low budget or < 100 shares.")
 
     final = cash + sum(np.nan_to_num(close_np[-1, p['s_idx']]) * p['shares'] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results
