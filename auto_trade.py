@@ -449,16 +449,26 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # [V21] Multi-Strategy Logic based on Breadth
-                    allow_long = breadth_val >= 0.30
-                    allow_short = breadth_val < 0.40
+                    # [V21.1 Asymmetric Multi-Strategy Logic]
+                    allow_long = breadth_val >= 0.25
+                    allow_short = breadth_val < 0.25
                     
+                    # --- [V21.1 Macro Filter] ---
+                    try:
+                        c1321 = close_data['1321.T'].iloc[-1]
+                        s1321 = sma100_data['1321.T'].iloc[-1]
+                        if c1321 >= s1321:
+                            allow_short = False # No short in bull macro
+                        else:
+                            allow_long = False # No long in bear macro
+                    except: pass
+
                     # Determine Current Leverage
                     if USE_DYNAMIC_LEVERAGE:
                         if breadth_val >= 0.50: dynamic_lev = 3.0
                         elif breadth_val >= 0.40: dynamic_lev = 2.0
-                        elif breadth_val >= 0.30: dynamic_lev = 1.0
-                        else: dynamic_lev = 1.0 # Crashed market: Pursue absolute return via shorting with 1x leverage
+                        elif breadth_val >= 0.25: dynamic_lev = 1.0 
+                        else: dynamic_lev = 1.0 # Panic state
                     else:
                         dynamic_lev = LEVERAGE_RATE
                     
@@ -647,7 +657,8 @@ def _main_exec():
                                             stop_price = normalize_tick_size(exec_p - (a * ATR_STOP_LOSS), is_buy=False)
                                             stop_side = "1" # Sell exit
                                         else:
-                                            stop_price = normalize_tick_size(exec_p + (a * ATR_STOP_LOSS), is_buy=True)
+                                            # [V21.1] Asymmetric: SL multiplier is halved for Short
+                                            stop_price = normalize_tick_size(exec_p + (a * ATR_STOP_LOSS * 0.5), is_buy=True)
                                             stop_side = "2" # Buy exit
                                             
                                         api_p = broker.get_positions()

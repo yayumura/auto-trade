@@ -51,18 +51,19 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             # 3. 利確 (Profit Target) 計算
             target_price = buy_price + (atr * tp_mult)
         else: # SHORT
-            initial_stop = buy_price + (atr * sl_mult)
+            # [V21.1 Asymmetric] Short SL/TP multipliers are halved for hit-and-away execution
+            initial_stop = buy_price + (atr * sl_mult * 0.5)
             # [V18.1] Break-even Stop for Short
             if lowest_price <= buy_price - (atr * 5.0):
                 initial_stop = min(initial_stop, buy_price * 0.998)
                 
             if ATR_TRAIL and lowest_price < 9999999:
-                stop_price = min(initial_stop, lowest_price + (atr * sl_mult))
+                stop_price = min(initial_stop, lowest_price + (atr * sl_mult * 0.5))
             else:
                 stop_price = initial_stop
             
             # 3. 利確 (Profit Target) 計算
-            target_price = buy_price - (atr * tp_mult)
+            target_price = buy_price - (atr * tp_mult * 0.5)
             
         # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
         is_timeout = False

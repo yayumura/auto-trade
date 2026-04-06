@@ -79,7 +79,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if today_high >= p['buy_price'] + (p['entry_atr'] * 5.0):
                     p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.002)
             else: # SHORT
-                p['sl_price'] = min(p['sl_price'], today_low + (p['entry_atr'] * sl_mult))
+                # [V21.1] Asymmetric: SL multiplier is halved for Short
+                p['sl_price'] = min(p['sl_price'], today_low + (p['entry_atr'] * sl_mult * 0.5))
                 if today_low <= p['buy_price'] - (p['entry_atr'] * 5.0):
                     p['sl_price'] = min(p['sl_price'], p['buy_price'] * 0.998)
             
@@ -129,20 +130,22 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if i + 1 >= T: continue
         br = breadth_ratio[i]
         
-        # [V21 Breadth Logic]
-        allow_long = br >= 0.30
-        allow_short = br < 0.40
+        # [V21.1 Asymmetric L/S]
+        allow_long = br >= 0.25
+        allow_short = br < 0.25
+        
+        # --- [V21.1 Macro Filter] ---
+        if idx_1321 is not None:
+             is_bull_macro = close_np[i, idx_1321] >= sma100_np[i, idx_1321]
+             if not is_bull_macro: allow_long = False
+             if is_bull_macro: allow_short = False
         
         # --- [V21 Dynamic Leverage Sync] ---
-        current_leverage = 1.0 # Default
+        current_leverage = 1.0 
         if br >= 0.50: current_leverage = 3.0
         elif br >= 0.40: current_leverage = 2.0
-        elif br >= 0.30: current_leverage = 1.0
-        else: current_leverage = 1.0 # Keep 1x for short-only phase or suppress? Request implies pursuing absolute return.
-        
-        if idx_1321 is not None and br >= 0.30: # Only filter LONG entries by Nikkei SMA100
-             if close_np[i, idx_1321] < sma100_np[i, idx_1321]:
-                  allow_long = False
+        elif br >= 0.25: current_leverage = 1.0 # Buffer [0.25, 0.40) keep 1x
+        else: current_leverage = 1.0 # Panic stay 1x for shorting
         
         if len(portfolio) < max_pos and (allow_long or allow_short):
             # Calculate Buying Power
@@ -208,8 +211,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             p_item = {
                                 "s_idx": s_idx, "buy_price": entry_p, "shares": sh, "held_days": 0,
                                 "entry_atr": entry_atr, "direction": "SHORT",
-                                "sl_price": entry_p + (entry_atr * sl_mult),
-                                "tp_price": entry_p - (entry_atr * tp_mult)
+                                "sl_price": entry_p + (entry_atr * sl_mult * 0.5), # Asymmetric SL
+                                "tp_price": entry_p - (entry_atr * tp_mult * 0.5)  # Asymmetric TP
                             }
                         portfolio.append(p_item)
                         buying_power -= entry_p * sh

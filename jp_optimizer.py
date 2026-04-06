@@ -69,11 +69,11 @@ def optimize_jp_imperial(cache_path):
     # --- [Overdrive Mode] Physics-Defying Alpha Sync ---
     grid = []
     
-    breadth_range      = [0.2, 0.3]          # 地合い判定を極限まで緩和
-    sl_range           = [6.0, 8.0, 10.0]    # ノイズを完全に無視する超広域ストップ
-    tp_range           = [20.0, 30.0, 40.0]  # テンバガーを狙う超巨大利確
-    max_pos_range      = [3, 5, 7]           # 物理限界までの集中投資
-    exit_buffer_range  = [0.985]             # 計算効率のため固定
+    breadth_range      = [0.25, 0.30]        # 新規しきい値周辺を探索
+    sl_range           = [6.0, 8.0]          # 高精度ストップ
+    tp_range           = [20.0, 30.0]        # 利益最大化
+    max_pos_range      = [5, 7]              # 集中投資
+    exit_buffer_range  = [0.985]             
 
     for b in breadth_range:           
         for sl in sl_range:          
