@@ -9,6 +9,7 @@ sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
+from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
@@ -17,7 +18,7 @@ def run_single_opt(params_pack):
         bundle_np=bundle_np,
         timeline=timeline,
         breadth_ratio=breadth_ratio,
-        initial_cash=10000000,
+        initial_cash=INITIAL_CASH,
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
@@ -68,12 +69,12 @@ def optimize_jp_imperial(cache_path):
     
     # Imperial Grid Search
     grid = []
-    # Testing for the "Perfect Balance"
-    for b in [0.30, 0.40, 0.50]:           # Market Tone
-        for sl in [3.0, 4.0, 5.0]:          # Tight vs Loose Stop
-            for tp in [5.0, 10.0, 15.0, 20.0]: # Moon Shot vs Steady Profit
-                for p_size in [10, 15]:      # Concentration vs Diversification
-                    for eb in [0.990, 0.985, 0.980]: # 1%, 1.5%, 2% Buffer
+    # [Rollback v19] Swing Trade Range Optimization
+    for b in [0.30, 0.40]:           
+        for sl in [3.0, 4.0, 5.0]:          
+            for tp in [10.0, 15.0, 20.0]: 
+                for p_size in [15]:          
+                    for eb in [0.980, 0.985, 0.990]: 
                         grid.append({
                             "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
                         })
@@ -86,7 +87,7 @@ def optimize_jp_imperial(cache_path):
         results = list(executor.map(run_single_opt, tasks))
     
     df_res = pd.DataFrame(results)
-    df_res['return_pct'] = (df_res['final'] / 10000000 - 1) * 100
+    df_res['return_pct'] = (df_res['final'] / INITIAL_CASH - 1) * 100
     
     # Sort by performance
     df_res = df_res.sort_values('return_pct', ascending=False)

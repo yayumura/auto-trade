@@ -224,8 +224,8 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         
         # Imperial Trend: 5 > 20 > 100
         if s5 > s20 > s100:
-            # Entry Signal 1: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
-            if s20 * 0.98 <= p < s20 * 1.02:
+            # Entry Signal 1: Pullback (Relaxed: Price strictly between SMA20 * 0.96 and SMA20 * 1.04)
+            if s20 * 0.96 <= p < s20 * 1.04:
                 # Entry Signal 2: Reversal Confirmation (Close > Prev Close OR Close > Open)
                 prev_p = bundle['Close'].iloc[-2][t_with_t]
                 open_p = bundle['Open'].iloc[-1][t_with_t]

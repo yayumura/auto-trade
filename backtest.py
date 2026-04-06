@@ -102,7 +102,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             
             # The V16.2 Winner Logic -> V17.2 Reversal Confirmation
             is_perfect = (s5_u > s20_u) & (s20_u > s100_u)
-            is_pullback = (c_u < s20_u * 1.02) & (c_u > s20_u * 0.98) 
+            is_pullback = (c_u < s20_u * 1.04) & (c_u > s20_u * 0.96) 
             
             # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
             h_u, l_u = high_np[i, univ_indices], low_np[i, univ_indices]

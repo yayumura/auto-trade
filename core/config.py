@@ -10,7 +10,7 @@ load_dotenv()
 # --- Basic Settings ---
 JST = ZoneInfo("Asia/Tokyo")
 DATA_FILE = "data/symbols_with_market.csv"
-INITIAL_CASH = 10000000 # 1000万円基準
+INITIAL_CASH = 1000000 # 100万円基準
 TAX_RATE = 0.20315      # 日本 株取引所得税
 
 # 日本株全市場をターゲット
@@ -66,21 +66,21 @@ INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V17.0 (Optimized Apex Configuration) ---
-MAX_POSITIONS         = 15     # 15 stocks (Optimized Apex)
-BREADTH_THRESHOLD     = 0.30   # 30% market breadth trigger (Optimized Apex)
+MAX_POSITIONS         = 15     # 15 stocks (分散投資)
+BREADTH_THRESHOLD     = 0.30   # 30% (相場の地合い判定)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
-MAX_ALLOCATION_PCT    = 0.066  # 1/15 equity per pos (Optimized Apex)
-MAX_ALLOCATION_AMOUNT = 10000000 
+MAX_ALLOCATION_PCT    = 0.066  # 1/15 equity per pos
+MAX_ALLOCATION_AMOUNT = 1000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 5.0    # ATR * 5 safety net
-TARGET_PROFIT_MULT    = 15.0   # ATR * 15 profit target (Optimized Apex)
+ATR_STOP_LOSS         = 5.0    # 損切りライン (変更なし)
+TARGET_PROFIT_MULT    = 15.0   # 利確ライン (変更なし)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.985  # [V18.2] 1.5% Buffer (Optimized Apex)
+SMA20_EXIT_BUFFER     = 0.990  # ★NEW: 撤退ラインを少し厳しく(早期損切り)して最適化
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
