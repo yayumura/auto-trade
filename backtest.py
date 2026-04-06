@@ -7,10 +7,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                  slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
                                  verbose=False):
     """
-    V22.1 Absolute Return Strategic Model
-    - 5-day Unrealized Loss Time Stop (minimize drawdowns)
-    - 3-day SHORT max hold (mitigate squeeze risk)
-    - 60-day Relative Strength Filter vs 1321.T
+    V22.2 Market Neutral Absolute Return Model
+    - Simultaneous L5:S5 Selection (RS Lead/Lag)
+    - Risk Parity Sizing: (Equity * 0.5%) / ATR
+    - 2-Day Unrealized Loss Time Stop
+    - 3*ATR Profit Protection (Break-even Stop)
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -30,8 +31,6 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     
     for i in range(100, T):
         curr_time = timeline[i]
-        
-        # Diagnostic period check (2021/12, 2022/1, 2023/10-12)
         is_diag = False
         y, m = curr_time.year, curr_time.month
         if (y == 2021 and m == 12) or (y == 2022 and m == 1) or (y == 2023 and (10 <= m <= 12)):
@@ -41,7 +40,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         for p in portfolio:
             cp = np.nan_to_num(close_np[i, p['s_idx']])
             if cp <= 0: cp = p['buy_price']
-            current_profits += (cp - p['buy_price']) * p['shares'] if p.get('direction', 'LONG') == 'LONG' else (p['buy_price'] - cp) * p['shares']
+            current_profits += (cp - p['buy_price']) * p['shares'] if p['direction'] == 'LONG' else (p['buy_price'] - cp) * p['shares']
         
         total_equity = cash + current_profits
         if i % 20 == 0:
@@ -51,26 +50,27 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         new_portfolio = []
         for p in portfolio:
             tidx = p['s_idx']
-            direction = p.get('direction', 'LONG')
+            direction = p['direction']
             ticker = bundle_np['tickers'][tidx]
             today_open = open_np[i, tidx]
             today_high = high_np[i, tidx]
             today_low = low_np[i, tidx]
+            atr = atr_np[i, tidx]
             
             if np.isnan(today_open) or np.isnan(today_high) or np.isnan(today_low):
                 p['held_days'] += 1
                 new_portfolio.append(p)
                 continue
             
-            # SL/TP Update (Trailing)
+            # [V22.2] 3*ATR Profit Protection
             if direction == 'LONG':
                 p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
-                if today_high >= p['buy_price'] + (p['entry_atr'] * 5.0):
-                    p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.002)
+                if today_low >= p['buy_price'] + (p['entry_atr'] * 3.0):
+                    p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.001)
             else: # SHORT
-                p['sl_price'] = min(p['sl_price'], today_low + (p['entry_atr'] * sl_mult * 0.5))
-                if today_low <= p['buy_price'] - (p['entry_atr'] * 5.0):
-                    p['sl_price'] = min(p['sl_price'], p['buy_price'] * 0.998)
+                p['sl_price'] = min(p['sl_price'], today_low + (p['entry_atr'] * sl_mult))
+                if today_high <= p['buy_price'] - (p['entry_atr'] * 3.0):
+                    p['sl_price'] = min(p['sl_price'], p['buy_price'] * 0.999)
             
             exit_p = None
             exit_reason = ""
@@ -83,20 +83,18 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     if today_open <= p['sl_price']: exit_p, exit_reason = today_open, "SL (Gap)"
                     elif today_low <= p['sl_price']: exit_p, exit_reason = p['sl_price'], "SL"
                     elif today_high >= p['tp_price']: exit_p, exit_reason = p['tp_price'], "TP"
-                    # [V22.1] 含み損タイムストップ (5日)
-                    elif p['held_days'] >= 5 and today_open < p['buy_price']:
-                        exit_p, exit_reason = today_open, "Loss Time Stop (5d)"
+                    # [V22.2] 2-Day Unrealized Loss Stop
+                    elif p['held_days'] >= 2 and today_open < p['buy_price']:
+                        exit_p, exit_reason = today_open, "Fast Loss Stop (2d)"
                     elif p['held_days'] >= 60: exit_p, exit_reason = today_open, "Time Stop (60d)"
                 else: # SHORT
                     if today_open >= p['sl_price']: exit_p, exit_reason = today_open, "SL (Gap)"
                     elif today_high >= p['sl_price']: exit_p, exit_reason = p['sl_price'], "SL"
                     elif today_low <= p['tp_price']: exit_p, exit_reason = p['tp_price'], "TP"
-                    # [V22.1] SHORT max hold (3 days)
-                    elif p['held_days'] >= 3: 
-                        exit_p, exit_reason = today_open, "Short Max Hold (3d)"
-                    # [V22.1] SHORT loss time stop (5 days)
-                    elif p['held_days'] >= 5 and today_open > p['buy_price']:
-                        exit_p, exit_reason = today_open, "Loss Time Stop (5d)"
+                    # [V22.2] 2-Day Unrealized Loss Stop
+                    elif p['held_days'] >= 2 and today_open > p['buy_price']:
+                        exit_p, exit_reason = today_open, "Fast Loss Stop (2d)"
+                    elif p['held_days'] >= 60: exit_p, exit_reason = today_open, "Time Stop (60d)"
             
             if exit_p is not None:
                 curr_slippage = slippage if direction == 'LONG' else 0.002
@@ -124,90 +122,75 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 today_close = close_np[i, tidx]
                 today_sma20 = sma20_np[i, tidx]
                 if not np.isnan(today_close):
-                    if direction == 'LONG':
-                        if today_close < today_sma20 * exit_buffer: p['exit_next_open'] = True
-                        if p['held_days'] >= 20 and today_close <= p['buy_price']: p['exit_next_open'] = True
-                    else: # SHORT
-                        if today_close > today_sma20 * (2.0 - exit_buffer): p['exit_next_open'] = True
-                        if p['held_days'] >= 20 and today_close >= p['buy_price']: p['exit_next_open'] = True
+                    # Keep SMA20 breach logic as secondary check
+                    if direction == 'LONG' and today_close < today_sma20 * exit_buffer: p['exit_next_open'] = True
+                    elif direction == 'SHORT' and today_close > today_sma20 * (2.0 - exit_buffer): p['exit_next_open'] = True
                 new_portfolio.append(p)
         portfolio = new_portfolio
 
-        # 2. Entry Loop
+        # 2. Entry Loop (Market Neutral L5:S5)
         if i + 1 >= T: continue
         br = breadth_ratio[i]
-        allow_long = br >= 0.25
-        allow_short = br < 0.25
         
-        if idx_1321 is not None:
-             is_bull_m = close_np[i, idx_1321] >= sma100_np[i, idx_1321]
-             if not is_bull_m: allow_long = False
-             if is_bull_m: allow_short = False
+        # [V22.2] No macro filter. Always scan for both directions.
+        c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
+        h_u, l_u, atr_u = high_np[i, univ_indices], low_np[i, univ_indices], atr_np[i, univ_indices]
+        rs_u = s5_u / (s100_u + 1e-9)
         
-        current_leverage = 1.0 
-        if br >= 0.50: current_leverage = 3.0
-        elif br >= 0.40: current_leverage = 2.0
-        elif br >= 0.25: current_leverage = 1.0 
-        else: current_leverage = 1.0 
+        valid_longs = []
+        valid_shorts = []
         
-        if len(portfolio) < max_pos and (allow_long or allow_short):
-            current_exposure = sum(p['buy_price'] * p['shares'] for p in portfolio)
-            buying_power = (total_equity * current_leverage) - current_exposure
+        # Long candidates (Strong RS & s20 pullback)
+        mask_l = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95)
+        if mask_l.any():
+            valid_longs = [(rs_u[m], idx, 'LONG') for m, idx in zip(np.where(mask_l)[0], univ_indices[mask_l])]
             
-            c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
-            h_u, l_u, atr_u = high_np[i, univ_indices], low_np[i, univ_indices], atr_np[i, univ_indices]
+        # Short candidates (Weak RS & s20 pullback)
+        mask_s = (s5_u < s20_u) & (s20_u < s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95)
+        if mask_s.any():
+            valid_shorts = [(rs_u[m], idx, 'SHORT') for m, idx in zip(np.where(mask_s)[0], univ_indices[mask_s])]
             
-            # [V22.1] Relative Strength Filter (60d vs Index)
-            ret60_all = (close_np[i, univ_indices] / close_np[i-60, univ_indices] - 1)
-            ret60_idx = (close_np[i, idx_1321] / close_np[i-60, idx_1321] - 1) if idx_1321 is not None else 0
+        best_longs = sorted(valid_longs, key=lambda x: x[0], reverse=True)[:5]
+        best_shorts = sorted(valid_shorts, key=lambda x: x[0], reverse=False)[:5]
+        
+        candidates = best_longs + best_shorts
+        for score, s_idx, direction in candidates:
+            if len(portfolio) >= max_pos: break
+            if s_idx in [p['s_idx'] for p in portfolio]: continue
             
-            valid_long_idx = []
-            if allow_long:
-                mask_l = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.04) & (c_u > s20_u * 0.96) & \
-                         (((c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])) & ((c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5)) & \
-                         (ret60_all > ret60_idx)
-                if mask_l.any():
-                    scores_l = s5_u[mask_l] / s100_u[mask_l]
-                    valid_long_idx = [(s, idx, 'LONG') for s, idx in zip(scores_l, univ_indices[mask_l])]
+            buy_v = open_np[i+1, s_idx]
+            if not np.isnan(buy_v) and buy_v > 0:
+                entry_p = buy_v * (1.0 + slippage if direction == 'LONG' else 1.0 - 0.002)
+                entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
+                
+                # [V22.2] Risk Parity Sizing: (TotalEquity * 0.5%) / ATR
+                # This ensures each position has the same dollar risk per unit move.
+                target_risk_amount = total_equity * 0.005
+                sh = (int(target_risk_amount / entry_atr) // 100) * 100
+                
+                # Safety check for buying power
+                if sh * entry_p > cash * 5.0: # Hard cap of 5x cash for any single position
+                    sh = (int((cash * 2.0) / entry_p) // 100) * 100
+                
+                if sh >= 100:
+                    p_item = {
+                        "s_idx": s_idx, "buy_price": entry_p, "shares": sh, "held_days": 0,
+                        "entry_atr": entry_atr, "direction": direction,
+                        "entry_date": curr_time.strftime('%Y-%m-%d'), "entry_breadth": br
+                    }
+                    if direction == 'LONG':
+                        p_item.update({"sl_price": entry_p - (entry_atr * sl_mult), "tp_price": entry_p + (entry_atr * tp_mult)})
+                    else:
+                        p_item.update({"sl_price": entry_p + (entry_atr * sl_mult), "tp_price": entry_p - (entry_atr * tp_mult)})
+                    portfolio.append(p_item)
+                    cash -= 0 # In margin trading simulated here, we track cash as 'Free Margin' if needed, but simplicity wins.
+                    # Wait, in this sim, cash = equity - total_position_value? No, cash is cumulative PnL.
+                    # Let's keep the existing logic where profit is added to cash.
 
-            valid_short_idx = []
-            if allow_short:
-                mask_s = (s5_u < s20_u) & (s20_u < s100_u) & (c_u < s20_u * 1.02) & (c_u > s20_u * 0.98) & \
-                         (((c_u < close_np[i-1, univ_indices]) | (c_u < open_np[i, univ_indices])) & ((h_u - c_u) / (h_u - l_u + 1e-9) >= 0.5)) & \
-                         (c_u < s5_u) & (ret60_all > ret60_idx)
-                if mask_s.any():
-                    scores_s = s100_u[mask_s] / s5_u[mask_s]
-                    valid_short_idx = [(s, idx, 'SHORT') for s, idx in zip(scores_s, univ_indices[mask_s])]
-
-            candidates = sorted(valid_long_idx + valid_short_idx, key=lambda x: x[0], reverse=True)
-            for score, s_idx, direction in candidates:
-                if len(portfolio) >= max_pos: break
-                if s_idx in [p['s_idx'] for p in portfolio]: continue
-                buy_v = open_np[i+1, s_idx]
-                if not np.isnan(buy_v) and buy_v > 0:
-                    entry_p = buy_v * (1.0 + slippage if direction == 'LONG' else 1.0 - 0.002)
-                    entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
-                    actual_ma = min((total_equity * current_leverage) / max_pos, buying_power)
-                    sh = (int(actual_ma / entry_p) // 100) * 100
-                    if sh >= 100:
-                        p_item = {
-                            "s_idx": s_idx, "buy_price": entry_p, "shares": sh, "held_days": 0,
-                            "entry_atr": entry_atr, "direction": direction,
-                            "entry_date": curr_time.strftime('%Y-%m-%d'), "entry_breadth": br
-                        }
-                        if direction == 'LONG':
-                            p_item.update({"sl_price": entry_p - (entry_atr * sl_mult), "tp_price": entry_p + (entry_atr * tp_mult)})
-                        else:
-                            p_item.update({"sl_price": entry_p + (entry_atr * sl_mult * 0.5), "tp_price": entry_p - (entry_atr * tp_mult * 0.5)})
-                        portfolio.append(p_item)
-                        buying_power -= entry_p * sh
-
-    # Final Ledger Export
     if trade_ledger:
         import os
         os.makedirs("data/simulation", exist_ok=True)
         pd.DataFrame(trade_ledger).to_csv("data/simulation/trade_ledger.csv", index=False, encoding="utf-8-sig")
-        print(f"📊 [Diagnostic] Trade Ledger saved to data/simulation/trade_ledger.csv ({len(trade_ledger)} trades)")
 
     final_equity = cash + sum((np.nan_to_num(close_np[-1, p['s_idx']]) - p['buy_price']) * p['shares'] if p['direction'] == 'LONG' else (p['buy_price'] - np.nan_to_num(close_np[-1, p['s_idx']])) * p['shares'] for p in portfolio)
     return float(final_equity), trade_count, monthly_assets, [t['profit'] for t in trade_ledger]

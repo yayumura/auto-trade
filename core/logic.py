@@ -37,33 +37,18 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         lowest_price = float(p.get('lowest_price', 9999999))
         
         # 2. 逆指値 (Stop Loss) 計算
+        # [V22.2] 3*ATR Profit Protection (Move SL to Break-even)
         if direction == 'LONG':
-            initial_stop = buy_price - (atr * sl_mult)
-            # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
-            if highest_price >= buy_price + (atr * 5.0):
-                initial_stop = max(initial_stop, buy_price * 1.002)
-                
-            if ATR_TRAIL and highest_price > 0:
-                stop_price = max(initial_stop, highest_price - (atr * sl_mult))
-            else:
-                stop_price = initial_stop
-            
-            # 3. 利確 (Profit Target) 計算
-            target_price = buy_price + (atr * tp_mult)
+            p['sl_price'] = max(p['sl_price'], today_high - (atr * sl_mult))
+            if current_price >= buy_price + (atr * 3.0):
+                p['sl_price'] = max(p['sl_price'], buy_price * 1.001) # Break-even + buffer
         else: # SHORT
-            # [V21.1 Asymmetric] Short SL/TP multipliers are halved for hit-and-away execution
-            initial_stop = buy_price + (atr * sl_mult * 0.5)
-            # [V18.1] Break-even Stop for Short
-            if lowest_price <= buy_price - (atr * 5.0):
-                initial_stop = min(initial_stop, buy_price * 0.998)
-                
-            if ATR_TRAIL and lowest_price < 9999999:
-                stop_price = min(initial_stop, lowest_price + (atr * sl_mult * 0.5))
-            else:
-                stop_price = initial_stop
-            
-            # 3. 利確 (Profit Target) 計算
-            target_price = buy_price - (atr * tp_mult * 0.5)
+            p['sl_price'] = min(p['sl_price'], today_low + (atr * sl_mult))
+            if current_price <= buy_price - (atr * 3.0):
+                p['sl_price'] = min(p['sl_price'], buy_price * 0.999) # Break-even + buffer
+
+        # 3. 利確 (Profit Target)
+        target_price = buy_price + (atr * tp_mult) if direction == 'LONG' else buy_price - (atr * tp_mult)
             
         # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
         is_timeout = False
@@ -74,24 +59,20 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
                 days_held = (dt.now() - buy_dt).days
                 
-                # [V22.1] SHORT Max Hold Duration: 3 Days
-                if direction == 'SHORT' and days_held >= 3:
-                    is_timeout = True
-                elif days_held >= 60:
-                    is_timeout = True
-                    
-                # [V22.1] Loss-based Time Stop (5 Days)
-                elif days_held >= 5:
+                # [V22.2] 2nd Day Loss Time Stop (Ultra-Fast Purge)
+                if days_held >= 2:
                     if direction == 'LONG' and current_price < buy_price:
                         is_stagnated = True
                     elif direction == 'SHORT' and current_price > buy_price:
                         is_stagnated = True
-                    # Legacy 20-day stagnation check
-                    elif days_held >= 20:
-                        if direction == 'LONG' and current_price <= buy_price:
-                            is_stagnated = True
-                        elif direction == 'SHORT' and current_price >= buy_price:
-                            is_stagnated = True
+                
+                if days_held >= 60:
+                    is_timeout = True
+                elif days_held >= 20: # Keep 20d stagnation as deeper safety
+                    if direction == 'LONG' and current_price <= buy_price:
+                        is_stagnated = True
+                    elif direction == 'SHORT' and current_price >= buy_price:
+                        is_stagnated = True
             except: pass
         
         # 5. 窓開け暴落（ギャップ）対応 (シミュレーション用)
@@ -248,85 +229,62 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
-    V17.0 Imperial Selection Engine:
-    - Filters targets based on SMA alignment and RS.
-    - Requires: SMA5 > SMA20 > SMA100 (Perfect Power Order)
+    V22.2 Market Neutral Selection Engine:
+    - Neutralize market risk by simultaneous L5:S5 selection based on RS Lead/Lag.
     """
     bundle = calculate_all_technicals_v12(data_df)
     
-    # [V22.1 Relative Strength Calculation]
-    # Filter tickers that outperformed Nikkei 225 (1321.T) over past 60 days
+    # [V22.2 Market Neutral Model]
     ret60 = (bundle['Close'] / bundle['Close'].shift(60) - 1).iloc[-1]
-    nikkei_ret60 = ret60.get('1321.T', 0)
     
     close = bundle['Close'].iloc[-1]
     sma5 = bundle['SMA5'].iloc[-1]
     sma20 = bundle['SMA20'].iloc[-1]
     sma100 = bundle['SMA100'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
-    rs_long = bundle['RS'].iloc[-1]
-    rs_short = bundle['RS_SHORT'].iloc[-1]
+    rs_raw = bundle['RS'].iloc[-1] 
     
-    candidates = []
+    long_candidates = []
+    short_candidates = []
     
     for t_with_t in [f"{t}.T" for t in targets]:
-        if t_with_t not in close.index: 
-            if t_with_t not in bundle['Close'].columns: continue
-        
+        if t_with_t not in close.index: continue
         code_only = t_with_t.replace(".T", "")
         p = close[t_with_t]
         s5, s20, s100 = sma5[t_with_t], sma20[t_with_t], sma100[t_with_t]
-        
-        if pd.isna(p) or p <= 0: continue
-        
-        # Name lookup
+        if pd.isna(p) or p <= 0 or pd.isna(s100): continue
+
         name = "Target"
         if symbols_df is not None:
             match = symbols_df[symbols_df['コード'].astype(str) == code_only]
             if not match.empty: name = match.iloc[0]['銘柄名']
 
-        # --- LONG Logic: SMA5 > SMA20 > SMA100 & Outperforming Index ---
-        if s5 > s20 > s100 and ret60.get(t_with_t, -1) > nikkei_ret60:
-            if s20 * 0.96 <= p < s20 * 1.04:
-                prev_p = bundle['Close'].iloc[-2][t_with_t]
-                open_p = bundle['Open'].iloc[-1][t_with_t]
-                h_p = bundle['High'].iloc[-1][t_with_t]
-                l_p = bundle['Low'].iloc[-1][t_with_t]
-                
-                is_strong = (p - l_p) / (h_p - l_p + 1e-9) >= 0.5
-                if ((p > prev_p) or (p > open_p)) and is_strong:
-                    candidates.append({
-                        "code": code_only, "name": name, "price": p,
-                        "atr": atr[t_with_t], "rs": rs_long[t_with_t], "score": rs_long[t_with_t],
-                        "direction": "LONG"
-                    })
+        # Signal Logic
+        rs_score = rs_raw[t_with_t]
+        
+        # LONG: Perfect Order & Pullback
+        if s5 > s20 > s100:
+            if s20 * 0.95 <= p <= s20 * 1.05:
+                long_candidates.append({
+                    "code": code_only, "name": name, "price": p,
+                    "atr": atr[t_with_t], "rs": rs_score, "score": rs_score,
+                    "direction": "LONG"
+                })
+        
+        # SHORT: Inverse Perfect Order & Pullback
+        elif s5 < s20 < s100:
+            if s20 * 0.95 <= p <= s20 * 1.05:
+                short_candidates.append({
+                    "code": code_only, "name": name, "price": p,
+                    "atr": atr[t_with_t], "rs": rs_score, "score": rs_score,
+                    "direction": "SHORT"
+                })
 
-        # --- SHORT Logic: SMA5 < SMA20 < SMA100 & (Close < SMA5 for momentum) ---
-        elif s5 < s20 < s100 and p < s5:
-            # 60-day filter for short? Standard L/S often avoids shorting the strongest stocks.
-            # But the requirement asks for RS comparison for all "entry candidates".
-            if ret60.get(t_with_t, 99) > nikkei_ret60: # Even for shorts, we prefer trading active/strong tickers or specific weakness?
-                # User says: "Extract only tickers whose return over past 60 days outperformed Nikkei".
-                # OK, applying to all.
-                if s20 * 0.98 <= p <= s20 * 1.02:
-                    prev_p = bundle['Close'].iloc[-2][t_with_t]
-                open_p = bundle['Open'].iloc[-1][t_with_t]
-                h_p = bundle['High'].iloc[-1][t_with_t]
-                l_p = bundle['Low'].iloc[-1][t_with_t]
-                
-                # Weak Close Filter for Short
-                is_weak = (h_p - p) / (h_p - l_p + 1e-9) >= 0.5
-                if ((p < prev_p) or (p < open_p)) and is_weak:
-                    candidates.append({
-                        "code": code_only, "name": name, "price": p,
-                        "atr": atr[t_with_t], "rs": rs_short[t_with_t], "score": rs_short[t_with_t],
-                        "direction": "SHORT"
-                    })
-
-
-    # Sort by RS descending
-    candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
-    return candidates[:10]
+    # [Spread Strategy] Select Top 5 RS for Long and Bottom 5 RS for Short
+    best_longs = sorted(long_candidates, key=lambda x: x['rs'], reverse=True)[:5]
+    best_shorts = sorted(short_candidates, key=lambda x: x['rs'], reverse=False)[:5]
+    
+    return best_longs + best_shorts
 
 class RealtimeBuffer:
     def __init__(self, code, initial_df=None, interval_mins=15):

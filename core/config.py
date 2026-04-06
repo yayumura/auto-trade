@@ -65,24 +65,24 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V22.1 (Absolute Return Model) ---
-USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 10     # [V22.1] 10 positions (Diversified risk management)
-BREADTH_THRESHOLD     = 0.25   # [V22.1] Conservative threshold
-MAX_RISK_PER_TRADE    = 0.01   
+# --- Imperial Oracle V22.2 (Market Neutral Model) ---
+USE_DYNAMIC_LEVERAGE  = False  # Market neutral strategy stays constant
+MAX_POSITIONS         = 10     # [V22.2] 10 positions (Fixed L5:S5)
+BREADTH_THRESHOLD     = 0.25   
+MAX_RISK_PER_TRADE    = 0.005  # [V22.2] 0.5% risk parity per position
 LEVERAGE_RATE         = 3.0    
-MAX_ALLOCATION_PCT    = 0.3    # (LEVERAGE 3.0 / 10 POS = 0.3)
+MAX_ALLOCATION_PCT    = 0.5    # [V22.2] Risk Parity allows higher nominal if ATR is low
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 4.0    # [V22.1] Tight SL for high turnover
+ATR_STOP_LOSS         = 5.0    
 TARGET_PROFIT_MULT    = 20.0   
-RS_THRESHOLD          = 10.0   # Minimum Relative Strength
-MIN_PRICE             = 200    # Minimum stock price
-MAX_PRICE             = 10000  # Maximum stock price
-ATR_TRAIL             = True   # Trailing stop enabled
-EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.985  # ★NEW: 0.985 (損切り・微益撤退のバランス最適化)
+RS_THRESHOLD          = 10.0   
+MIN_PRICE             = 200    
+MAX_PRICE             = 10000  
+ATR_TRAIL             = True   
+EXIT_ON_SMA20_BREACH  = True   
+SMA20_EXIT_BUFFER     = 0.985  
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
