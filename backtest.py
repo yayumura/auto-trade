@@ -4,7 +4,8 @@ import numpy as np
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=10000000, max_pos=10, 
                                sl_mult=5.0, tp_mult=15.0, breadth_threshold=0.4,
-                               slippage=0.001, use_sma_exit=True, exit_buffer=0.985):
+                               slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
+                               verbose=False):
     """
     V17.0 THE IMPERIAL ORACLE - PEAK ALPHA SYNC
     - Perfect Order: SMA5 > SMA20 > SMA100
@@ -137,7 +138,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             cash -= entry_p * sh
                         else:
                             # [V18.2 Sync] 資金不足または単位未満のスキップ理由を表示（ライブ環境と同期）
-                            print(f"⏭️ [BT Skip] {bundle_np['tickers'][s_idx]} skipped: Low budget or < 100 shares.")
+                            if verbose:
+                                print(f"⏭️ [BT Skip] {bundle_np['tickers'][s_idx]} skipped: Low budget or < 100 shares.")
 
     final = cash + sum(np.nan_to_num(close_np[-1, p['s_idx']]) * p['shares'] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results
