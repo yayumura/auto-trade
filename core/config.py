@@ -65,22 +65,22 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V17.0 (Ultimate Apex Configuration) ---
-MAX_POSITIONS         = 10     # 10 stocks (Production Balanced)
-BREADTH_THRESHOLD     = 0.50   # 50% market breadth trigger (Rank 4 Optimized)
+# --- Imperial Oracle V17.0 (Optimized Apex Configuration) ---
+MAX_POSITIONS         = 15     # 15 stocks (Optimized Apex)
+BREADTH_THRESHOLD     = 0.30   # 30% market breadth trigger (Optimized Apex)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
-MAX_ALLOCATION_PCT    = 0.10   # 1/10 equity per pos (Optimized V18.2)
+MAX_ALLOCATION_PCT    = 0.066  # 1/15 equity per pos (Optimized Apex)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
 ATR_STOP_LOSS         = 5.0    # ATR * 5 safety net
-TARGET_PROFIT_MULT    = 20.0   # ATR * 20 profit target (Rank 4 Optimized)
+TARGET_PROFIT_MULT    = 15.0   # ATR * 15 profit target (Optimized Apex)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.980  # [V18.2] 2.0% Buffer (Rank 4 Optimized)
+SMA20_EXIT_BUFFER     = 0.985  # [V18.2] 1.5% Buffer (Optimized Apex)
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100

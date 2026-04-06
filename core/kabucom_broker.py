@@ -207,21 +207,10 @@ class KabucomBroker(BaseBroker):
             
             if code_sym in local_data:
                 hist = local_data[code_sym]
-                local_buy_price = float(hist.get('buy_price', 0)) if hist.get('buy_price') is not None else 0.0
-                api_buy_price = float(p['Price']) if p.get('Price') is not None else 0.0
-                
-                # --- [Phase 10] 株式分割・併合の自動検知同期 ---
-                # APIの取得単価とローカルの取得単価に5%以上の乖離がある場合、分割等があったとみなす
-                if local_buy_price > 0 and abs(1 - (api_buy_price / local_buy_price)) > 0.05:
-                    adj_ratio = api_buy_price / local_buy_price
-                    print(f"🔄 [Split Sync] {code_sym} の価格乖離({local_buy_price} -> {api_buy_price})を検知。記録を係数 {adj_ratio:.4f} で調整します。")
-                    highest_price = float(hist.get('highest_price', current_price)) * adj_ratio
-                else:
-                    highest_price = float(hist.get('highest_price', current_price))
-                
+                # --- [Phase 10] 株式分割・併合ロジック（削除済み） ---
+                highest_price = float(hist.get('highest_price', current_price))
                 highest_price = max(highest_price, current_price)
                 buy_time = hist.get('buy_time', "Real API Position")
-                # 【新規】分割利確済みフラグの復元
                 partial_sold = hist.get('partial_sold', False)
             else:
                 highest_price = current_price
@@ -229,25 +218,29 @@ class KabucomBroker(BaseBroker):
                 partial_sold = False
 
             final_positions.append({
-                "code": code_sym, "name": p.get('SymbolName', ''), "shares": int(p.get('LeavesQty', 0)),
-                "buy_price": float(p['Price']) if p.get('Price') is not None else 0.0, "current_price": current_price,
+                "code": code_sym, 
+                "name": p.get('SymbolName', ''), 
+                "shares": int(p.get('LeavesQty', 0)),
+                "buy_price": float(p['Price']) if p.get('Price') is not None else 0.0, 
+                "current_price": current_price,
                 "highest_price": round(highest_price, 1),
                 "buy_time": buy_time,
-                "partial_sold": partial_sold
+                "partial_sold": partial_sold,
+                "hold_id": p.get('ExecutionID') # 信用返済用に保持
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None) -> str:
         """
         現物・信用の成行・指値注文を発注する。
         side: "1" (売), "2" (買)
+        close_positions: [{"HoldID": "...", "Qty": 100}, ...] (信用返済時)
         """
         if not self.token: return None
+        import os
         
         cash_margin = 2 if side == "2" else 3
         # 買付余力(2) または 信用売(3)
-        # [Professional Audit] 信用取引の決済(Close)はAPI側が建玉を(FIFO)で自動選択するため、
-        # 明示的な建玉指定(ClosePositionOrder)を省略することでエラーを回避し、堅牢性を高める。
         
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         
@@ -266,6 +259,10 @@ class KabucomBroker(BaseBroker):
             "Price": int(price),
             "ExpireDay": 0
         }
+
+        # 信用返済(CashMargin=3)の場合は ClosePositions を付与
+        if cash_margin == 3 and close_positions:
+            data["ClosePositions"] = close_positions
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         if res and res.status_code == 200:
@@ -392,6 +389,7 @@ class KabucomBroker(BaseBroker):
         total_filled_qty = 0
         total_filled_value = 0
         
+        from core.logic import normalize_tick_size
         for attempt in range(1, 4):
             if remaining_shares <= 0: break
             time.sleep(0.2)
@@ -408,30 +406,39 @@ class KabucomBroker(BaseBroker):
                 print(f"🚨 {code} はストップ安に達しているため、売り注文を中止します。")
                 break
 
+            # [Professional Audit] Marketable Limit Order: 買値はAsk, 売値はBidを基準にする
             if side == "2":
-                limit_price = b_info.get('bid') or ((b_info.get('ask', 0) + b_info.get('price', 0))/2)
+                # 買い：最良売気配(Ask)で確実に約定、取得できない場合は現在値
+                limit_price = b_info.get('ask') or b_info.get('price')
                 limit_price = normalize_tick_size(limit_price, is_buy=True)
             else:
-                limit_price = b_info.get('ask') or ((b_info.get('bid', 0) + b_info.get('price', 0))/2)
+                # 売り：最良買気配(Bid)で確実に約定、取得できない場合は現在値
+                limit_price = b_info.get('bid') or b_info.get('price')
                 limit_price = normalize_tick_size(limit_price, is_buy=False)
-            
-            if not limit_price or limit_price <= 0:
-                 limit_price = b_info.get('price', 0)
             
             if not limit_price or limit_price <= 0:
                 print(f"⚠️ {code} の有効な価格が取得できないため、追従を中断します。")
                 break
 
-            # 注文発注（売却時はAPIが自動で建玉を選択(FIFO)）
-            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price)
+            # 信用返済時は HoldID を取得して指定（FIFO自動選択がエラーになるのを防ぐため）
+            close_pos_list = None
+            if side == "1":
+                all_p = self.get_positions()
+                match_p = [p for p in all_p if p['code'] == str(code) and p.get('hold_id')]
+                if match_p:
+                    # 最初の建玉から順に割り当て (簡易実装)
+                    close_pos_list = [{"HoldID": match_p[0]['hold_id'], "Qty": remaining_shares}]
+
+            # 注文発注
+            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, close_positions=close_pos_list)
             if not order_id: break
             
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
             start_wait = time.time()
             current_order_filled = False
             
-            # [Professional Audit] 待機時間を10秒から3秒に短縮（逆選択回避）
-            while time.time() - start_wait < 3:
+            # [Professional Audit] 見せ玉判定を避けるため待機時間を30秒に延長
+            while time.time() - start_wait < 30:
                 details = self.get_order_details(order_id)
                 if details:
                     state = details.get('State')
@@ -504,6 +511,61 @@ class KabucomBroker(BaseBroker):
             "Price": avg_price,
             "Symbol": code
         }
+
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
+        """
+        逆指値（ストップロス）注文を発注する。
+        side: "1" (売), "2" (買)
+        trigger_price: トリガー価格
+        """
+        if not self.token: return None
+        import os
+
+        # ストップロス売り(1) または ストップロス買い(2)
+        cash_margin = 2 if side == "2" else 3
+        
+        # 逆指値の設定
+        # TriggerCondition: 1 (>=), 2 (<=)
+        # 売り（損切り）の場合は現在値が trigger_price 以下になったら成行
+        condition = 2 if side == "1" else 1 
+
+        data = {
+            "Password": self.password,
+            "Symbol": code,
+            "Exchange": 1,
+            "SecurityType": 1,
+            "Side": side,
+            "CashMargin": cash_margin,
+            "MarginTradeType": 1,
+            "DelivType": 0,
+            "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),
+            "Qty": shares,
+            "FrontOrderType": 10,  # 成行
+            "Price": 0,
+            "ExpireDay": 0,
+            "ReverseLimitOrder": {
+                "TriggerSeq": 1,
+                "TriggerTarget": 1, # 1: 現値
+                "TriggerPrice": int(trigger_price),
+                "TriggerCondition": condition,
+                "AfterOrderType": 10, # 10: 成行
+                "AfterOrderPrice": 0
+            }
+        }
+
+        if cash_margin == 3 and hold_id:
+            data["ClosePositions"] = [{"HoldID": hold_id, "Qty": shares}]
+
+        res = self._api_request("POST", "sendorder", json=data, timeout=10)
+        if res and res.status_code == 200:
+            order_res = res.json()
+            if order_res.get('Result') == 0:
+                order_id = order_res.get('OrderId')
+                print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
+                return order_id
+            else:
+                print(f"⚠️ 逆指値注文エラー: {order_res}")
+        return None
 
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
         """ 注文が約定（または失敗）するまで待機する """

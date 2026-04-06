@@ -568,13 +568,30 @@ def _main_exec():
                                     actual_qty = int(details.get('Qty', 0))
                                     exec_p = float(details.get('Price', 0)) or tp
                                     if not broker.is_production: account['cash'] -= exec_p * actual_qty
-                                    portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "current_price": round(exec_p, 1), "shares": actual_qty, "buy_atr": a})
+                                    
+                                    # ポートフォリオに追加
+                                    new_pos = {"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "current_price": round(exec_p, 1), "shares": actual_qty, "buy_atr": a}
+                                    portfolio.append(new_pos)
                                     num_filled += 1
+
+                                    # --- [Hard Stop] 約定直後の逆指値（ストップロス）発注 ---
+                                    try:
+                                        stop_price = normalize_tick_size(exec_p - (a * ATR_STOP_LOSS), is_buy=False)
+                                        # 最新の建玉IDを取得するために一度 get_positions を叩く（返済指定に必要）
+                                        api_p = broker.get_positions()
+                                        match = [p for p in api_p if p['code'] == str(item['code'])]
+                                        hold_id = match[0].get('hold_id') if match else None
+                                        
+                                        broker.execute_stop_order(item['code'], actual_qty, side="1", trigger_price=stop_price, hold_id=hold_id)
+                                    except Exception as e:
+                                        print(f"⚠️ [Hard Stop Error] 逆指値の発注に失敗しました: {e}")
+
                             if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
                             if hasattr(broker, 'save_account'): broker.save_account(account)
                             if item['code'] in watchlist: watchlist.remove(item['code'])
                         else:
-                            print(f"[Skip] {item['code']} Budget short.")
+                            reason = "資金不足" if ms_c < 100 else "リスク許容度オーバーまたは割当上限"
+                            print(f"⏭️ [Skip] {item['code']} は発注株数が単位未満（{ts}株）のため見送ります。理由: {reason} (必要株数: {min(is_sh, ms_a, ms_c):.0f})")
 
         summary_record = {
             "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),

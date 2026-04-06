@@ -85,7 +85,8 @@ def run_jp_broad_backtest(cache_path):
         breadth_threshold=BREADTH_THRESHOLD,
         slippage=0.001,
         use_sma_exit=EXIT_ON_SMA20_BREACH,
-        exit_buffer=SMA20_EXIT_BUFFER
+        exit_buffer=SMA20_EXIT_BUFFER,
+        verbose=True
     )
 
     # Report
