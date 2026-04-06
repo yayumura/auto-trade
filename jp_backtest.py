@@ -101,12 +101,15 @@ def run_jp_broad_backtest(cache_path):
     print(f"TOTAL TRADES:  {trade_count}")
     
     if trade_count > 0:
-        wins = [r for r in trade_results if r > 0]
-        losses = [r for r in trade_results if r <= 0]
+        profits = [r['profit'] for r in trade_results]
+        wins = [p for p in profits if p > 0]
+        losses = [p for p in profits if p <= 0]
+        
         win_rate = len(wins) / trade_count * 100
         gross_profit = sum(wins)
         gross_loss = abs(sum(losses))
-        pf = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
+        
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
         
@@ -115,17 +118,15 @@ def run_jp_broad_backtest(cache_path):
         print(f"AVERAGE WIN:   ¥{avg_win:,.0f}")
         print(f"AVERAGE LOSS:  ¥{avg_loss:,.0f}")
     
-    print("-" * 50)
-    
-    print("HISTORICAL EQUITY PROGRESS:")
-    sorted_months = sorted(monthly_assets.keys())
-    for m in sorted_months:
-        is_dec = m.endswith("-12")
-        is_recent = m in sorted_months[-12:]
-        if is_dec or is_recent:
-            val = monthly_assets[m]
-            print(f" {m:15} | ¥{val:12,.0f}")
-    print("="*50 + "\n")
+    # Save Ledger (V25.0 Fix)
+    if trade_results:
+        os.makedirs("data/simulation", exist_ok=True)
+        ledger_df = pd.DataFrame(trade_results)
+        ledger_path = "data/simulation/trade_ledger.csv"
+        ledger_df.to_csv(ledger_path, index=False, encoding="utf-8-sig")
+        print(f"📊 Trade Ledger saved to: {ledger_path}")
+
+    print("=" * 50 + "\n")
 
 if __name__ == "__main__":
     run_jp_broad_backtest('data_cache/jp_broad/jp_mega_cache.pkl')

@@ -7,10 +7,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                  slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
                                  verbose=False):
     """
-    V24.0 Essential Alpha Backtest:
+    V25.0 Pure Trend-Follow Backtest:
     - Pure LONG-only momentum
     - Dynamic Leverage based on Market Breadth
-    - RS Alpha Filter (ret60 relative to Nikkei 225)
+    - Reverted to V21 Perfect Order (Removed ret60 alpha filter)
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -25,12 +25,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     sma20_np = bundle_np['SMA20']
     sma100_np = bundle_np['SMA100']
     atr_np = bundle_np['ATR']
-    ret60_np = (close_np / np.roll(close_np, 60, axis=0) - 1)
-    ret60_np[np.isnan(ret60_np)] = 0
-    ret60_np[:65] = 0
     
     tickers = bundle_np['tickers']
-    idx_1321 = tickers.index('1321.T') if '1321.T' in tickers else None
     
     for i in range(100, T):
         curr_time = timeline[i]
@@ -81,13 +77,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             if exit_p is not None:
                 real_exit = exit_p * (1.0 - slippage)
                 profit = (real_exit - p['buy_price']) * p['shares']
-                trade_ledger.append({
+                trade_record = {
                     "ticker": ticker, "direction": "LONG", "entry_date": p['entry_date'],
                     "exit_date": curr_time.strftime('%Y-%m-%d'), "entry_price": p['buy_price'],
                     "exit_price": real_exit, "profit": profit,
                     "profit_pct": (real_exit / p['buy_price'] - 1) * 100,
                     "reason": exit_reason, "entry_breadth": p['entry_breadth']
-                })
+                }
+                trade_ledger.append(trade_record)
+                if verbose:
+                    print(f"  [EXIT] {curr_time.strftime('%Y-%m-%d')} {ticker} {exit_reason} PnL:{profit:,.0f}")
                 cash += profit
                 trade_count += 1
             else:
@@ -103,7 +102,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if i + 1 >= T: continue
         br = breadth_ratio[i]
         
-        # [V24.0] Dynamic Leverage
+        # [V25.0] Dynamic Leverage
         curr_lev = 0.0
         if br >= 0.50: curr_lev = 3.0
         elif br >= 0.40: curr_lev = 2.0
@@ -112,13 +111,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if curr_lev <= 0: continue
         if len(portfolio) >= max_pos: continue
         
-        nikkei_ret = ret60_np[i, idx_1321] if idx_1321 is not None else 0
-        
         c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
-        atr_u, rs_u, ret_u = atr_np[i, univ_indices], (s5_u/s100_u*100), ret60_np[i, univ_indices]
+        atr_u, rs_u = atr_np[i, univ_indices], (s5_u/s100_u*100)
         
-        # [V24.0] Perfect Order + RS Alpha Filter
-        mask = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95) & (ret_u > nikkei_ret)
+        # [V25.0] Pure Perfect Order Pullback
+        mask = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95)
         
         if mask.any():
             candidates = sorted([(rs_u[idx], univ_indices[idx]) for idx, m in enumerate(mask) if m], 
@@ -131,7 +128,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 buy_v = open_np[i+1, s_idx]
                 if not np.isnan(buy_v) and buy_v > 0:
                     entry_p = buy_v * (1.0 + slippage)
-                    # [V24.0] Equal Weight Sizing (Equity * Leverage / MaxPos)
+                    # [V25.0] Equal Weight Sizing (Equity * Leverage / MaxPos)
                     sh = ((total_equity * curr_lev / max_pos) / entry_p // 100) * 100
                     
                     if sh >= 100:
@@ -144,4 +141,5 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         })
 
     final_equity = cash + sum((np.nan_to_num(close_np[-1, p['s_idx']]) - p['buy_price']) * p['shares'] for p in portfolio)
-    return float(final_equity), trade_count, monthly_assets, [t['profit'] for t in trade_ledger]
+    # Changed return to include raw trade_ledger
+    return float(final_equity), trade_count, monthly_assets, trade_ledger

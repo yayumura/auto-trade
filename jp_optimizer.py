@@ -66,13 +66,13 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [V24.0] Pure Alpha LONG Optimization ---
+    # --- [V25.0] Peak Alpha Selection Optimization ---
     grid = []
     
     breadth_range      = [0.30]        
-    sl_range           = [5.0, 6.0, 7.0]     
-    tp_range           = [15.0, 20.0, 25.0]  
-    max_pos_range      = [7, 10, 15]                
+    sl_range           = [8.0, 10.0, 12.0]   
+    tp_range           = [20.0, 30.0, 40.0]  
+    max_pos_range      = [5, 7]                
     exit_buffer_range  = [0.985]             
 
     for b in breadth_range:           
