@@ -449,28 +449,16 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # [V21.1 Asymmetric Multi-Strategy Logic]
-                    allow_long = breadth_val >= 0.25
-                    allow_short = breadth_val < 0.25
+                    # [V24.0] Dynamic Leverage: Breadth-driven Alpha allocation
+                    allow_long = False
+                    allow_short = False # LONG only in V24
                     
-                    # --- [V21.1 Macro Filter] ---
-                    try:
-                        c1321 = close_data['1321.T'].iloc[-1]
-                        s1321 = sma100_data['1321.T'].iloc[-1]
-                        if c1321 >= s1321:
-                            allow_short = False # No short in bull macro
-                        else:
-                            allow_long = False # No long in bear macro
-                    except: pass
-
-                    # Determine Current Leverage
-                    if USE_DYNAMIC_LEVERAGE:
-                        if breadth_val >= 0.50: dynamic_lev = 3.0
-                        elif breadth_val >= 0.40: dynamic_lev = 2.0
-                        elif breadth_val >= 0.25: dynamic_lev = 1.0 
-                        else: dynamic_lev = 1.0 # Panic state
-                    else:
-                        dynamic_lev = LEVERAGE_RATE
+                    if breadth_val >= 0.50: dynamic_lev = 3.0
+                    elif breadth_val >= 0.40: dynamic_lev = 2.0
+                    elif breadth_val >= 0.30: dynamic_lev = 1.0
+                    else: dynamic_lev = 0.0 # Shutdown in Bear Breadth
+                    
+                    if dynamic_lev > 0: allow_long = True
                     
                     print(f"✅ Scanning {len(targets)} tickers (L:{allow_long}, S:{allow_short}, Lev:{dynamic_lev}x).")
                 else:
@@ -598,9 +586,9 @@ def _main_exec():
                         current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
                         buying_power = (te * dynamic_lev) - current_exposure
                         
-                        # [V22.2 Tuning] Aggressive Risk Parity Sizing (2.0% Risk)
+                        # [V24.0] Equal Weight Sizing (Equity * Dynamic Leverage / MaxPos)
                         from core.logic import calculate_position_size
-                        ts = calculate_position_size(te, p, a, leverage=dynamic_lev, max_pos=MAX_POSITIONS, risk_rate=0.02)
+                        ts = calculate_position_size(te, p, a, leverage=dynamic_lev, max_pos=MAX_POSITIONS)
                         
                         # Buying power safety cap
                         ms_bp = int((buying_power / 1.0001) // p)

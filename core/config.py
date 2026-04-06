@@ -65,13 +65,13 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V22.2 (Market Neutral Model) ---
-USE_DYNAMIC_LEVERAGE  = False  # Market neutral strategy stays constant
-MAX_POSITIONS         = 10     # [V22.2] 10 positions (Fixed L5:S5)
-BREADTH_THRESHOLD     = 0.25   
-MAX_RISK_PER_TRADE    = 0.02   # [V22.2 Tuning] 2.0% Risk (Aggressive Parity)
+# --- Imperial Oracle V24.0 (Pure Alpha LONG) ---
+USE_DYNAMIC_LEVERAGE  = True   
+MAX_POSITIONS         = 10     # Optimizer grid [7, 10, 15]
+BREADTH_THRESHOLD     = 0.30   # Shutdown below 30% Breadth
+MAX_RISK_PER_TRADE    = 0.02   
 LEVERAGE_RATE         = 3.0    
-MAX_ALLOCATION_PCT    = 0.5    # [V22.2] Risk Parity allows higher nominal if ATR is low
+MAX_ALLOCATION_PCT    = 0.5    # Equal Weight cap (Leverage / Min_Pos)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  

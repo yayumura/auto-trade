@@ -12,8 +12,9 @@ from core.config import (
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
     """
-    V17.0 Imperial Position Manager:
-    - Returns: [portfolio, sell_actions]
+    V24.0 Essential Alpha Position Manager:
+    - Pure LONG Strategy
+    - Removed SHORT handles and 2-day fast loss stops.
     """
     sl_mult = ATR_STOP_LOSS
     tp_mult = TARGET_PROFIT_MULT
@@ -23,7 +24,8 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
     
     for p in portfolio:
         code = str(p['code'])
-        direction = p.get('direction', 'LONG') # Default to LONG for backward compatibility
+        direction = p.get('direction', 'LONG')
+        if direction != 'LONG': continue # V24 is Long-only
         
         # 1. 価格取得
         if realtime_buffers and code in realtime_buffers:
@@ -33,29 +35,23 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             
         buy_price = float(p['buy_price'])
         atr = float(p.get('buy_atr', 0))
-        highest_price = float(p.get('highest_price', 0))
-        lowest_price = float(p.get('lowest_price', 9999999))
         
         # 2. 逆指値 (Stop Loss) 計算
-        # [V22.2] 3*ATR Profit Protection (Move SL to Break-even)
         sl_price = float(p.get('sl_price', 0))
-        if direction == 'LONG':
-            # sl_price trailing update
-            sl_price = max(sl_price, current_price - (atr * sl_mult))
-            if current_price >= buy_price + (atr * 3.0):
-                sl_price = max(sl_price, buy_price * 1.001) # Break-even + buffer
-        else: # SHORT
-            sl_price = min(sl_price, current_price + (atr * sl_mult))
-            if current_price <= buy_price - (atr * 3.0):
-                sl_price = min(sl_price, buy_price * 0.999) # Break-even + buffer
+        # Trailing stop update
+        sl_price = max(sl_price, current_price - (atr * sl_mult))
+        
+        # 3*ATR Profit Protection (Move SL to Break-even)
+        if current_price >= buy_price + (atr * 3.0):
+            sl_price = max(sl_price, buy_price * 1.001)
         
         p['sl_price'] = sl_price
         stop_price = sl_price
 
         # 3. 利確 (Profit Target)
-        target_price = buy_price + (atr * tp_mult) if direction == 'LONG' else buy_price - (atr * tp_mult)
+        target_price = buy_price + (atr * tp_mult)
             
-        # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
+        # 4. タイムリミット (60日以上で強制決済)
         is_timeout = False
         is_stagnated = False
         buy_time_str = p.get('buy_time')
@@ -64,113 +60,80 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
                 days_held = (dt.now() - buy_dt).days
                 
-                # [V22.2] 2nd Day Loss Time Stop (Ultra-Fast Purge)
-                if days_held >= 2:
-                    if direction == 'LONG' and current_price < buy_price:
-                        is_stagnated = True
-                    elif direction == 'SHORT' and current_price > buy_price:
-                        is_stagnated = True
-                
                 if days_held >= 60:
                     is_timeout = True
-                elif days_held >= 20: # Keep 20d stagnation as deeper safety
-                    if direction == 'LONG' and current_price <= buy_price:
-                        is_stagnated = True
-                    elif direction == 'SHORT' and current_price >= buy_price:
+                elif days_held >= 20: 
+                    if current_price <= buy_price:
                         is_stagnated = True
             except: pass
         
-        # 5. 窓開け暴落（ギャップ）対応 (シミュレーション用)
+        # 5. 窓開け暴落地対応 (シミュレーション用)
         is_gap_down = False
         exit_price = current_price
         
         if is_simulation and today_ohlc and code in today_ohlc:
             o_price = today_ohlc[code].get('Open', 0)
-            if o_price > 0:
-                if direction == 'LONG' and o_price <= stop_price:
-                    is_gap_down = True
-                    exit_price = o_price
-                elif direction == 'SHORT' and o_price >= stop_price:
-                    is_gap_down = True
-                    exit_price = o_price
+            if o_price > 0 and o_price <= stop_price:
+                is_gap_down = True
+                exit_price = o_price
         
         # 6. Technical Exit: SMA20割れ判定
         is_sma_breach = False
         if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
             s20 = float(sma20_map[code])
-            if direction == 'LONG' and current_price < s20 * SMA20_EXIT_BUFFER:
-                is_sma_breach = True
-            elif direction == 'SHORT' and current_price > s20 * (2.0 - SMA20_EXIT_BUFFER):
+            if current_price < s20 * SMA20_EXIT_BUFFER:
                 is_sma_breach = True
 
         # 7. 売却判定
-        # Side mapping for broker: side="1" is Sell (Long exit), side="2" is Buy (Short exit)
-        exit_side = "1" if direction == "LONG" else "2"
-        
         if is_gap_down:
-            sell_actions.append(f"SELL {code} ({direction}) - Gap Exit Triggered (@{exit_price:,.1f})")
+            sell_actions.append(f"SELL {code} - Gap Exit (@{exit_price:,.1f})")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
         elif is_sma_breach:
-            sell_actions.append(f"SELL {code} ({direction}) - SMA20 Breach Triggered (@{current_price:,.1f})")
+            sell_actions.append(f"SELL {code} - SMA20 Breach (@{current_price:,.1f})")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
-        elif (direction == 'LONG' and current_price <= stop_price) or (direction == 'SHORT' and current_price >= stop_price):
+        elif current_price <= stop_price:
             reason = "Stop Loss"
-            if direction == 'LONG' and stop_price > buy_price: reason = "Break-even Stop"
-            if direction == 'SHORT' and stop_price < buy_price: reason = "Break-even Stop"
-            sell_actions.append(f"SELL {code} ({direction}) - {reason} Triggered (@{current_price:,.1f})")
+            if stop_price > buy_price: reason = "Break-even Stop"
+            sell_actions.append(f"SELL {code} - {reason} (@{current_price:,.1f})")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
         elif is_stagnated:
-            sell_actions.append(f"SELL {code} ({direction}) - Time Stop (Stagnation) (@{current_price:,.1f})")
+            sell_actions.append(f"SELL {code} - Time Stop (Stagnation) (@{current_price:,.1f})")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
         elif is_timeout:
-            sell_actions.append(f"SELL {code} ({direction}) - Time Limit Reached (60 Days)")
+            sell_actions.append(f"SELL {code} - Time Limit (60d)")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
-        elif (direction == 'LONG' and current_price >= target_price) or (direction == 'SHORT' and current_price <= target_price):
-            sell_actions.append(f"SELL {code} ({direction}) - Profit Target Reached (@{current_price:,.1f})")
+        elif current_price >= target_price:
+            sell_actions.append(f"SELL {code} - Profit Target (@{current_price:,.1f})")
             if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side=exit_side)
+                try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
             
-        # 8. 評価額と高値/安値の更新
+        # 8. 更新
         p['current_price'] = round(current_price, 1)
-        if direction == 'LONG':
-            if current_price > float(p.get('highest_price', 0)):
-                p['highest_price'] = round(current_price, 1)
-        else: # SHORT
-            if current_price < float(p.get('lowest_price', 9999999)):
-                p['lowest_price'] = round(current_price, 1)
-            
+        if current_price > float(p.get('highest_price', 0)):
+            p['highest_price'] = round(current_price, 1)
         remaining.append(p)
-
 
     return remaining, sell_actions
 
 def calculate_all_technicals_v12(data_df):
-    """
-    V17.0 Imperial Technical Bundle:
-    - SMA5, SMA20, SMA100
-    - ATR (20)
-    - RS (Normalized Strength)
-    """
     bundle = {}
-    
-    # xs for metric
     close = data_df.xs('Close', axis=1, level=1)
     high = data_df.xs('High', axis=1, level=1)
     low = data_df.xs('Low', axis=1, level=1)
@@ -180,165 +143,84 @@ def calculate_all_technicals_v12(data_df):
     bundle['SMA20'] = close.rolling(20).mean()
     bundle['SMA100'] = close.rolling(100).mean()
     
-    # ATR (20) Vectorized
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-    
-    # Vectorized element-wise max for true range
-    tr = pd.DataFrame(
-        np.maximum(np.maximum(tr1.values, tr2.values), tr3.values),
-        index=close.index,
-        columns=close.columns
-    )
+    tr = pd.DataFrame(np.maximum(np.maximum(tr1.values, tr2.values), tr3.values), index=close.index, columns=close.columns)
     bundle['ATR'] = tr.rolling(20).mean()
-    
-    # RS (Momentum Strength: SMA5 / SMA100 Ratio)
     bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
-    
-    # [V21] Short RS (SMA100 / SMA5 Ratio for downward momentum)
-    bundle['RS_SHORT'] = (bundle['SMA100'] / bundle['SMA5'] * 100).fillna(0)
-    
-    # Store Open for reversal check
     bundle['Open'] = data_df.xs('Open', axis=1, level=1)
+    
+    # 60-day Return (Vectorized)
+    bundle['Ret60'] = (close / close.shift(60) - 1).fillna(0)
     
     return bundle
 
-
 def detect_market_regime(data_df=None, buffer=None):
-    """
-    V17.2 Imperial Regime Filter:
-    - Checks if Nikkei 225 (1321.T) is above its SMA100.
-    - If below, returns BEAR to suppress new entries.
-    """
     if data_df is not None:
         try:
-            # 1321.T SMA100 Check
             close_all = data_df.xs('Close', axis=1, level=1)
             if '1321.T' in close_all.columns:
                 close_1321 = close_all['1321.T']
                 sma100_1321 = close_1321.rolling(100).mean().iloc[-1]
                 current_1321 = close_1321.iloc[-1]
-                if current_1321 < sma100_1321:
-                    return "BEAR"
-        except:
-            pass
-
-    # Fallback to buffer check if available
-    if buffer and '1321' in buffer:
-        price = buffer['1321'].get_latest_price()
-        if price > 0: return "BULL"
-        
+                if current_1321 < sma100_1321: return "BEAR"
+        except: pass
     return "BULL"
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
-    V22.2 Market Neutral Selection Engine:
-    - Neutralize market risk by simultaneous L5:S5 selection based on RS Lead/Lag.
+    V24.0 Alpha Selection:
+    - Pure LONG, Perfect Order (SMA5 > 20 > 100)
+    - Alpha Filter: 60d Return > 1321.T 60d Return
     """
     bundle = calculate_all_technicals_v12(data_df)
-    
-    # [V22.2 Market Neutral Model]
-    ret60 = (bundle['Close'] / bundle['Close'].shift(60) - 1).iloc[-1]
-    
     close = bundle['Close'].iloc[-1]
     sma5 = bundle['SMA5'].iloc[-1]
     sma20 = bundle['SMA20'].iloc[-1]
     sma100 = bundle['SMA100'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
-    rs_raw = bundle['RS'].iloc[-1] 
+    rs_raw = bundle['RS'].iloc[-1]
+    ret60 = bundle['Ret60'].iloc[-1]
     
-    long_candidates = []
-    short_candidates = []
-    
+    alpha_threshold = 0
+    if '1321.T' in ret60.index:
+        alpha_threshold = ret60['1321.T']
+        
+    candidates = []
     for t_with_t in [f"{t}.T" for t in targets]:
         if t_with_t not in close.index: continue
         code_only = t_with_t.replace(".T", "")
-        p = close[t_with_t]
-        s5, s20, s100 = sma5[t_with_t], sma20[t_with_t], sma100[t_with_t]
+        p, s5, s20, s100 = close[t_with_t], sma5[t_with_t], sma20[t_with_t], sma100[t_with_t]
         if pd.isna(p) or p <= 0 or pd.isna(s100): continue
 
-        name = "Target"
-        if symbols_df is not None:
-            match = symbols_df[symbols_df['コード'].astype(str) == code_only]
-            if not match.empty: name = match.iloc[0]['銘柄名']
+        # Alpha Filter: 60d Return must be higher than Nikkei 225 60d Return
+        if ret60[t_with_t] <= alpha_threshold: continue
 
-        # Signal Logic
-        rs_score = rs_raw[t_with_t]
-        
-        # LONG: Perfect Order & Pullback
         if s5 > s20 > s100:
-            if s20 * 0.95 <= p <= s20 * 1.05:
-                long_candidates.append({
+            if s20 * 0.95 <= p <= s20 * 1.05: # Pullback
+                name = "Target"
+                if symbols_df is not None:
+                    match = symbols_df[symbols_df['コード'].astype(str) == code_only]
+                    if not match.empty: name = match.iloc[0]['銘柄名']
+                    
+                candidates.append({
                     "code": code_only, "name": name, "price": p,
-                    "atr": atr[t_with_t], "rs": rs_score, "score": rs_score,
+                    "atr": atr[t_with_t], "rs": rs_raw[t_with_t],
                     "direction": "LONG"
                 })
-        
-        # SHORT: Inverse Perfect Order & Pullback
-        elif s5 < s20 < s100:
-            if s20 * 0.95 <= p <= s20 * 1.05:
-                short_candidates.append({
-                    "code": code_only, "name": name, "price": p,
-                    "atr": atr[t_with_t], "rs": rs_score, "score": rs_score,
-                    "direction": "SHORT"
-                })
 
-    # [Spread Strategy] Select Top 5 RS for Long and Bottom 5 RS for Short
-    best_longs = sorted(long_candidates, key=lambda x: x['rs'], reverse=True)[:5]
-    best_shorts = sorted(short_candidates, key=lambda x: x['rs'], reverse=False)[:5]
-    
-    return best_longs + best_shorts
-
-class RealtimeBuffer:
-    def __init__(self, code, initial_df=None, interval_mins=15):
-        self.code = code
-        self.latest_price = 0
-        self.latest_volume = 0
-        
-    def update(self, price, volume, server_time):
-        if price and price > 0:
-            self.latest_price = price
-            self.latest_volume = volume
-            
-    def get_latest_price(self):
-        return self.latest_price
-
-def load_invalid_tickers():
-    try:
-        with open(EXCLUSION_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_invalid_tickers(invalid_map):
-    try:
-        with open(EXCLUSION_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(invalid_map, f, indent=4)
-    except:
-        pass
+    return sorted(candidates, key=lambda x: x['rs'], reverse=True)[:MAX_POSITIONS]
 
 def calculate_position_size(total_equity, entry_price, atr, leverage=3.0, max_pos=10, risk_rate=0.02):
     """
-    V22.2 Tuning: Maximum Capital Efficiency (Aggressive Risk Parity)
-    - Risk allowance: 2.0% of Total Equity per 1*ATR move.
-    - Allocation Cap: (TotalEquity * Leverage) / MaxPositions
+    V24.0 Essential Sizing: Equal weight based on dynamic leverage.
     """
-    if atr <= 0 or entry_price <= 0: return 0
-    
-    # 1. Risk based sizing (TotalEquity * 2.0%) / ATR
-    target_risk_amount = total_equity * risk_rate
-    shares_by_risk = target_risk_amount / atr
-    
-    # 2. Allocation Cap (Liquidity/Leverage safety)
-    max_alloc_yen = (total_equity * leverage) / max_pos
-    shares_by_cap = max_alloc_yen / entry_price
-    
-    final_shares = min(shares_by_risk, shares_by_cap)
-    
-    # Return 100-share unit formatted quantity
-    return (int(final_shares) // 100) * 100
+    if entry_price <= 0: return 0
+    allocation_yen = (total_equity * leverage) / max_pos
+    shares = allocation_yen / entry_price
+    return (int(shares) // 100) * 100
 
 def normalize_tick_size(price, is_buy=True):
     return round(price, 1)
@@ -347,8 +229,7 @@ def get_prime_tickers():
     import os
     import pandas as pd
     from core.config import DATA_FILE
-    if not os.path.exists(DATA_FILE):
-        return []
+    if not os.path.exists(DATA_FILE): return []
     df = pd.read_csv(DATA_FILE)
     if '市場・商品区分' in df.columns:
         prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]
