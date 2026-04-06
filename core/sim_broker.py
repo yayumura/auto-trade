@@ -37,16 +37,16 @@ class SimulationBroker(BaseBroker):
         """auto_trade.py との互換性のためのエイリアス（M-3修正）"""
         self.save_positions(portfolio)
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, **kwargs) -> str:
         """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
         import time
         return f"SIM-{int(time.time())}"
 
-    def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> str:
+    def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0, **kwargs) -> str:
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
         return self.execute_market_order(code, shares, side)
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None, **kwargs) -> str:
         """ 逆指値（ストップロス）のダミー関数（Brokerインターフェース互換性用） """
         import time
         return f"SIM-STOP-{int(time.time())}"

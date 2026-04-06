@@ -433,10 +433,9 @@ def _main_exec():
                     held_codes = [str(p['code']) for p in portfolio]
                     targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
                     
-                    # [V21 Sync] Calculate Market Breadth for Dynamic Leverage
+                    # [V21 Sync] Calculate Market Breadth for Dynamic Leverage & Long/Short Logic
                     from core.logic import get_prime_tickers, calculate_all_technicals_v12
                     prime_ref = get_prime_tickers()
-                    # Indicators might not be in cache, recalculate just in case or ensure present
                     indicator_bundle = calculate_all_technicals_v12(data_df)
                     
                     close_data = indicator_bundle['Close']
@@ -450,18 +449,20 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
+                    # [V21] Multi-Strategy Logic based on Breadth
+                    allow_long = breadth_val >= 0.30
+                    allow_short = breadth_val < 0.40
+                    
                     # Determine Current Leverage
                     if USE_DYNAMIC_LEVERAGE:
                         if breadth_val >= 0.50: dynamic_lev = 3.0
                         elif breadth_val >= 0.40: dynamic_lev = 2.0
                         elif breadth_val >= 0.30: dynamic_lev = 1.0
-                        else:
-                            print("🛡️ [Safeguard] Breadth below 30%. Suppressing new entries for this cycle.")
-                            dynamic_lev = 0.0
+                        else: dynamic_lev = 1.0 # Crashed market: Pursue absolute return via shorting with 1x leverage
                     else:
                         dynamic_lev = LEVERAGE_RATE
                     
-                    print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
+                    print(f"✅ Scanning {len(targets)} tickers (L:{allow_long}, S:{allow_short}, Lev:{dynamic_lev}x).")
                 else:
                     print("❌ JQuants Cache not found. Skipping scan.")
                     should_continue_scan = False
@@ -518,7 +519,7 @@ def _main_exec():
                 elif not top_candidates:
                     should_continue_scan = False
 
-            if should_continue_scan and regime in ["BULL", "RANGE"]:
+            if should_continue_scan:
                 print(f"\n--- AI Qualitative Filter Check ---")
                 scan_targets = top_candidates
                 num_filled = 0
@@ -562,59 +563,99 @@ def _main_exec():
                         # 3. 資金管理と注文
                         p = float(item['price']) if item['price'] else 0.0
                         a = float(item.get('atr', 0))
+                        direction = item.get('direction', 'LONG')
+                        
                         if p <= 0 or a <= 0: continue
                         
-                        tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
-                        # --- 複利・動的レバレッジ資金管理の改修 (V21 Optimization) ---
+                        # Apply allow filters
+                        if direction == 'LONG' and not allow_long: continue
+                        if direction == 'SHORT' and not allow_short: continue
+
+                        tp_price = normalize_tick_size(p + (a * 0.1) if direction == 'LONG' else p - (a * 0.1), is_buy=(direction == 'LONG'))
+                        
                         if dynamic_lev <= 0: continue # エントリー抑制
                         
+                        # Calculate Equity and Buying Power
+                        current_profits = 0.0
+                        for px in portfolio:
+                            cp = float(px.get('current_price', px['buy_price']))
+                            if px.get('direction', 'LONG') == 'LONG':
+                                current_profits += (cp - float(px['buy_price'])) * int(px['shares'])
+                            else:
+                                current_profits += (float(px['buy_price']) - cp) * int(px['shares'])
+                        
+                        te = account['cash'] + current_profits
                         current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
-                        te = account['cash'] + current_exposure
                         buying_power = (te * dynamic_lev) - current_exposure
                         
                         ra = te * MAX_RISK_PER_TRADE
-                        # ATRベースのリスク許容度に基づく株数計算 (V15.1 Oracle仕様)
                         rps = a * ATR_STOP_LOSS 
                         is_sh = int(ra // rps) if rps > 0 else 100
                         
-                        # 1銘柄割当額も動的レバレッジに合わせて調整
                         ma = min(max((te * dynamic_lev / MAX_POSITIONS), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
                         adv = item.get('adv_yen', 0)
-                        if adv > 0:
-                            ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
+                        if adv > 0: ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
                         
-                        ms_a = int(ma // tp)
-                        ms_bp = int((buying_power / 1.0001) // tp) # 購買力から算出する株数に置き換え
+                        ms_a = int(ma // p)
+                        ms_bp = int((buying_power / 1.0001) // p)
                         ts = (min(is_sh, ms_a, ms_bp) // 100) * 100
                         
                         if ts >= 100:
                             if is_sim:
-                                print(f"🛒 [BUY SIM] {item['code']} {ts} shares @ {tp}")
-                                account['cash'] -= tp * ts
-                                portfolio.append({"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(tp, 1), "highest_price": round(tp, 1), "current_price": round(tp, 1), "shares": ts, "buy_atr": a})
+                                action_label = "BUY SIM" if direction == "LONG" else "SHORT SIM"
+                                print(f"🛒 [{action_label}] {item['code']} {ts} shares @ {p}")
+                                # Sim: For short, profit is calculated at exit. Initial cash doesn't change?
+                                # Actually let's subtract the value for simplicity in Sim cash tracking if needed,
+                                # but margin doesn't work like that. Let's just track te independently.
+                                # For simulation consistency, we'll keep it simple.
+                                if direction == "LONG": account['cash'] -= p * ts
+                                
+                                new_pos = {
+                                    "code": item['code'], "name": item['name'], 
+                                    "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
+                                    "buy_price": round(p, 1), "highest_price": round(p, 1), "lowest_price": round(p, 1),
+                                    "current_price": round(p, 1), "shares": ts, "buy_atr": a, "direction": direction
+                                }
+                                portfolio.append(new_pos)
                                 num_filled += 1
                             else:
-                                print(f"🚀 [OMS] Chase: {item['code']} ({ts} shares)")
-                                details = broker.execute_chase_order(item['code'], ts, side="2", atr=a)
+                                # SIDE: 2 for Buy (Long Entry), 1 for Sell (Short Entry)
+                                order_side = "2" if direction == "LONG" else "1"
+                                # CASH_MARGIN: 2 for Margin New
+                                print(f"🚀 [OMS] Chase: {item['code']} ({direction}, {ts} shares)")
+                                
+                                # Use explicit cash_margin=2 for short entry
+                                details = broker.execute_chase_order(item['code'], ts, side=order_side, atr=a, cash_margin=2)
+                                
                                 if details and details.get('State') in [6, 7]:
                                     actual_qty = int(details.get('Qty', 0))
-                                    exec_p = float(details.get('Price', 0)) or tp
-                                    if not broker.is_production: account['cash'] -= exec_p * actual_qty
+                                    exec_p = float(details.get('Price', 0)) or p
+                                    if not broker.is_production and direction == "LONG": account['cash'] -= exec_p * actual_qty
                                     
-                                    # ポートフォリオに追加
-                                    new_pos = {"code": item['code'], "name": item['name'], "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "current_price": round(exec_p, 1), "shares": actual_qty, "buy_atr": a}
+                                    new_pos = {
+                                        "code": item['code'], "name": item['name'], 
+                                        "buy_time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'), 
+                                        "buy_price": round(exec_p, 1), "highest_price": round(exec_p, 1), "lowest_price": round(exec_p, 1),
+                                        "current_price": round(exec_p, 1), "shares": actual_qty, "buy_atr": a, "direction": direction
+                                    }
                                     portfolio.append(new_pos)
                                     num_filled += 1
 
-                                    # --- [Hard Stop] 約定直後の逆指値（ストップロス）発注 ---
+                                    # --- [Hard Stop] Stop Order ---
                                     try:
-                                        stop_price = normalize_tick_size(exec_p - (a * ATR_STOP_LOSS), is_buy=False)
-                                        # 最新の建玉IDを取得するために一度 get_positions を叩く（返済指定に必要）
+                                        if direction == "LONG":
+                                            stop_price = normalize_tick_size(exec_p - (a * ATR_STOP_LOSS), is_buy=False)
+                                            stop_side = "1" # Sell exit
+                                        else:
+                                            stop_price = normalize_tick_size(exec_p + (a * ATR_STOP_LOSS), is_buy=True)
+                                            stop_side = "2" # Buy exit
+                                            
                                         api_p = broker.get_positions()
-                                        match = [p for p in api_p if p['code'] == str(item['code'])]
+                                        match = [px for px in api_p if px['code'] == str(item['code'])]
                                         hold_id = match[0].get('hold_id') if match else None
                                         
-                                        broker.execute_stop_order(item['code'], actual_qty, side="1", trigger_price=stop_price, hold_id=hold_id)
+                                        # Use explicit cash_margin=3 for stop loss (exit)
+                                        broker.execute_stop_order(item['code'], actual_qty, side=stop_side, trigger_price=stop_price, hold_id=hold_id, cash_margin=3)
                                     except Exception as e:
                                         print(f"⚠️ [Hard Stop Error] 逆指値の発注に失敗しました: {e}")
 
@@ -622,8 +663,7 @@ def _main_exec():
                             if hasattr(broker, 'save_account'): broker.save_account(account)
                             if item['code'] in watchlist: watchlist.remove(item['code'])
                         else:
-                            reason = "資金不足" if ms_c < 100 else "リスク許容度オーバーまたは割当上限"
-                            print(f"⏭️ [Skip] {item['code']} は発注株数が単位未満（{ts}株）のため見送ります。理由: {reason} (必要株数: {min(is_sh, ms_a, ms_c):.0f})")
+                            print(f"⏭️ [Skip] {item['code']} は発注株数が単位未満（{ts}株）のため見送ります。")
 
         summary_record = {
             "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
@@ -631,7 +671,7 @@ def _main_exec():
             "portfolio": portfolio,
             "stock_value_yen": sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
             "cash_yen": account['cash'],
-            "total_assets_yen": account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
+            "total_assets_yen": account['cash'] + sum([(float(p.get('current_price', p['buy_price'])) - float(p['buy_price'])) * int(p['shares']) if p.get('direction', 'LONG') == 'LONG' else (float(p['buy_price']) - float(p.get('current_price', p['buy_price']))) * int(p['shares']) for p in portfolio]),
             "regime": regime
         }
         if hasattr(broker, 'log_execution_summary'): broker.log_execution_summary(summary_record)

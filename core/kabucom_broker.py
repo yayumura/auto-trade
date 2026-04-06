@@ -230,7 +230,7 @@ class KabucomBroker(BaseBroker):
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None, cash_margin: int = None) -> str:
         """
         現物・信用の成行・指値注文を発注する。
         side: "1" (売), "2" (買)
@@ -239,8 +239,9 @@ class KabucomBroker(BaseBroker):
         if not self.token: return None
         import os
         
-        cash_margin = 2 if side == "2" else 3
-        # 買付余力(2) または 信用売(3)
+        if cash_margin is None:
+            cash_margin = 2 if side == "2" else 3
+        # 買付余力(2) または 信用売(3) or 信用新規売(2)
         
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         
@@ -429,8 +430,10 @@ class KabucomBroker(BaseBroker):
                     # 最初の建玉から順に割り当て (簡易実装)
                     close_pos_list = [{"HoldID": match_p[0]['hold_id'], "Qty": remaining_shares}]
 
-            # 注文発注
-            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, close_positions=close_pos_list)
+            # 注文発注 (Chase内でも cash_margin を引き継ぐ必要あり)
+            # 簡略化のため、execute_chase_order の引数に cash_margin を追加するように後で修正するか、
+            # ここで side と direction から判定する。
+            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, close_positions=close_pos_list, cash_margin=(2 if side=="1" and not close_pos_list else None))
             if not order_id: break
             
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
@@ -494,7 +497,8 @@ class KabucomBroker(BaseBroker):
             else:
                 force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
                 
-            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price)
+            # 最終手段の成行(指値)発注でも cash_margin を考慮
+            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price, cash_margin=cash_margin if side=="1" and cash_margin==2 else None)
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:
@@ -512,7 +516,7 @@ class KabucomBroker(BaseBroker):
             "Symbol": code
         }
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None, cash_margin: int = None) -> str:
         """
         逆指値（ストップロス）注文を発注する。
         side: "1" (売), "2" (買)
@@ -521,8 +525,8 @@ class KabucomBroker(BaseBroker):
         if not self.token: return None
         import os
 
-        # ストップロス売り(1) または ストップロス買い(2)
-        cash_margin = 2 if side == "2" else 3
+        if cash_margin is None:
+            cash_margin = 2 if side == "2" else 3
         
         # 逆指値の設定
         # TriggerCondition: 1 (>=), 2 (<=)
