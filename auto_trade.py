@@ -48,7 +48,7 @@ from core.config import (
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
-    MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
+    USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
     load_insider_exclusion_codes
 )
@@ -433,11 +433,35 @@ def _main_exec():
                     held_codes = [str(p['code']) for p in portfolio]
                     targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
                     
-                    # ticker check
-                    existing_tickers = set(data_df.columns.get_level_values(0))
-                    targets = [t for t in targets if (t + ".T") in existing_tickers]
+                    # [V21 Sync] Calculate Market Breadth for Dynamic Leverage
+                    from core.logic import get_prime_tickers, calculate_all_technicals_v12
+                    prime_ref = get_prime_tickers()
+                    # Indicators might not be in cache, recalculate just in case or ensure present
+                    indicator_bundle = calculate_all_technicals_v12(data_df)
                     
-                    print(f"✅ Scanning {len(targets)} tickers from JQuants Cache.")
+                    close_data = indicator_bundle['Close']
+                    sma100_data = indicator_bundle['SMA100']
+                    
+                    elite_cols = [t for t in prime_ref if t in close_data.columns]
+                    if elite_cols:
+                        breadth_matrix = (close_data[elite_cols].iloc[-1] > sma100_data[elite_cols].iloc[-1])
+                        breadth_val = breadth_matrix.mean()
+                        print(f"📊 [Dynamic Risk] Market Breadth (Prime): {breadth_val:.1%}")
+                    else:
+                        breadth_val = 0.5 # Fallback
+                    
+                    # Determine Current Leverage
+                    if USE_DYNAMIC_LEVERAGE:
+                        if breadth_val >= 0.50: dynamic_lev = 3.0
+                        elif breadth_val >= 0.40: dynamic_lev = 2.0
+                        elif breadth_val >= 0.30: dynamic_lev = 1.0
+                        else:
+                            print("🛡️ [Safeguard] Breadth below 30%. Suppressing new entries for this cycle.")
+                            dynamic_lev = 0.0
+                    else:
+                        dynamic_lev = LEVERAGE_RATE
+                    
+                    print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
                 else:
                     print("❌ JQuants Cache not found. Skipping scan.")
                     should_continue_scan = False
@@ -541,19 +565,27 @@ def _main_exec():
                         if p <= 0 or a <= 0: continue
                         
                         tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
-                        te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                        # --- 複利・動的レバレッジ資金管理の改修 (V21 Optimization) ---
+                        if dynamic_lev <= 0: continue # エントリー抑制
+                        
+                        current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                        te = account['cash'] + current_exposure
+                        buying_power = (te * dynamic_lev) - current_exposure
+                        
                         ra = te * MAX_RISK_PER_TRADE
                         # ATRベースのリスク許容度に基づく株数計算 (V15.1 Oracle仕様)
                         rps = a * ATR_STOP_LOSS 
                         is_sh = int(ra // rps) if rps > 0 else 100
-                        ma = min(max(te * MAX_ALLOCATION_PCT, MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
+                        
+                        # 1銘柄割当額も動的レバレッジに合わせて調整
+                        ma = min(max((te * dynamic_lev / MAX_POSITIONS), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
                         adv = item.get('adv_yen', 0)
                         if adv > 0:
                             ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
                         
                         ms_a = int(ma // tp)
-                        ms_c = int((account['cash'] / 1.0001) // tp)
-                        ts = (min(is_sh, ms_a, ms_c) // 100) * 100
+                        ms_bp = int((buying_power / 1.0001) // tp) # 購買力から算出する株数に置き換え
+                        ts = (min(is_sh, ms_a, ms_bp) // 100) * 100
                         
                         if ts >= 100:
                             if is_sim:
