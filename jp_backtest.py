@@ -9,7 +9,7 @@ sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 
 from core.config import (
-    INITIAL_CASH, MAX_POSITIONS, ATR_STOP_LOSS, TARGET_PROFIT_MULT, BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH
+    INITIAL_CASH, MAX_POSITIONS, ATR_STOP_LOSS, TARGET_PROFIT_MULT, BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER
 )
 
 def run_jp_broad_backtest(cache_path):
@@ -49,7 +49,7 @@ def run_jp_broad_backtest(cache_path):
 
     # Universe Selection
     all_tickers = bundle['Close'].columns
-    univ_indices = np.array([i for i, t in enumerate(all_tickers) if t != '1321.T'], dtype=int)
+    univ_indices = np.array([i for i, t in enumerate(all_tickers) if t not in {'1306.T', '1321.T'}], dtype=int)
     
     # Bundle Tickers for Index Lookup in engine
     bundle_np = {k: v.values for k, v in bundle.items()}
@@ -84,7 +84,8 @@ def run_jp_broad_backtest(cache_path):
         tp_mult=TARGET_PROFIT_MULT,
         breadth_threshold=BREADTH_THRESHOLD,
         slippage=0.001,
-        use_sma_exit=EXIT_ON_SMA20_BREACH
+        use_sma_exit=EXIT_ON_SMA20_BREACH,
+        exit_buffer=SMA20_EXIT_BUFFER
     )
 
     # Report
