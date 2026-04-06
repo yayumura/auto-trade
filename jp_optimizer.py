@@ -69,12 +69,12 @@ def optimize_jp_imperial(cache_path):
     
     # Imperial Grid Search
     grid = []
-    # [V19.0 High Turnover] Short Swing Range Optimization
+    # [Rollback v19] Swing Trade Range Optimization
     for b in [0.30, 0.40]:           
-        for sl in [1.0, 1.5, 2.0]:          # Ultra-Tight Stop Loss
-            for tp in [1.5, 2.0, 3.0, 4.0]: # Frequent Profit Taking
-                for p_size in [15]:          # Target Concentration
-                    for eb in [0.990, 0.995]: # SMA20 Buffer
+        for sl in [3.0, 4.0, 5.0]:          
+            for tp in [10.0, 15.0, 20.0]: 
+                for p_size in [15]:          
+                    for eb in [0.980, 0.985, 0.990]: 
                         grid.append({
                             "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
                         })
