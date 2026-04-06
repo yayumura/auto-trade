@@ -65,6 +65,7 @@ def fetch_jquants_v2_turbo_revelation(output_path='data_cache/jp_broad/jp_mega_c
     - Resumption Support, Thread-Safe Checkpointing.
     - Global Rate Control: Managed throughput to avoid 429s.
     """
+    print("⚠️ WARNING: Ensure your dataset includes delisted tickers to avoid survivorship bias.")
     api_key = os.getenv("JQUANTS_REFRESH_TOKEN")
     if not api_key:
         api_key = os.getenv("JQUANTS_API_KEY")

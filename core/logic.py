@@ -6,10 +6,11 @@ from core.config import (
     ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
     MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL
+    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
+    SMA20_EXIT_BUFFER
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
     """
     V17.0 Imperial Position Manager:
     - Returns: [portfolio, sell_actions]
@@ -22,7 +23,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
     
     for p in portfolio:
         code = str(p['code'])
-        # リアルタイムバッファから最新値を取得
+        # 1. 価格取得
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
         else:
@@ -32,30 +33,74 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 1. 損切り (ATR 5.0 base)
+        # 2. 逆指値 (Stop Loss) 計算
         initial_stop = buy_price - (atr * sl_mult)
+        
+        # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
+        if highest_price >= buy_price + (atr * 5.0):
+            initial_stop = max(initial_stop, buy_price * 1.002)
+            
         if ATR_TRAIL and highest_price > 0:
             stop_price = max(initial_stop, highest_price - (atr * sl_mult))
         else:
             stop_price = initial_stop
             
-        # 2. 利確 (ATR 20.0 base)
+        # 3. 利確 (Profit Target) 計算
         target_price = buy_price + (atr * tp_mult)
         
-        # 3. タイムリミット (保有60日以上)
+        # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
         is_timeout = False
+        is_stagnated = False
         buy_time_str = p.get('buy_time')
         if buy_time_str:
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
-                if (dt.now() - buy_dt).days >= 60:
+                days_held = (dt.now() - buy_dt).days
+                if days_held >= 60:
                     is_timeout = True
+                elif days_held >= 20 and current_price <= buy_price:
+                    is_stagnated = True
             except: pass
         
-        # 判定
-        if current_price <= stop_price:
-            sell_actions.append(f"SELL {code} - Stop Loss Triggered (@{current_price:,.1f})")
-            # OMS 決済(SIMでない場合)
+        # 5. 窓開け暴落（ギャップダウン）対応 (シミュレーション用)
+        # 始値がストップロスを既に下回っている場合、始値で決済
+        is_gap_down = False
+        exit_price = current_price
+        
+        if is_simulation and today_ohlc and code in today_ohlc:
+            o_price = today_ohlc[code].get('Open', 0)
+            if o_price > 0 and o_price <= stop_price:
+                is_gap_down = True
+                exit_price = o_price
+        
+        # 6. Technical Exit: SMA20割れ判定
+        is_sma_breach = False
+        if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
+            if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER:
+                is_sma_breach = True
+
+        # 7. 売却判定
+        if is_gap_down:
+            sell_actions.append(f"SELL {code} - Gap Down Stop Loss Triggered (@{exit_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif is_sma_breach:
+            sell_actions.append(f"SELL {code} - SMA20 Breach Triggered (@{current_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif current_price <= stop_price:
+            reason = "Stop Loss" if stop_price < buy_price else "Break-even Stop"
+            sell_actions.append(f"SELL {code} - {reason} Triggered (@{current_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif is_stagnated:
+            sell_actions.append(f"SELL {code} - Time Stop (Stagnation) (@{current_price:,.1f})")
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
@@ -73,7 +118,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 except: pass
             continue
             
-        # 評価額の更新
+        # 7. 評価額と高値の更新
         p['current_price'] = round(current_price, 1)
         if current_price > float(p.get('highest_price', 0)):
             p['highest_price'] = round(current_price, 1)
@@ -118,15 +163,36 @@ def calculate_all_technicals_v12(data_df):
     # RS (Momentum Strength: SMA5 / SMA100 Ratio)
     bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
     
+    # Store Open for reversal check
+    bundle['Open'] = data_df.xs('Open', axis=1, level=1)
+    
     return bundle
 
-def detect_market_regime(broker=None, buffer=None):
-    # 市場全体（TOPIX/1306等）のSMA100に対する位置で判定
+def detect_market_regime(data_df=None, buffer=None):
+    """
+    V17.2 Imperial Regime Filter:
+    - Checks if Nikkei 225 (1321.T) is above its SMA100.
+    - If below, returns BEAR to suppress new entries.
+    """
+    if data_df is not None:
+        try:
+            # 1321.T SMA100 Check
+            close_all = data_df.xs('Close', axis=1, level=1)
+            if '1321.T' in close_all.columns:
+                close_1321 = close_all['1321.T']
+                sma100_1321 = close_1321.rolling(100).mean().iloc[-1]
+                current_1321 = close_1321.iloc[-1]
+                if current_1321 < sma100_1321:
+                    return "BEAR"
+        except:
+            pass
+
+    # Fallback to buffer check if available
     if buffer and '1321' in buffer:
         price = buffer['1321'].get_latest_price()
-        # simplified check
         if price > 0: return "BULL"
-    return "RANGE"
+        
+    return "BULL"
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
@@ -158,10 +224,20 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         
         # Imperial Trend: 5 > 20 > 100
         if s5 > s20 > s100:
-            # Entry Signal: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
+            # Entry Signal 1: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
             if s20 * 0.98 <= p < s20 * 1.02:
-                # Name lookup
-                name = "Target"
+                # Entry Signal 2: Reversal Confirmation (Close > Prev Close OR Close > Open)
+                prev_p = bundle['Close'].iloc[-2][t_with_t]
+                open_p = bundle['Open'].iloc[-1][t_with_t]
+                h_p = bundle['High'].iloc[-1][t_with_t]
+                l_p = bundle['Low'].iloc[-1][t_with_t]
+                
+                # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
+                is_strong = (p - l_p) / (h_p - l_p + 1e-9) >= 0.5
+
+                if ((p > prev_p) or (p > open_p)) and is_strong:
+                    # Name lookup
+                    name = "Target"
                 if symbols_df is not None:
                     match = symbols_df[symbols_df['コード'].astype(str) == code_only]
                     if not match.empty: name = match.iloc[0]['銘柄名']
