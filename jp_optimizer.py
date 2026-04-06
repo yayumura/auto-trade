@@ -14,7 +14,7 @@ from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # --- [V21 Expansion] Leverage 2.0x forced for all optimizations ---
+    # --- [Overdrive Mode] Leverage 3.0x forced for peak alpha discovery ---
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -24,7 +24,7 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=2.0, # ★NEW: 信用レバレッジ2倍を固定適用
+        leverage_rate=3.0, # ★OVERDRIVE: 信用レバレッジ3倍を固定適用
         breadth_threshold=p['breadth'],
         exit_buffer=p.get('exit_buffer', 0.985)
     )
@@ -66,14 +66,14 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [V21 Maximum Alpha Sync] Expanded Grid Search Ranges ---
+    # --- [Overdrive Mode] Physics-Defying Alpha Sync ---
     grid = []
     
-    breadth_range      = [0.3, 0.4, 0.5]
-    sl_range           = [4.0, 5.0, 6.0]
-    tp_range           = [15.0, 20.0, 25.0]
-    max_pos_range      = [7, 10, 15]        # 集中投資から分散までのテスト
-    exit_buffer_range  = [0.985, 0.990]     # 計算量節約のため2パターン
+    breadth_range      = [0.2, 0.3]          # 地合い判定を極限まで緩和
+    sl_range           = [6.0, 8.0, 10.0]    # ノイズを完全に無視する超広域ストップ
+    tp_range           = [20.0, 30.0, 40.0]  # テンバガーを狙う超巨大利確
+    max_pos_range      = [3, 5, 7]           # 物理限界までの集中投資
+    exit_buffer_range  = [0.985]             # 計算効率のため固定
 
     for b in breadth_range:           
         for sl in sl_range:          
@@ -84,17 +84,13 @@ def optimize_jp_imperial(cache_path):
                             "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
                         })
     
-    print(f"🚀 [IMPERIAL_OPT] Starting Multi-Process Grid Search ({len(grid)} combinations)...")
+    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x)...")
     
     results = []
-    # Use simpler multiprocessing if needed, but ProcessPoolExecutor is fine.
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        # Prepare parameters
         tasks = []
         for p in grid:
-            # We must pass data that is picklable. bundle_np (dict of np.arrays) is picklable.
             tasks.append((univ_indices, bundle_np, timeline, breadth_series, p))
-        
         results = list(executor.map(run_single_opt, tasks))
     
     df_res = pd.DataFrame(results)
@@ -104,23 +100,21 @@ def optimize_jp_imperial(cache_path):
     df_res = df_res.sort_values('return_pct', ascending=False)
     
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE V21.0 - [LIMIT BREAKER] OPTIMIZATION RESULTS")
+    print("🏆 IMPERIAL ORACLE Overdrive - [PHYSICS BREAKER] RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
     best = df_res.iloc[0]
-    print(f"🥇 BEST CONFIGURATION DISCOVERED (LEVERAGE 2.0x):")
+    print(f"🥇 BEST OVERDRIVE CONFIGURATION (LEVERAGE 3.0x):")
     print(f" - Max Positions:     {best['max_pos']:.0f}")
     print(f" - Breadth Threshold: {best['breadth']:.2f}")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
-    print(f" - SMA20 Exit Buffer: {best['exit_buffer']:.3f}")
     print(f"📈 Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
     print("="*80)
 
 if __name__ == "__main__":
-    # Ensure the script runs from project root
     if not os.path.exists("data_cache"):
         print("❌ Error: Please run from the project root directory.")
         sys.exit(1)
