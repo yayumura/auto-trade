@@ -68,15 +68,15 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 # --- Imperial Oracle V21.0 (Dynamic Risk Management Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   # ★NEW: 市場環境（Breadth）に応じてレバレッジを自動調整
 MAX_POSITIONS         = 7      # ★NEW: 7 stocks (超集中投資)
-BREADTH_THRESHOLD     = 0.30   # 資金退避のデッドライン (0.3未満でノーエントリー)
+BREADTH_THRESHOLD     = 0.20   # ★NEW: 0.20 (総悲観の底から現物で拾い始める設定)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
 LEVERAGE_RATE         = 3.0    # 最大レバレッジ (Breadth >= 0.5 の時)
 MAX_ALLOCATION_PCT    = 0.428  # (LEVERAGE 3.0 / 7 POS ≒ 0.428)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 10.0   # ★NEW: 10.0 (ノイズを完全に無視する超広域ストップ)
-TARGET_PROFIT_MULT    = 30.0   # ★NEW: 30.0 (メガトレンドを最後までしゃぶり尽くす)
+ATR_STOP_LOSS         = 6.0    # ★NEW: 6.0 (動的レバによる防御を前提に損切り幅を適正化)
+TARGET_PROFIT_MULT    = 20.0   # ★NEW: 20.0 (確実な利益確定によるドローダウン抑制)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
