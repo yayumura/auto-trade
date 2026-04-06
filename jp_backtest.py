@@ -60,7 +60,7 @@ def run_jp_broad_backtest(cache_path):
     bundle_np.update({k: v.values for k, v in indicator_bundle.items()})
 
     # Breadth (Prime-Exclusive SMA100 Sync V17.0)
-    from jp_scanner import get_prime_tickers
+    from core.logic import get_prime_tickers
     prime_ref = get_prime_tickers()
     elite_indices = [i for i, t in enumerate(all_tickers) if t in prime_ref]
     

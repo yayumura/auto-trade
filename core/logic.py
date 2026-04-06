@@ -209,3 +209,15 @@ def save_invalid_tickers(invalid_map):
 
 def normalize_tick_size(price, is_buy=True):
     return round(price, 1)
+
+def get_prime_tickers():
+    import os
+    import pandas as pd
+    from core.config import DATA_FILE
+    if not os.path.exists(DATA_FILE):
+        return []
+    df = pd.read_csv(DATA_FILE)
+    if '市場・商品区分' in df.columns:
+        prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]
+        return [f"{str(code)}.T" for code in prime['コード']]
+    return []

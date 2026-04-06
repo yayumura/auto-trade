@@ -8,7 +8,7 @@ import concurrent.futures
 sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 from backtest import run_backtest_v16_production
-from jp_scanner import get_prime_tickers
+from core.logic import get_prime_tickers
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
@@ -27,12 +27,29 @@ def run_single_opt(params_pack):
 
 def optimize_jp_imperial(cache_path):
     print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
-    all_data = pd.read_pickle(cache_path)
-    all_data = all_data.loc[:, ~all_data.columns.duplicated()]
+    import pickle
+    with open(cache_path, 'rb') as f:
+        all_data = pickle.load(f)
+
+    new_cols = []
+    for col in all_data.columns:
+        ticker, field = col[0], col[1]
+        if isinstance(field, tuple):
+            field = field[0]
+        new_cols.append((ticker, field))
+    all_data.columns = pd.MultiIndex.from_tuples(new_cols)
+
+    bundle = {
+        'Open': all_data.xs('Open', axis=1, level=1),
+        'High': all_data.xs('High', axis=1, level=1),
+        'Low': all_data.xs('Low', axis=1, level=1),
+        'Close': all_data.xs('Close', axis=1, level=1),
+        'Volume': all_data.xs('Volume', axis=1, level=1)
+    }
     
     # Calculate Imperial V17.0 Technicals (SMA5/20/100/ATR)
-    # Note: Using v12 calculator but logic inside it provides standard SMAs
-    bundle = calculate_all_technicals_v12(all_data)
+    indicator_bundle = calculate_all_technicals_v12(all_data)
+    bundle.update(indicator_bundle)
     
     # V17.0 Imperial Breadth (SMA100 base)
     tickers = bundle['Close'].columns.tolist()
@@ -45,6 +62,7 @@ def optimize_jp_imperial(cache_path):
     
     univ_indices = np.array([i for i, t in enumerate(tickers) if t not in {'1306.T', '1321.T'}], dtype=int)
     bundle_np = {k: v.values for k, v in bundle.items()}
+    bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
     # Imperial Grid Search
