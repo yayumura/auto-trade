@@ -81,6 +81,7 @@ MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
 SMA20_EXIT_BUFFER     = 0.985  # [V17.4] 1.5% Buffer for Whipsaw Protection
+SMA20_EXIT_BUFFER     = 0.985  # [V17.4] 1.5% Buffer for Whipsaw Protection
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
