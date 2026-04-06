@@ -6,7 +6,8 @@ from core.config import (
     ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
     MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH
+    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
+    SMA20_EXIT_BUFFER
 )
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
@@ -66,7 +67,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         # 6. Technical Exit: SMA20割れ判定
         is_sma_breach = False
         if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
-            if current_price < float(sma20_map[code]):
+            if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER:
                 is_sma_breach = True
 
         # 7. 売却判定

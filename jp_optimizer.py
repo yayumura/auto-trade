@@ -12,7 +12,7 @@ from core.logic import get_prime_tickers
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    final_assets, trade_count, _ = run_backtest_v16_production(
+    final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
         timeline=timeline,
@@ -21,7 +21,8 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        breadth_threshold=p['breadth']
+        breadth_threshold=p['breadth'],
+        exit_buffer=p.get('exit_buffer', 0.985)
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -72,9 +73,10 @@ def optimize_jp_imperial(cache_path):
         for sl in [3.0, 4.0, 5.0]:          # Tight vs Loose Stop
             for tp in [5.0, 10.0, 15.0, 20.0]: # Moon Shot vs Steady Profit
                 for p_size in [10, 15]:      # Concentration vs Diversification
-                    grid.append({
-                        "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size
-                    })
+                    for eb in [0.990, 0.985, 0.980]: # 1%, 1.5%, 2% Buffer
+                        grid.append({
+                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
+                        })
     
     print(f"🚀 [IMPERIAL_OPT] Starting Multi-Process Grid Search ({len(grid)} combinations)...")
     
@@ -92,7 +94,7 @@ def optimize_jp_imperial(cache_path):
     print("\n" + "="*80)
     print("🏆 IMPERIAL ORACLE V17.0 - OPTIMIZED PARAMETER RANKING")
     print("="*80)
-    print(df_res.head(15).to_string(index=False))
+    print(df_res.head(20).to_string(index=False))
     print("="*80 + "\n")
     
     best = df_res.iloc[0]

@@ -73,7 +73,7 @@ def run_jp_broad_backtest(cache_path):
     from backtest import run_backtest_v16_production
     
     print("\n🚀 Starting Japan IMPERIAL ORACLE Backtest (V17.0 Pullback Sync)...")
-    final_assets, trade_count, monthly_assets = run_backtest_v16_production(
+    final_assets, trade_count, monthly_assets, trade_results = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
         timeline=timeline,
@@ -96,6 +96,22 @@ def run_jp_broad_backtest(cache_path):
     print(f"FINAL EQUITY:  ¥{final_assets:,.0f}")
     print(f"TOTAL RETURN:  {((final_assets/10000000)-1)*100:+.2f}%")
     print(f"TOTAL TRADES:  {trade_count}")
+    
+    if trade_count > 0:
+        wins = [r for r in trade_results if r > 0]
+        losses = [r for r in trade_results if r <= 0]
+        win_rate = len(wins) / trade_count * 100
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        pf = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        avg_win = sum(wins) / len(wins) if wins else 0
+        avg_loss = sum(losses) / len(losses) if losses else 0
+        
+        print(f"WIN RATE:      {win_rate:.2f}%")
+        print(f"PROFIT FACTOR: {pf:.2f}")
+        print(f"AVERAGE WIN:   ¥{avg_win:,.0f}")
+        print(f"AVERAGE LOSS:  ¥{avg_loss:,.0f}")
+    
     print("-" * 50)
     
     print("HISTORICAL EQUITY PROGRESS:")

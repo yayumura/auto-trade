@@ -4,7 +4,7 @@ import numpy as np
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=10000000, max_pos=10, 
                                sl_mult=5.0, tp_mult=15.0, breadth_threshold=0.4,
-                               slippage=0.001, use_sma_exit=True):
+                               slippage=0.001, use_sma_exit=True, exit_buffer=0.985):
     """
     V17.0 THE IMPERIAL ORACLE - PEAK ALPHA SYNC
     - Perfect Order: SMA5 > SMA20 > SMA100
@@ -16,6 +16,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     portfolio = []
     trade_count = 0
     monthly_assets = {}
+    trade_results = [] # [V17.5] Detailed Trade Tracker
     
     close_np = bundle_np['Close']
     open_np, high_np, low_np = bundle_np['Open'], bundle_np['High'], bundle_np['Low']
@@ -59,7 +60,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 elif p['held_days'] >= 60: exit_p = today_open
             
             if exit_p is not None:
-                pending_cash += exit_p * (1.0 - slippage) * p['shares']
+                real_exit = exit_p * (1.0 - slippage)
+                profit = (real_exit - p['buy_price']) * p['shares']
+                trade_results.append(profit)
+                pending_cash += real_exit * p['shares']
                 trade_count += 1
             else:
                 p['held_days'] += 1
@@ -67,7 +71,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if use_sma_exit:
                     today_close = close_np[i, tidx]
                     today_sma20 = sma20_np[i, tidx]
-                    if not np.isnan(today_close) and today_close < today_sma20:
+                    if not np.isnan(today_close) and today_close < today_sma20 * exit_buffer:
                         p['exit_next_open'] = True
                 nxt.append(p)
         portfolio, cash = nxt, float(cash + pending_cash)
@@ -118,4 +122,4 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             cash -= entry_p * sh
 
     final = cash + sum(np.nan_to_num(close_np[-1, p['s_idx']]) * p['shares'] for p in portfolio)
-    return float(final), trade_count, monthly_assets
+    return float(final), trade_count, monthly_assets, trade_results
