@@ -17,6 +17,7 @@ def run_jp_broad_backtest(cache_path):
         print(f"Error: Cache not found at {cache_path}")
         return
 
+    print("⚠️ WARNING: Ensure your dataset includes delisted tickers to avoid survivorship bias.")
     print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
     with open(cache_path, 'rb') as f:
         data = pickle.load(f)

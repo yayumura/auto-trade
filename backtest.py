@@ -35,6 +35,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         for p in portfolio:
             tidx = p['s_idx']
             today_open, today_high, today_low = open_np[i, tidx], high_np[i, tidx], low_np[i, tidx]
+            
+            # --- NaN Check: Skip if data is missing (trading suspension) ---
+            if np.isnan(today_open) or np.isnan(today_high) or np.isnan(today_low):
+                p['held_days'] += 1
+                nxt.append(p)
+                continue
+            
             p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
             
             exit_p = None

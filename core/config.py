@@ -66,15 +66,15 @@ INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V17.0 (Ultimate Apex Configuration) ---
-MAX_POSITIONS         = 5      # 5 stocks (20% concentration)
-BREADTH_THRESHOLD     = 0.35    # 35% market breadth trigger
-MAX_RISK_PER_TRADE    = 0.02   # 2% Risk per trade
-MAX_ALLOCATION_PCT    = 0.20   # 1/5 equity per pos
+MAX_POSITIONS         = 15     # 15 stocks (Diversified)
+BREADTH_THRESHOLD     = 0.40   # 40% market breadth trigger
+MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade (Conservative)
+MAX_ALLOCATION_PCT    = 0.066  # 1/15 equity per pos
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
 ATR_STOP_LOSS         = 5.0    # ATR * 5 safety net
-TARGET_PROFIT_MULT    = 20.0   # ATR * 20 profit target
+TARGET_PROFIT_MULT    = 10.0   # ATR * 10 profit target
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price

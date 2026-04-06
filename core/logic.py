@@ -9,7 +9,7 @@ from core.config import (
     EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None):
     """
     V17.0 Imperial Position Manager:
     - Returns: [portfolio, sell_actions]
@@ -22,7 +22,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
     
     for p in portfolio:
         code = str(p['code'])
-        # リアルタイムバッファから最新値を取得
+        # 1. 価格取得
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
         else:
@@ -32,17 +32,17 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 1. 損切り (ATR 5.0 base)
+        # 2. 逆指値 (Stop Loss) 計算
         initial_stop = buy_price - (atr * sl_mult)
         if ATR_TRAIL and highest_price > 0:
             stop_price = max(initial_stop, highest_price - (atr * sl_mult))
         else:
             stop_price = initial_stop
             
-        # 2. 利確 (ATR 20.0 base)
+        # 3. 利確 (Profit Target) 計算
         target_price = buy_price + (atr * tp_mult)
         
-        # 3. タイムリミット (保有60日以上)
+        # 4. タイムリミット (保有60日以上)
         is_timeout = False
         buy_time_str = p.get('buy_time')
         if buy_time_str:
@@ -52,10 +52,26 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                     is_timeout = True
             except: pass
         
-        # 判定
-        if current_price <= stop_price:
+        # 5. 窓開け暴落（ギャップダウン）対応 (シミュレーション用)
+        # 始値がストップロスを既に下回っている場合、始値で決済
+        is_gap_down = False
+        exit_price = current_price
+        
+        if is_simulation and today_ohlc and code in today_ohlc:
+            o_price = today_ohlc[code].get('Open', 0)
+            if o_price > 0 and o_price <= stop_price:
+                is_gap_down = True
+                exit_price = o_price
+        
+        # 6. 売却判定
+        if is_gap_down:
+            sell_actions.append(f"SELL {code} - Gap Down Stop Loss Triggered (@{exit_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif current_price <= stop_price:
             sell_actions.append(f"SELL {code} - Stop Loss Triggered (@{current_price:,.1f})")
-            # OMS 決済(SIMでない場合)
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
@@ -73,7 +89,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 except: pass
             continue
             
-        # 評価額の更新
+        # 7. 評価額と高値の更新
         p['current_price'] = round(current_price, 1)
         if current_price > float(p.get('highest_price', 0)):
             p['highest_price'] = round(current_price, 1)
