@@ -367,10 +367,13 @@ def _main_exec():
 
         print(f"[STAT] 現在のレジーム: 【{regime}】")
         
-        # [V17.0 Imperial Sync] Position management and auto-reporting
+        # [V17.3 Imperial Sync] Position management and auto-reporting
+        # Prepare SMA20 Map for technical exit
+        sma20_map = {str(code): info.get('SMA20', 0) for code, info in jp_cache.items()}
+        
         portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
-            realtime_buffers=realtime_buffers
+            realtime_buffers=realtime_buffers, sma20_map=sma20_map
         )
         actions_taken.extend(sell_actions)
         

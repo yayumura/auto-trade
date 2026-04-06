@@ -9,7 +9,7 @@ sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 
 from core.config import (
-    INITIAL_CASH, MAX_POSITIONS, ATR_STOP_LOSS, TARGET_PROFIT_MULT, BREADTH_THRESHOLD
+    INITIAL_CASH, MAX_POSITIONS, ATR_STOP_LOSS, TARGET_PROFIT_MULT, BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH
 )
 
 def run_jp_broad_backtest(cache_path):
@@ -83,7 +83,8 @@ def run_jp_broad_backtest(cache_path):
         sl_mult=ATR_STOP_LOSS,
         tp_mult=TARGET_PROFIT_MULT,
         breadth_threshold=BREADTH_THRESHOLD,
-        slippage=0.001
+        slippage=0.001,
+        use_sma_exit=EXIT_ON_SMA20_BREACH
     )
 
     # Report

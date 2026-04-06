@@ -3,8 +3,8 @@ import numpy as np
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=10000000, max_pos=10, 
-                               sl_mult=4.0, tp_mult=15.0, breadth_threshold=0.4,
-                               slippage=0.001):
+                               sl_mult=5.0, tp_mult=15.0, breadth_threshold=0.4,
+                               slippage=0.001, use_sma_exit=True):
     """
     V17.0 THE IMPERIAL ORACLE - PEAK ALPHA SYNC
     - Perfect Order: SMA5 > SMA20 > SMA100
@@ -47,17 +47,28 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             
             p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
             
+            # --- [V17.3] SMA20 Breach Exit (Execution) ---
             exit_p = None
-            if today_open <= p['sl_price']: exit_p = today_open
-            elif today_low <= p['sl_price']: exit_p = p['sl_price']
-            elif today_high >= p['tp_price']: exit_p = p['tp_price']
-            elif p['held_days'] >= 60: exit_p = today_open
+            if use_sma_exit and p.get('exit_next_open', False):
+                exit_p = today_open
+            
+            if exit_p is None:
+                if today_open <= p['sl_price']: exit_p = today_open
+                elif today_low <= p['sl_price']: exit_p = p['sl_price']
+                elif today_high >= p['tp_price']: exit_p = p['tp_price']
+                elif p['held_days'] >= 60: exit_p = today_open
             
             if exit_p is not None:
                 pending_cash += exit_p * (1.0 - slippage) * p['shares']
                 trade_count += 1
             else:
                 p['held_days'] += 1
+                # --- [V17.3] SMA20 Breach Detection (Next-Day Exit Trigger) ---
+                if use_sma_exit:
+                    today_close = close_np[i, tidx]
+                    today_sma20 = sma20_np[i, tidx]
+                    if not np.isnan(today_close) and today_close < today_sma20:
+                        p['exit_next_open'] = True
                 nxt.append(p)
         portfolio, cash = nxt, float(cash + pending_cash)
 

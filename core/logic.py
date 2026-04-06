@@ -6,10 +6,10 @@ from core.config import (
     ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
     MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL
+    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
     """
     V17.0 Imperial Position Manager:
     - Returns: [portfolio, sell_actions]
@@ -63,9 +63,21 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 is_gap_down = True
                 exit_price = o_price
         
-        # 6. 売却判定
+        # 6. Technical Exit: SMA20割れ判定
+        is_sma_breach = False
+        if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
+            if current_price < float(sma20_map[code]):
+                is_sma_breach = True
+
+        # 7. 売却判定
         if is_gap_down:
             sell_actions.append(f"SELL {code} - Gap Down Stop Loss Triggered (@{exit_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif is_sma_breach:
+            sell_actions.append(f"SELL {code} - SMA20 Breach Triggered (@{current_price:,.1f})")
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
