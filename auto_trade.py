@@ -194,17 +194,16 @@ def _main_exec():
     # --- [Imperial Persistence] JQuants Cache Management ---
     JQUANTS_CACHE_FILE = os.path.join("data_cache", "jp_broad", "jp_mega_cache.pkl")
     jp_cache = {}
+    jp_cache_df = None
     if os.path.exists(JQUANTS_CACHE_FILE):
         try:
             with open(JQUANTS_CACHE_FILE, 'rb') as f:
                 jp_cache_df = pickle.load(f)
+            
             # multi-index Columns -> Dict for fast lookup
-            # columns: (Ticker, Metric)
-            jp_cache = {}
             for col in jp_cache_df.columns:
                 ticker = col[0]
                 if ticker not in jp_cache: jp_cache[ticker] = {}
-                # Metric is Metric
                 jp_cache[ticker][col[1]] = jp_cache_df[col].iloc[-1]
             print(f"✅ Loaded JQuants Cache: {len(jp_cache)} tickers secured.")
         except Exception as e:
@@ -360,7 +359,8 @@ def _main_exec():
             print(f"[WARNING] バッファ同期エラー: {e}")
 
         try:
-            regime = detect_market_regime(broker=broker, buffer=None)
+            # [V17.2 Enhancement] Regime Filter: SMA100 of Nikkei 225
+            regime = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
         except:
             regime = "RANGE"
             last_scan_time = loop_start_time

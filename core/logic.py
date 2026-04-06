@@ -134,15 +134,36 @@ def calculate_all_technicals_v12(data_df):
     # RS (Momentum Strength: SMA5 / SMA100 Ratio)
     bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
     
+    # Store Open for reversal check
+    bundle['Open'] = data_df.xs('Open', axis=1, level=1)
+    
     return bundle
 
-def detect_market_regime(broker=None, buffer=None):
-    # 市場全体（TOPIX/1306等）のSMA100に対する位置で判定
+def detect_market_regime(data_df=None, buffer=None):
+    """
+    V17.2 Imperial Regime Filter:
+    - Checks if Nikkei 225 (1321.T) is above its SMA100.
+    - If below, returns BEAR to suppress new entries.
+    """
+    if data_df is not None:
+        try:
+            # 1321.T SMA100 Check
+            close_all = data_df.xs('Close', axis=1, level=1)
+            if '1321.T' in close_all.columns:
+                close_1321 = close_all['1321.T']
+                sma100_1321 = close_1321.rolling(100).mean().iloc[-1]
+                current_1321 = close_1321.iloc[-1]
+                if current_1321 < sma100_1321:
+                    return "BEAR"
+        except:
+            pass
+
+    # Fallback to buffer check if available
     if buffer and '1321' in buffer:
         price = buffer['1321'].get_latest_price()
-        # simplified check
         if price > 0: return "BULL"
-    return "RANGE"
+        
+    return "BULL"
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
@@ -174,10 +195,15 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         
         # Imperial Trend: 5 > 20 > 100
         if s5 > s20 > s100:
-            # Entry Signal: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
+            # Entry Signal 1: Pullback (Price strictly between SMA20 * 0.98 and SMA20 * 1.02)
             if s20 * 0.98 <= p < s20 * 1.02:
-                # Name lookup
-                name = "Target"
+                # Entry Signal 2: Reversal Confirmation (Close > Prev Close OR Close > Open)
+                prev_p = bundle['Close'].iloc[-2][t_with_t]
+                open_p = bundle['Open'].iloc[-1][t_with_t]
+                
+                if (p > prev_p) or (p > open_p):
+                    # Name lookup
+                    name = "Target"
                 if symbols_df is not None:
                     match = symbols_df[symbols_df['コード'].astype(str) == code_only]
                     if not match.empty: name = match.iloc[0]['銘柄名']

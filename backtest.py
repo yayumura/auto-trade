@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
-                               initial_cash=10000000, max_pos=5, 
-                               sl_mult=5.0, tp_mult=20.0, breadth_threshold=0.4,
+                               initial_cash=10000000, max_pos=10, 
+                               sl_mult=4.0, tp_mult=15.0, breadth_threshold=0.4,
                                slippage=0.001):
     """
     V17.0 THE IMPERIAL ORACLE - PEAK ALPHA SYNC
@@ -23,6 +23,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     sma20_np = bundle_np['SMA20']
     sma100_np = bundle_np['SMA100']
     atr_np = bundle_np['ATR']
+    
+    # [V17.2 Enhancement] Pre-locate 1321.T (Global Market Proxy)
+    idx_1321 = bundle_np['tickers'].index('1321.T') if '1321.T' in bundle_np['tickers'] else None
     
     for i in range(100, T):
         curr_time = timeline[i]
@@ -62,14 +65,22 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if i + 1 >= T: continue
         if breadth_ratio[i] < breadth_threshold: continue
         
+        # [V17.2 Enhancement] Global Market SMA100 Filter (Nikkei 225 Check)
+        if idx_1321 is not None:
+             if close_np[i, idx_1321] < sma100_np[i, idx_1321]:
+                  continue
+        
         if len(portfolio) < max_pos:
             c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
             
-            # The V16.2 Winner Logic
+            # The V16.2 Winner Logic -> V17.2 Reversal Confirmation
             is_perfect = (s5_u > s20_u) & (s20_u > s100_u)
             is_pullback = (c_u < s20_u * 1.02) & (c_u > s20_u * 0.98) 
             
-            valid_mask = is_perfect & is_pullback
+            # [V17.2 Enhancement] Reversal Confirmation: (Close > Prev Close) OR (Close > Open)
+            is_reversal = (c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])
+            
+            valid_mask = is_perfect & is_pullback & is_reversal
             valid_idx = univ_indices[valid_mask]
             
             if len(valid_idx) > 0:

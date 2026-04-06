@@ -70,8 +70,8 @@ def optimize_jp_imperial(cache_path):
     # Testing for the "Perfect Balance"
     for b in [0.30, 0.40, 0.50]:           # Market Tone
         for sl in [3.0, 4.0, 5.0]:          # Tight vs Loose Stop
-            for tp in [5.0, 10.0, 15.0]:     # Moon Shot vs Steady Profit
-                for p_size in [10, 15, 20]:  # Concentration vs Diversification
+            for tp in [5.0, 10.0, 15.0, 20.0]: # Moon Shot vs Steady Profit
+                for p_size in [10, 15]:      # Concentration vs Diversification
                     grid.append({
                         "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size
                     })
