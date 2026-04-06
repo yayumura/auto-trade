@@ -3,7 +3,7 @@ import numpy as np
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=10000000, max_pos=10, 
-                               sl_mult=5.0, tp_mult=15.0, breadth_threshold=0.4,
+                               sl_mult=5.0, tp_mult=15.0, leverage_rate=2.0, breadth_threshold=0.4,
                                slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
                                verbose=False):
     """
@@ -31,12 +31,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     
     for i in range(100, T):
         curr_time = timeline[i]
+        held_value = sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
+        total_equity = cash + held_value
+        
         if i % 20 == 0:
-            held_v = sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
-            monthly_assets[curr_time.strftime('%Y-%m')] = cash + held_v
+            monthly_assets[curr_time.strftime('%Y-%m')] = total_equity
 
         # 1. Management
-        nxt, pending_cash = [], 0.0
+        pending_cash = 0.0
+        new_portfolio = []
         for p in portfolio:
             tidx = p['s_idx']
             today_open, today_high, today_low = open_np[i, tidx], high_np[i, tidx], low_np[i, tidx]
@@ -44,7 +47,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # --- NaN Check: Skip if data is missing (trading suspension) ---
             if np.isnan(today_open) or np.isnan(today_high) or np.isnan(today_low):
                 p['held_days'] += 1
-                nxt.append(p)
+                new_portfolio.append(p)
                 continue
             
             p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
@@ -85,8 +88,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     if not np.isnan(today_close) and today_close <= p['buy_price']:
                         p['exit_next_open'] = True
                         
-                nxt.append(p)
-        portfolio, cash = nxt, float(cash + pending_cash)
+                new_portfolio.append(p)
+        portfolio, cash = new_portfolio, float(cash + pending_cash)
 
         # 2. Entry
         if i + 1 >= T: continue
@@ -98,6 +101,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                   continue
         
         if len(portfolio) < max_pos:
+            # --- Update total equity and exposure for buying power calculation ---
+            held_value = sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
+            total_equity = cash + held_value
+            buying_power = (total_equity * leverage_rate) - held_value
+            
             c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
             
             # The V16.2 Winner Logic -> V17.2 Reversal Confirmation
@@ -127,7 +135,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     if not np.isnan(buy_v) and buy_v > 0:
                         entry_p = buy_v * (1.0 + slippage)
                         entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
-                        sh = (int((cash / (max_pos - len(portfolio))) / entry_p) // 100) * 100
+                        
+                        # --- 複利・レバレッジによる株数算出 (V19 Backtest Sync) ---
+                        # 1銘柄割当額 = (総資産 * レバレッジ) / 最大保持数
+                        allocation = (total_equity * leverage_rate) / max_pos
+                        # 実際の購入可能上限 = 購買力の残りと割当額の小さい方
+                        actual_ma = min(allocation, buying_power)
+                        
+                        sh = (int(actual_ma / entry_p) // 100) * 100
+                        
                         if sh >= 100:
                             portfolio.append({
                                 "s_idx": s_idx, "buy_price": entry_p, "shares": sh, "held_days": 0,
@@ -136,8 +152,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 "tp_price": entry_p + (entry_atr * tp_mult)
                             })
                             cash -= entry_p * sh
+                            buying_power -= entry_p * sh # 購入に伴い購買力も減少
                         else:
-                            # [V18.2 Sync] 資金不足または単位未満のスキップ理由を表示（ライブ環境と同期）
                             if verbose:
                                 print(f"⏭️ [BT Skip] {bundle_np['tickers'][s_idx]} skipped: Low budget or < 100 shares.")
 

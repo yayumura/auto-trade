@@ -48,7 +48,7 @@ from core.config import (
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
-    MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
+    LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
     load_insider_exclusion_codes
 )
@@ -541,7 +541,11 @@ def _main_exec():
                         if p <= 0 or a <= 0: continue
                         
                         tp = normalize_tick_size(p + (a * 0.1), is_buy=True)
-                        te = account['cash'] + sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                        # --- 複利・レバレッジ資金管理の改修 (V19 Optimization) ---
+                        current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
+                        te = account['cash'] + current_exposure
+                        buying_power = (te * LEVERAGE_RATE) - current_exposure
+                        
                         ra = te * MAX_RISK_PER_TRADE
                         # ATRベースのリスク許容度に基づく株数計算 (V15.1 Oracle仕様)
                         rps = a * ATR_STOP_LOSS 
@@ -552,8 +556,8 @@ def _main_exec():
                             ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
                         
                         ms_a = int(ma // tp)
-                        ms_c = int((account['cash'] / 1.0001) // tp)
-                        ts = (min(is_sh, ms_a, ms_c) // 100) * 100
+                        ms_bp = int((buying_power / 1.0001) // tp) # 購買力から算出する株数に置き換え
+                        ts = (min(is_sh, ms_a, ms_bp) // 100) * 100
                         
                         if ts >= 100:
                             if is_sim:
