@@ -67,7 +67,7 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V17.0 (Optimized Apex Configuration) ---
 MAX_POSITIONS         = 15     # 15 stocks (分散投資)
-BREADTH_THRESHOLD     = 0.30   # 30% (相場の地合い判定)
+BREADTH_THRESHOLD     = 0.40   # ★NEW: 0.40 (地合い判定を厳格化し、優位性の高い時のみエントリー)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
 LEVERAGE_RATE         = 2.0    # ★NEW: 信用レバレッジ2.0倍
 MAX_ALLOCATION_PCT    = 0.133  # ★NEW: (LEVERAGE 2.0 / 15 POS ≒ 0.133)
@@ -75,7 +75,7 @@ MAX_ALLOCATION_AMOUNT = 10000000 # ★NEW: 複利の邪魔をしないよう1000
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
 ATR_STOP_LOSS         = 5.0    # 損切りライン (変更なし)
-TARGET_PROFIT_MULT    = 15.0   # 利確ライン (変更なし)
+TARGET_PROFIT_MULT    = 20.0   # ★NEW: 20.0 (利益をさらに大きく伸ばす)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
