@@ -66,13 +66,13 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [Overdrive Mode] Physics-Defying Alpha Sync ---
+    # --- [V22.1] Absolute Return - Model Optimization Sync ---
     grid = []
     
-    breadth_range      = [0.25, 0.30]        # 新規しきい値周辺を探索
-    sl_range           = [6.0, 8.0]          # 高精度ストップ
-    tp_range           = [20.0, 30.0]        # 利益最大化
-    max_pos_range      = [5, 7]              # 集中投資
+    breadth_range      = [0.25, 0.30]        
+    sl_range           = [3.0, 4.0, 5.0]     # High Turnover
+    tp_range           = [10.0, 20.0, 30.0]  # Take profit aggressively
+    max_pos_range      = [10, 15]            # Diversification
     exit_buffer_range  = [0.985]             
 
     for b in breadth_range:           

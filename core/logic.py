@@ -73,13 +73,25 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
                 days_held = (dt.now() - buy_dt).days
-                if days_held >= 60:
+                
+                # [V22.1] SHORT Max Hold Duration: 3 Days
+                if direction == 'SHORT' and days_held >= 3:
                     is_timeout = True
-                elif days_held >= 20:
-                    if direction == 'LONG' and current_price <= buy_price:
+                elif days_held >= 60:
+                    is_timeout = True
+                    
+                # [V22.1] Loss-based Time Stop (5 Days)
+                elif days_held >= 5:
+                    if direction == 'LONG' and current_price < buy_price:
                         is_stagnated = True
-                    elif direction == 'SHORT' and current_price >= buy_price:
+                    elif direction == 'SHORT' and current_price > buy_price:
                         is_stagnated = True
+                    # Legacy 20-day stagnation check
+                    elif days_held >= 20:
+                        if direction == 'LONG' and current_price <= buy_price:
+                            is_stagnated = True
+                        elif direction == 'SHORT' and current_price >= buy_price:
+                            is_stagnated = True
             except: pass
         
         # 5. 窓開け暴落（ギャップ）対応 (シミュレーション用)
@@ -242,12 +254,18 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
     """
     bundle = calculate_all_technicals_v12(data_df)
     
+    # [V22.1 Relative Strength Calculation]
+    # Filter tickers that outperformed Nikkei 225 (1321.T) over past 60 days
+    ret60 = (bundle['Close'] / bundle['Close'].shift(60) - 1).iloc[-1]
+    nikkei_ret60 = ret60.get('1321.T', 0)
+    
     close = bundle['Close'].iloc[-1]
     sma5 = bundle['SMA5'].iloc[-1]
     sma20 = bundle['SMA20'].iloc[-1]
     sma100 = bundle['SMA100'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
-    rs = bundle['RS'].iloc[-1]
+    rs_long = bundle['RS'].iloc[-1]
+    rs_short = bundle['RS_SHORT'].iloc[-1]
     
     candidates = []
     
@@ -267,8 +285,8 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
             match = symbols_df[symbols_df['コード'].astype(str) == code_only]
             if not match.empty: name = match.iloc[0]['銘柄名']
 
-        # --- LONG Logic: SMA5 > SMA20 > SMA100 ---
-        if s5 > s20 > s100:
+        # --- LONG Logic: SMA5 > SMA20 > SMA100 & Outperforming Index ---
+        if s5 > s20 > s100 and ret60.get(t_with_t, -1) > nikkei_ret60:
             if s20 * 0.96 <= p < s20 * 1.04:
                 prev_p = bundle['Close'].iloc[-2][t_with_t]
                 open_p = bundle['Open'].iloc[-1][t_with_t]
@@ -283,11 +301,15 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
                         "direction": "LONG"
                     })
 
-        # --- SHORT Logic: SMA5 < SMA20 < SMA100 (Inverse Perfect Order) ---
-        elif s5 < s20 < s100:
-            # Entry Signal: SMA20 pullback (0.98 to 1.02)
-            if s20 * 0.98 <= p <= s20 * 1.02:
-                prev_p = bundle['Close'].iloc[-2][t_with_t]
+        # --- SHORT Logic: SMA5 < SMA20 < SMA100 & (Close < SMA5 for momentum) ---
+        elif s5 < s20 < s100 and p < s5:
+            # 60-day filter for short? Standard L/S often avoids shorting the strongest stocks.
+            # But the requirement asks for RS comparison for all "entry candidates".
+            if ret60.get(t_with_t, 99) > nikkei_ret60: # Even for shorts, we prefer trading active/strong tickers or specific weakness?
+                # User says: "Extract only tickers whose return over past 60 days outperformed Nikkei".
+                # OK, applying to all.
+                if s20 * 0.98 <= p <= s20 * 1.02:
+                    prev_p = bundle['Close'].iloc[-2][t_with_t]
                 open_p = bundle['Open'].iloc[-1][t_with_t]
                 h_p = bundle['High'].iloc[-1][t_with_t]
                 l_p = bundle['Low'].iloc[-1][t_with_t]
