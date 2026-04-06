@@ -67,21 +67,21 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V17.0 (Optimized Apex Configuration) ---
 MAX_POSITIONS         = 15     # 15 stocks (分散投資)
-BREADTH_THRESHOLD     = 0.40   # ★NEW: 0.40 (地合い判定を厳格化し、優位性の高い時のみエントリー)
+BREADTH_THRESHOLD     = 0.30   # ★NEW: 0.30 (地合いの初動から積極的に乗る設定に最適化)
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
 LEVERAGE_RATE         = 2.0    # ★NEW: 信用レバレッジ2.0倍
 MAX_ALLOCATION_PCT    = 0.133  # ★NEW: (LEVERAGE 2.0 / 15 POS ≒ 0.133)
 MAX_ALLOCATION_AMOUNT = 10000000 # ★NEW: 複利の邪魔をしないよう1000万に引き上げ
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 5.0    # 損切りライン (変更なし)
-TARGET_PROFIT_MULT    = 20.0   # ★NEW: 20.0 (利益をさらに大きく伸ばす)
+ATR_STOP_LOSS         = 6.0    # ★NEW: 6.0 (ノイズ回避のためにストップ幅を拡大)
+TARGET_PROFIT_MULT    = 15.0   # ★NEW: 15.0 (資金回転率を重視した利確設定)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.990  # ★NEW: 撤退ラインを少し厳しく(早期損切り)して最適化
+SMA20_EXIT_BUFFER     = 0.985  # ★NEW: 0.985 (損切り・微益撤退のバランス最適化)
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
