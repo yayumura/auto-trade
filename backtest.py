@@ -62,7 +62,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if today_open <= p['sl_price']: exit_p = today_open
                 elif today_low <= p['sl_price']: exit_p = p['sl_price']
                 elif today_high >= p['tp_price']: exit_p = p['tp_price']
-                elif p['held_days'] >= 60: exit_p = today_open
+                elif p['held_days'] >= 5: exit_p = today_open
             
             if exit_p is not None:
                 real_exit = exit_p * (1.0 - slippage)
@@ -80,7 +80,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         p['exit_next_open'] = True
                 
                 # --- [V18.1] Time Stop (Stagnation Exit) ---
-                if p['held_days'] >= 20:
+                if p['held_days'] >= 2:
                     today_close = close_np[i, tidx]
                     if not np.isnan(today_close) and today_close <= p['buy_price']:
                         p['exit_next_open'] = True
@@ -108,10 +108,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             h_u, l_u = high_np[i, univ_indices], low_np[i, univ_indices]
             is_strong_close = (c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5
             
+            # [V19.0 Momentum Sync] +1.5% Gain Constraint
+            is_momentum = (c_u >= close_np[min(i, i-1), univ_indices] * 1.015)
+            
             # [V18.1 Sync] Reversal Confirmation & Strong Close
             is_reversal = ((c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])) & is_strong_close
             
-            valid_mask = is_perfect & is_pullback & is_reversal
+            valid_mask = is_perfect & is_pullback & is_reversal & is_momentum
             valid_idx = univ_indices[valid_mask]
             
             if len(valid_idx) > 0:

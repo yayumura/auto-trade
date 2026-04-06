@@ -56,9 +56,9 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
                 days_held = (dt.now() - buy_dt).days
-                if days_held >= 60:
+                if days_held >= 5:
                     is_timeout = True
-                elif days_held >= 20 and current_price <= buy_price:
+                elif days_held >= 2 and current_price <= buy_price:
                     is_stagnated = True
             except: pass
         
@@ -106,7 +106,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 except: pass
             continue
         elif is_timeout:
-            sell_actions.append(f"SELL {code} - Time Limit Reached (60 Days)")
+            sell_actions.append(f"SELL {code} - Time Limit Reached (5 Days)")
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
@@ -232,10 +232,10 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
                 h_p = bundle['High'].iloc[-1][t_with_t]
                 l_p = bundle['Low'].iloc[-1][t_with_t]
                 
-                # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
-                is_strong = (p - l_p) / (h_p - l_p + 1e-9) >= 0.5
+                # [V19.0 Momentum Sync] +1.5% Gain Constraint
+                is_momentum = p >= prev_p * 1.015
 
-                if ((p > prev_p) or (p > open_p)) and is_strong:
+                if ((p > prev_p) or (p > open_p)) and is_strong and is_momentum:
                     # Name lookup
                     name = "Target"
                 if symbols_df is not None:

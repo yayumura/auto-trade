@@ -94,9 +94,9 @@ def run_jp_broad_backtest(cache_path):
     print("🇯🇵 JAPAN IMPERIAL ORACLE PERFORMANCE (V17.0)")
     print("="*50)
     print(f"PERIOD:        {timeline[0].date()} to {timeline[-1].date()}")
-    print(f"INITIAL CASH:  ¥{10000000:,.0f}")
+    print(f"INITIAL CASH:  ¥{INITIAL_CASH:,.0f}")
     print(f"FINAL EQUITY:  ¥{final_assets:,.0f}")
-    print(f"TOTAL RETURN:  {((final_assets/10000000)-1)*100:+.2f}%")
+    print(f"TOTAL RETURN:  {((final_assets/INITIAL_CASH)-1)*100:+.2f}%")
     print(f"TOTAL TRADES:  {trade_count}")
     
     if trade_count > 0:
