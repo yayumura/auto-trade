@@ -48,8 +48,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             
             p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
             
-            # --- [V18.0] Break-even Stop (3ATR Profit = 0.2% protection) ---
-            if today_high >= p['buy_price'] + (p['entry_atr'] * 3.0):
+            # --- [V18.1] Break-even Stop (5ATR Profit = 0.2% protection) ---
+            if today_high >= p['buy_price'] + (p['entry_atr'] * 5.0):
                 p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.002)
             
             # --- [V17.3] SMA20 Breach Exit (Execution) ---
@@ -78,8 +78,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     if not np.isnan(today_close) and today_close < today_sma20 * exit_buffer:
                         p['exit_next_open'] = True
                 
-                # --- [V18.0] Time Stop (Stagnation Exit) ---
-                if p['held_days'] >= 10:
+                # --- [V18.1] Time Stop (Stagnation Exit) ---
+                if p['held_days'] >= 20:
                     today_close = close_np[i, tidx]
                     if not np.isnan(today_close) and today_close <= p['buy_price']:
                         p['exit_next_open'] = True
@@ -103,8 +103,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             is_perfect = (s5_u > s20_u) & (s20_u > s100_u)
             is_pullback = (c_u < s20_u * 1.02) & (c_u > s20_u * 0.98) 
             
-            # [V17.2 Enhancement] Reversal Confirmation: (Close > Prev Close) OR (Close > Open)
-            is_reversal = (c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])
+            # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
+            h_u, l_u = high_np[i, univ_indices], low_np[i, univ_indices]
+            is_strong_close = (c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5
+            
+            # [V18.1 Sync] Reversal Confirmation & Strong Close
+            is_reversal = ((c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])) & is_strong_close
             
             valid_mask = is_perfect & is_pullback & is_reversal
             valid_idx = univ_indices[valid_mask]

@@ -36,8 +36,8 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         # 2. 逆指値 (Stop Loss) 計算
         initial_stop = buy_price - (atr * sl_mult)
         
-        # [V18.0] Break-even Stop (3ATR Profit Protection)
-        if highest_price >= buy_price + (atr * 3.0):
+        # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
+        if highest_price >= buy_price + (atr * 5.0):
             initial_stop = max(initial_stop, buy_price * 1.002)
             
         if ATR_TRAIL and highest_price > 0:
@@ -58,7 +58,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 days_held = (dt.now() - buy_dt).days
                 if days_held >= 60:
                     is_timeout = True
-                elif days_held >= 10 and current_price <= buy_price:
+                elif days_held >= 20 and current_price <= buy_price:
                     is_stagnated = True
             except: pass
         
@@ -229,8 +229,13 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
                 # Entry Signal 2: Reversal Confirmation (Close > Prev Close OR Close > Open)
                 prev_p = bundle['Close'].iloc[-2][t_with_t]
                 open_p = bundle['Open'].iloc[-1][t_with_t]
+                h_p = bundle['High'].iloc[-1][t_with_t]
+                l_p = bundle['Low'].iloc[-1][t_with_t]
                 
-                if (p > prev_p) or (p > open_p):
+                # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
+                is_strong = (p - l_p) / (h_p - l_p + 1e-9) >= 0.5
+
+                if ((p > prev_p) or (p > open_p)) and is_strong:
                     # Name lookup
                     name = "Target"
                 if symbols_df is not None:
