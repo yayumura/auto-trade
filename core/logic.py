@@ -35,6 +35,11 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         
         # 2. 逆指値 (Stop Loss) 計算
         initial_stop = buy_price - (atr * sl_mult)
+        
+        # [V18.0] Break-even Stop (3ATR Profit Protection)
+        if highest_price >= buy_price + (atr * 3.0):
+            initial_stop = max(initial_stop, buy_price * 1.002)
+            
         if ATR_TRAIL and highest_price > 0:
             stop_price = max(initial_stop, highest_price - (atr * sl_mult))
         else:
@@ -43,14 +48,18 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         # 3. 利確 (Profit Target) 計算
         target_price = buy_price + (atr * tp_mult)
         
-        # 4. タイムリミット (保有60日以上)
+        # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
         is_timeout = False
+        is_stagnated = False
         buy_time_str = p.get('buy_time')
         if buy_time_str:
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
-                if (dt.now() - buy_dt).days >= 60:
+                days_held = (dt.now() - buy_dt).days
+                if days_held >= 60:
                     is_timeout = True
+                elif days_held >= 10 and current_price <= buy_price:
+                    is_stagnated = True
             except: pass
         
         # 5. 窓開け暴落（ギャップダウン）対応 (シミュレーション用)
@@ -84,7 +93,14 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 except: pass
             continue
         elif current_price <= stop_price:
-            sell_actions.append(f"SELL {code} - Stop Loss Triggered (@{current_price:,.1f})")
+            reason = "Stop Loss" if stop_price < buy_price else "Break-even Stop"
+            sell_actions.append(f"SELL {code} - {reason} Triggered (@{current_price:,.1f})")
+            if not is_simulation and broker:
+                try: broker.execute_chase_order(code, p['shares'], side="1")
+                except: pass
+            continue
+        elif is_stagnated:
+            sell_actions.append(f"SELL {code} - Time Stop (Stagnation) (@{current_price:,.1f})")
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass

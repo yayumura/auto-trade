@@ -48,6 +48,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             
             p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
             
+            # --- [V18.0] Break-even Stop (3ATR Profit = 0.2% protection) ---
+            if today_high >= p['buy_price'] + (p['entry_atr'] * 3.0):
+                p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.002)
+            
             # --- [V17.3] SMA20 Breach Exit (Execution) ---
             exit_p = None
             if use_sma_exit and p.get('exit_next_open', False):
@@ -73,6 +77,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     today_sma20 = sma20_np[i, tidx]
                     if not np.isnan(today_close) and today_close < today_sma20 * exit_buffer:
                         p['exit_next_open'] = True
+                
+                # --- [V18.0] Time Stop (Stagnation Exit) ---
+                if p['held_days'] >= 10:
+                    today_close = close_np[i, tidx]
+                    if not np.isnan(today_close) and today_close <= p['buy_price']:
+                        p['exit_next_open'] = True
+                        
                 nxt.append(p)
         portfolio, cash = nxt, float(cash + pending_cash)
 
