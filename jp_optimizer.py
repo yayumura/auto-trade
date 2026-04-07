@@ -24,9 +24,9 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # Fixed 3.0x leverage as V21 standard
+        leverage_rate=3.0, # (Note: Internal backtest logic now overrides this with dynamic leverage)
         breadth_threshold=p['breadth'],
-        exit_buffer=0.985
+        exit_buffer=0.94
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -86,7 +86,7 @@ def optimize_jp_imperial(cache_path):
                         "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size
                     })
     
-    print(f"🚀 [V28.0_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x Fixed)...")
+    print(f"🚀 [V29.0_OPT] Starting Grid Search ({len(grid)} combinations, Dynamic Leverage 1-3x)...")
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:

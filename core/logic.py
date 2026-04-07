@@ -12,9 +12,10 @@ from core.config import (
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
     """
-    V27.0 Holy Grail Position Manager:
-    - Pure LONG Strategy
-    - Trailing stop allows breathing room (Uses current_price as proxy for Close)
+    V29.0 The Absolute Apex Position Manager:
+    - Pure LONG + Pullback (V21 based)
+    - Corrected Buffer: 0.94 (SMA20 Exit)
+    - Trailing stop update from High
     """
     remaining = []
     sell_actions = []
@@ -162,9 +163,9 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
     """
-    V28.0 [Back to Basics] Selection:
+    V29.0 The Absolute Apex Selection:
     - Pure LONG + Pullback (V21)
-    - Breadth Threshold: 0.30
+    - Dynamic Leverage: 1x to 3x based on Breadth
     """
     if breadth < 0.30: return []
     
@@ -207,9 +208,9 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
 
     return sorted(candidates, key=lambda x: x['rs'], reverse=True)[:MAX_POSITIONS]
 
-def calculate_position_size(total_equity, entry_price, atr, leverage=3.0, max_pos=7):
+def calculate_position_size(total_equity, entry_price, atr, leverage=1.0, max_pos=7):
     """
-    V21 (V28.0) Sizing: Fixed leverage based on configuration.
+    V29.0 Sizing: Dynamic leverage based on Breadth.
     """
     if entry_price <= 0: return 0
     allocation_yen = (total_equity * leverage) / max_pos

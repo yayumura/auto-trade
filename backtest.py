@@ -4,15 +4,15 @@ import numpy as np
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                  initial_cash=10000000, max_pos=7, 
                                  sl_mult=10.0, tp_mult=30.0, leverage_rate=3.0, breadth_threshold=0.30,
-                                 slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
+                                 slippage=0.001, use_sma_exit=True, exit_buffer=0.94, 
                                  verbose=False):
     """
-    V28.0 [Back to Basics] - Original +187% Alpha Strategy
+    V29.0 [The Absolute Apex] - Ultimate Trend-Follower
+    - Corrected Buffer: 0.94 (SMA20 Exit) to prevent self-whipsaw
+    - [RESTORED] Dynamic Leverage (All-Weather defense): 1x, 2x, 3x based on Breadth
     - Reverted to RS Formula: SMA5 / SMA20
     - Reverted to High-based Trailing Stop
-    - Removed Break-even Protection (3*ATR)
     - Normalized Cash/Inventory Calculation
-    - Simplified Macro: Breadth Filter Only
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -95,8 +95,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if i + 1 >= T: continue
         br = breadth_ratio[i]
         
-        # Simple Breadth Filter
-        if br < breadth_threshold: continue
+        # Dynamic Leverage (All-Weather defense)
+        curr_lev = 0.0
+        if br >= 0.50: curr_lev = 3.0
+        elif br >= 0.40: curr_lev = 2.0
+        elif br >= breadth_threshold: curr_lev = 1.0
+        
+        if curr_lev <= 0: continue
         if len(portfolio) >= max_pos: continue
         
         c_u, s5_u, s20_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices]
@@ -119,8 +124,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 buy_v = open_np[i+1, s_idx]
                 if not np.isnan(buy_v) and buy_v > 0:
                     entry_p = buy_v * (1.0 + slippage)
-                    # Sizing: Equal weight based on total equity
-                    sh = ((total_equity * leverage_rate / max_pos) / entry_p // 100) * 100
+                    # 購入株数の算出に curr_lev を使用する
+                    sh = ((total_equity * curr_lev / max_pos) / entry_p // 100) * 100
                     
                     if sh >= 100:
                         entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
