@@ -3,21 +3,21 @@ import numpy as np
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=10000000, max_pos=10, 
-                               sl_mult=5.0, tp_mult=15.0, leverage_rate=2.0, breadth_threshold=0.4,
-                               slippage=0.001, use_sma_exit=True, exit_buffer=0.985, 
+                               sl_mult=1.5, tp_mult=3.0, leverage_rate=2.0, breadth_threshold=0.4,
+                               slippage=0.001, use_sma_exit=False, exit_buffer=0.985, max_hold_days=4,
                                verbose=False):
     """
-    V17.0 THE IMPERIAL ORACLE - PEAK ALPHA SYNC
-    - Perfect Order: SMA5 > SMA20 > SMA100
-    - Pullback: Buying @ SMA20 support (98% to 102%)
-    - Sorting: S5/S100 Ratio (Trend Strength) - DISCOVERED ALPHA
+    Mean Reversion / Short Swing System
+    - Extreme Oversold: RSI(2) < 10 & Close < BB -2σ
+    - Long-term Trend: Close > SMA100
+    - Fast Exits: max_hold_days (Default 4), tight SL/TP
     """
     T = len(timeline)
     cash = float(initial_cash)
     portfolio = []
     trade_count = 0
     monthly_assets = {}
-    trade_results = [] # [V17.5] Detailed Trade Tracker
+    trade_results = []
     
     close_np = bundle_np['Close']
     open_np, high_np, low_np = bundle_np['Open'], bundle_np['High'], bundle_np['Low']
@@ -25,8 +25,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     sma20_np = bundle_np['SMA20']
     sma100_np = bundle_np['SMA100']
     atr_np = bundle_np['ATR']
+    rsi2_np = bundle_np['RSI2']
+    bb_lower_2_np = bundle_np['BB_LOWER_2']
     
-    # [V17.2 Enhancement] Pre-locate 1321.T (Global Market Proxy)
     idx_1321 = bundle_np['tickers'].index('1321.T') if '1321.T' in bundle_np['tickers'] else None
     
     for i in range(100, T):
@@ -44,28 +45,20 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             tidx = p['s_idx']
             today_open, today_high, today_low = open_np[i, tidx], high_np[i, tidx], low_np[i, tidx]
             
-            # --- NaN Check: Skip if data is missing (trading suspension) ---
+            # --- NaN Check ---
             if np.isnan(today_open) or np.isnan(today_high) or np.isnan(today_low):
                 p['held_days'] += 1
                 new_portfolio.append(p)
                 continue
             
-            p['sl_price'] = max(p['sl_price'], today_high - (p['entry_atr'] * sl_mult))
-            
-            # --- [V18.1] Break-even Stop (5ATR Profit = 0.2% protection) ---
-            if today_high >= p['buy_price'] + (p['entry_atr'] * 5.0):
-                p['sl_price'] = max(p['sl_price'], p['buy_price'] * 1.002)
-            
-            # --- [V17.3] SMA20 Breach Exit (Execution) ---
             exit_p = None
-            if use_sma_exit and p.get('exit_next_open', False):
+            if p.get('exit_next_open', False):
                 exit_p = today_open
             
             if exit_p is None:
                 if today_open <= p['sl_price']: exit_p = today_open
                 elif today_low <= p['sl_price']: exit_p = p['sl_price']
                 elif today_high >= p['tp_price']: exit_p = p['tp_price']
-                elif p['held_days'] >= 60: exit_p = today_open
             
             if exit_p is not None:
                 real_exit = exit_p * (1.0 - slippage)
@@ -75,18 +68,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 trade_count += 1
             else:
                 p['held_days'] += 1
-                # --- [V17.3] SMA20 Breach Detection (Next-Day Exit Trigger) ---
-                if use_sma_exit:
-                    today_close = close_np[i, tidx]
-                    today_sma20 = sma20_np[i, tidx]
-                    if not np.isnan(today_close) and today_close < today_sma20 * exit_buffer:
-                        p['exit_next_open'] = True
                 
-                # --- [V18.1] Time Stop (Stagnation Exit) ---
-                if p['held_days'] >= 20:
-                    today_close = close_np[i, tidx]
-                    if not np.isnan(today_close) and today_close <= p['buy_price']:
-                        p['exit_next_open'] = True
+                # --- Time Stop Exit ---
+                if p['held_days'] >= max_hold_days:
+                    p['exit_next_open'] = True
                         
                 new_portfolio.append(p)
         portfolio, cash = new_portfolio, float(cash + pending_cash)
@@ -96,44 +81,33 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         br = breadth_ratio[i]
         if br < breadth_threshold: continue
         
-        # --- [V21 Dynamic Leverage Sync] ---
-        # Breadthに応じたリアルタイム・レバレッジ決定
-        current_leverage = 1.0 # Default (防衛)
-        if br >= 0.50: current_leverage = 3.0
-        elif br >= 0.40: current_leverage = 2.0
-        elif br >= 0.30: current_leverage = 1.0
+        current_leverage = leverage_rate
         
-        # [V17.2 Enhancement] Global Market SMA100 Filter (Nikkei 225 Check)
         if idx_1321 is not None:
              if close_np[i, idx_1321] < sma100_np[i, idx_1321]:
                   continue
         
         if len(portfolio) < max_pos:
-            # --- Update total equity and exposure for buying power calculation ---
             held_value = sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
             total_equity = cash + held_value
             buying_power = (total_equity * current_leverage) - held_value
             
-            c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
+            c_u = close_np[i, univ_indices]
+            s100_u = sma100_np[i, univ_indices]
+            rsi2_u = rsi2_np[i, univ_indices]
+            bb_lower_2_u = bb_lower_2_np[i, univ_indices]
             
-            # The V16.2 Winner Logic -> V17.2 Reversal Confirmation
-            is_perfect = (s5_u > s20_u) & (s20_u > s100_u)
-            is_pullback = (c_u < s20_u * 1.04) & (c_u > s20_u * 0.96) 
+            # Reversion Entry Rules
+            is_long_uptrend = (c_u > s100_u)
+            is_panic_sold = (rsi2_u < 10) & (c_u < bb_lower_2_u)
             
-            # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
-            h_u, l_u = high_np[i, univ_indices], low_np[i, univ_indices]
-            is_strong_close = (c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5
-            
-            # [V18.1 Sync] Reversal Confirmation & Strong Close
-            is_reversal = ((c_u > close_np[i-1, univ_indices]) | (c_u > open_np[i, univ_indices])) & is_strong_close
-            
-            valid_mask = is_perfect & is_pullback & is_reversal
+            valid_mask = is_long_uptrend & is_panic_sold
             valid_idx = univ_indices[valid_mask]
             
             if len(valid_idx) > 0:
-                # ALPHA SORT: SMA5 / SMA100 Ratio (Trend Momentum)
-                strength = s5_u[valid_mask] / s100_u[valid_mask]
-                sorted_idx = valid_idx[np.argsort(strength)][::-1]
+                # Prioritize strictly by lowest RSI2
+                rsi_vals = rsi2_u[valid_mask]
+                sorted_idx = valid_idx[np.argsort(rsi_vals)]
                 
                 for s_idx in sorted_idx:
                     if len(portfolio) >= max_pos: break
@@ -144,10 +118,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         entry_p = buy_v * (1.0 + slippage)
                         entry_atr = max(1.0, np.nan_to_num(atr_np[i, s_idx]))
                         
-                        # --- 複利・動的レバレッジによる株数算出 (V21 Sync) ---
-                        # 1銘柄割当額 = (総資産 * 当日のレバレッジ) / 最大保持数
                         allocation = (total_equity * current_leverage) / max_pos
-                        # 実際の購入可能上限 = 購買力の残りと割当額の小さい方
                         actual_ma = min(allocation, buying_power)
                         
                         sh = (int(actual_ma / entry_p) // 100) * 100
@@ -160,10 +131,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 "tp_price": entry_p + (entry_atr * tp_mult)
                             })
                             cash -= entry_p * sh
-                            buying_power -= entry_p * sh # 購入に伴い購買力も減少
-                        else:
-                            if verbose:
-                                print(f"⏭️ [BT Skip] {bundle_np['tickers'][s_idx]} skipped: Low budget or < 100 shares.")
+                            buying_power -= entry_p * sh
 
     final = cash + sum(np.nan_to_num(close_np[-1, p['s_idx']]) * p['shares'] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results

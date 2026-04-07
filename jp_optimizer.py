@@ -14,7 +14,7 @@ from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # --- [Overdrive Mode] Leverage 3.0x forced for peak alpha discovery ---
+    # --- Short Swing Mode ---
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -24,9 +24,9 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # ★OVERDRIVE: 信用レバレッジ3倍を固定適用
+        leverage_rate=2.0, # Defaulting to robust leverage setting
         breadth_threshold=p['breadth'],
-        exit_buffer=p.get('exit_buffer', 0.985)
+        max_hold_days=p['max_hold_days']
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -66,25 +66,25 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [Overdrive Mode] Physics-Defying Alpha Sync ---
+    # --- Mean Reversion Short Swing Grid ---
     grid = []
     
-    breadth_range      = [0.2, 0.3]          # 地合い判定を極限まで緩和
-    sl_range           = [6.0, 8.0, 10.0]    # ノイズを完全に無視する超広域ストップ
-    tp_range           = [20.0, 30.0, 40.0]  # テンバガーを狙う超巨大利確
-    max_pos_range      = [3, 5, 7]           # 物理限界までの集中投資
-    exit_buffer_range  = [0.985]             # 計算効率のため固定
+    breadth_range      = [0.2, 0.3, 0.4]         # 地合い判定
+    sl_range           = [1.0, 1.5, 2.0]         # 浅い損切り
+    tp_range           = [2.0, 3.0, 4.0]         # 早めの利確
+    max_pos_range      = [5, 7, 10]              # 高回転のための分散
+    max_hold_days_range = [3, 4, 5]              # 短期保有
 
     for b in breadth_range:           
         for sl in sl_range:          
             for tp in tp_range: 
                 for p_size in max_pos_range:          
-                    for eb in exit_buffer_range: 
+                    for mhd in max_hold_days_range: 
                         grid.append({
-                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
+                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "max_hold_days": mhd
                         })
     
-    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x)...")
+    print(f"🚀 [SHORT_SWING_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 2.0x)...")
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -100,17 +100,18 @@ def optimize_jp_imperial(cache_path):
     df_res = df_res.sort_values('return_pct', ascending=False)
     
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE Overdrive - [PHYSICS BREAKER] RESULTS")
+    print("🏆 SHORT SWING (MEAN REVERSION) RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
     best = df_res.iloc[0]
-    print(f"🥇 BEST OVERDRIVE CONFIGURATION (LEVERAGE 3.0x):")
+    print(f"🥇 BEST SHORT SWING CONFIGURATION:")
     print(f" - Max Positions:     {best['max_pos']:.0f}")
     print(f" - Breadth Threshold: {best['breadth']:.2f}")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
+    print(f" - Max Hold Days:     {best['max_hold_days']:.0f}")
     print(f"📈 Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
     print("="*80)
 

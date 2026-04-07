@@ -146,6 +146,20 @@ def calculate_all_technicals_v12(data_df):
     bundle['SMA20'] = close.rolling(20).mean()
     bundle['SMA100'] = close.rolling(100).mean()
     
+    # --- New indicators for Mean Reversion ---
+    # Bollinger Bands (20, -2σ)
+    rolling_std_20 = close.rolling(20).std()
+    bundle['BB_LOWER_2'] = bundle['SMA20'] - (2 * rolling_std_20)
+    
+    # RSI (2)
+    delta = close.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ma_up = up.rolling(2).mean()
+    ma_down = down.rolling(2).mean()
+    rs_rsi = ma_up / ma_down
+    bundle['RSI2'] = 100 - (100 / (1 + rs_rsi))
+    
     # ATR (20) Vectorized
     prev_close = close.shift(1)
     tr1 = high - low
