@@ -24,9 +24,9 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # ★Fixed 3.0x leverage
+        leverage_rate=3.0, # ★Fixed 3.0x leverage for optimized search
         breadth_threshold=p['breadth'],
-        exit_buffer=p.get('exit_buffer', 0.985)
+        exit_buffer=0.985
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -70,25 +70,23 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [V25.0] Optimized Search Grid ---
+    # --- [V27.0] THE HOLY GRAIL Optimized Search Grid ---
     grid = []
     
-    breadth_range      = [0.30]        
-    sl_range           = [8.0, 10.0, 12.0]   # As requested for V21/V25 peak performance
-    tp_range           = [20.0, 30.0, 40.0]  # As requested for V21/V25 peak performance
-    max_pos_range      = [5, 7]              # As requested for V21/V25 peak performance
-    exit_buffer_range  = [0.985]             
+    breadth_range      = [0.20, 0.30]        
+    sl_range           = [6.0, 8.0, 10.0]  
+    tp_range           = [20.0, 30.0, 40.0]  
+    max_pos_range      = [7, 10, 15]              
 
     for b in breadth_range:           
         for sl in sl_range:          
             for tp in tp_range: 
                 for p_size in max_pos_range:          
-                    for eb in exit_buffer_range: 
-                        grid.append({
-                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
-                        })
+                    grid.append({
+                        "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size
+                    })
     
-    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x Fixed)...")
+    print(f"🚀 [V27.0_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x Fixed)...")
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -99,19 +97,17 @@ def optimize_jp_imperial(cache_path):
     
     df_res = pd.DataFrame(results)
     df_res['return_pct'] = (df_res['final'] / INITIAL_CASH - 1) * 100
-    
-    # Sort by performance
     df_res = df_res.sort_values('return_pct', ascending=False)
     
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE V25.0 Optimizer - [V21 REBORN] RESULTS")
+    print("🏆 IMPERIAL ORACLE V27.0 - [THE HOLY GRAIL] RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
     if not df_res.empty:
         best = df_res.iloc[0]
-        print(f"🥇 BEST CONFIGURATION (Leverage 3.0x Fixed):")
+        print(f"🥇 BEST CONFIGURATION:")
         print(f" - Max Positions:     {best['max_pos']:.0f}")
         print(f" - Breadth Threshold: {best['breadth']:.2f}")
         print(f" - Stop Loss:         ATR * {best['sl']}")
