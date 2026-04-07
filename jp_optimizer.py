@@ -99,6 +99,9 @@ def optimize_jp_imperial(cache_path):
     # Sort by performance
     df_res = df_res.sort_values('return_pct', ascending=False)
     
+    # Save to CSV for reliability
+    df_res.to_csv("opt_results.csv", index=False)
+    
     print("\n" + "="*80)
     print("🏆 SHORT SWING (MEAN REVERSION) RESULTS")
     print("="*80)

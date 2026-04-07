@@ -80,12 +80,12 @@ def run_jp_broad_backtest(cache_path):
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
         max_pos=7,
-        sl_mult=1.5,
-        tp_mult=3.0,
+        sl_mult=2.0,
+        tp_mult=2.0,
         leverage_rate=2.0,
-        breadth_threshold=0.3,
+        breadth_threshold=0.4,
         slippage=0.001,
-        max_hold_days=4,
+        max_hold_days=5,
         use_sma_exit=False,
         verbose=False
     )
