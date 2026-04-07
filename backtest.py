@@ -7,12 +7,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                  slippage=0.001, use_sma_exit=True, exit_buffer=0.94, 
                                  verbose=False):
     """
-    V29.0 [The Absolute Apex] - Ultimate Trend-Follower
-    - Corrected Buffer: 0.94 (SMA20 Exit) to prevent self-whipsaw
+    V30.0 [The Real V21 Clone] - Perfect Restoration
+    - [RESTORED V21] Full Reversal Confirmation & Strong Close Filter
+    - [RESTORED V21] Tight Pullback Range: 0.96 - 1.04
+    - Corrected Buffer: 0.94 (SMA20 Exit)
     - [RESTORED] Dynamic Leverage (All-Weather defense): 1x, 2x, 3x based on Breadth
-    - Reverted to RS Formula: SMA5 / SMA20
-    - Reverted to High-based Trailing Stop
-    - Normalized Cash/Inventory Calculation
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -110,8 +109,18 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         # [RESTORED] Short-term momentum relative strength
         rs_u = s5_u / s20_u * 100 
         
-        # Pure Perfect Order Pullback
-        mask = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95)
+        # [RESTORED V21] Pure Perfect Order + Tight Pullback + Reversal Confirmation
+        is_perfect = (s5_u > s20_u) & (s20_u > s100_u)
+        is_pullback = (c_u < s20_u * 1.04) & (c_u > s20_u * 0.96)
+        
+        h_u, l_u = high_np[i, univ_indices], low_np[i, univ_indices]
+        o_u = open_np[i, univ_indices]
+        prev_c_u = close_np[i-1, univ_indices]
+        
+        is_strong_close = (c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5
+        is_reversal = ((c_u > prev_c_u) | (c_u > o_u)) & is_strong_close
+        
+        mask = is_perfect & is_pullback & is_reversal
         
         if mask.any():
             candidates = sorted([(rs_u[idx], univ_indices[idx]) for idx, m in enumerate(mask) if m], 

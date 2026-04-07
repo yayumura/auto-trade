@@ -14,7 +14,7 @@ from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # V28.0 [Back to Basics] Optimization
+    # V30.0 [The Real V21 Clone] Optimization
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -35,7 +35,7 @@ def optimize_jp_imperial(cache_path):
         print(f"Error: Cache not found at {cache_path}")
         return
 
-    print(f"📡 Loading JP Mega-Data Cache for V28 [Back to Basics]: {cache_path}")
+    print(f"📡 Loading JP Mega-Data Cache for V30 [The Real V21 Clone]: {cache_path}")
     with open(cache_path, 'rb') as f:
         all_data = pickle.load(f)
 
@@ -70,7 +70,7 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- V28.0 [Back to Basics] Grid Search ---
+    # --- V30.0 [The Real V21 Clone] Grid Search ---
     grid = []
     
     breadth_range      = [0.25, 0.30, 0.35]        
@@ -86,7 +86,7 @@ def optimize_jp_imperial(cache_path):
                         "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size
                     })
     
-    print(f"🚀 [V29.0_OPT] Starting Grid Search ({len(grid)} combinations, Dynamic Leverage 1-3x)...")
+    print(f"🚀 [V30.0_OPT] Starting Grid Search ({len(grid)} combinations, Dynamic Leverage 1-3x)...")
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -100,7 +100,7 @@ def optimize_jp_imperial(cache_path):
     df_res = df_res.sort_values('return_pct', ascending=False)
     
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE V28.0 - [Back to Basics] RESULTS")
+    print("🏆 IMPERIAL ORACLE V30.0 - [The Real V21 Clone] RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")

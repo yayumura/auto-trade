@@ -142,6 +142,8 @@ def calculate_all_technicals_v12(data_df):
     tr = pd.DataFrame(np.maximum(np.maximum(tr1.values, tr2.values), tr3.values), index=close.index, columns=close.columns)
     bundle['ATR'] = tr.rolling(20).mean()
     bundle['RS'] = (bundle['SMA5'] / bundle['SMA20'] * 100).fillna(0)
+    bundle['High'] = high
+    bundle['Low'] = low
     bundle['Open'] = data_df.xs('Open', axis=1, level=1)
     
     # 60-day Return (Vectorized)
@@ -163,8 +165,8 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
     """
-    V29.0 The Absolute Apex Selection:
-    - Pure LONG + Pullback (V21)
+    V30.0 [The Real V21 Clone] Selection:
+    - [RESTORED V21] Pullback (0.96-1.04) + Reversal + Strong Close
     - Dynamic Leverage: 1x to 3x based on Breadth
     """
     if breadth < 0.30: return []
@@ -177,6 +179,9 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
     atr = bundle['ATR'].iloc[-1]
     rs_raw = bundle['RS'].iloc[-1]
     ret60 = bundle['Ret60'].iloc[-1]
+    
+    # [RESTORED V21] Previous close for reversal check
+    prev_close = bundle['Close'].iloc[-2]
     
     alpha_threshold = 0
     if '1321.T' in ret60.index:
@@ -195,16 +200,27 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
             match = symbols_df[symbols_df['コード'].astype(str) == code_only]
             if not match.empty: name = match.iloc[0]['銘柄名']
 
-        # LONG (Pullback) - V21 logic
+        # [RESTORED V21] Pure Perfect Order + Tight Pullback + Reversal Confirmation
         if (s5 > s20 > s100):
-            if s20 * 0.95 <= p <= s20 * 1.05:
-                # Alpha filter (Relative Strength > Nikkei)
-                if ret60[t_with_t] > alpha_threshold:
-                    candidates.append({
-                        "code": code_only, "name": name, "price": p,
-                        "atr": atr[t_with_t], "rs": rs_raw[t_with_t],
-                        "direction": "LONG"
-                    })
+            # 1. Pullback Check (0.96-1.04)
+            if s20 * 0.96 <= p <= s20 * 1.04:
+                # 2. Strong Close & Reversal Check
+                today_h = bundle['High'].iloc[-1][t_with_t]
+                today_l = bundle['Low'].iloc[-1][t_with_t]
+                today_o = bundle['Open'].iloc[-1][t_with_t]
+                prev_c  = prev_close[t_with_t]
+                
+                is_strong = (p - today_l) / (today_h - today_l + 1e-9) >= 0.5
+                is_reversal = ((p > prev_c) or (p > today_o)) and is_strong
+                
+                if is_reversal:
+                    # Alpha filter (Relative Strength > Nikkei)
+                    if ret60[t_with_t] > alpha_threshold:
+                        candidates.append({
+                            "code": code_only, "name": name, "price": p,
+                            "atr": atr[t_with_t], "rs": rs_raw[t_with_t],
+                            "direction": "LONG"
+                        })
 
     return sorted(candidates, key=lambda x: x['rs'], reverse=True)[:MAX_POSITIONS]
 
