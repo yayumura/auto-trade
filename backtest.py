@@ -69,8 +69,19 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             else:
                 p['held_days'] += 1
                 
-                # --- Time Stop Exit ---
-                if p['held_days'] >= max_hold_days:
+                # --- 動的利確判定 (Dynamic Reversion Exit) ---
+                today_close = close_np[i, tidx]
+                today_sma5 = sma5_np[i, tidx]
+                today_rsi2 = rsi2_np[i, tidx]
+                
+                # 平均回帰（SMA5上抜け）または過熱（RSI2 > 70）で翌日決済
+                is_reverted = (not np.isnan(today_close) and today_close > today_sma5)
+                is_overbought = (not np.isnan(today_rsi2) and today_rsi2 > 70)
+                
+                if is_reverted or is_overbought:
+                    p['exit_next_open'] = True
+                # --- 既存のタイムストップ処理 ---
+                elif p['held_days'] >= max_hold_days:
                     p['exit_next_open'] = True
                         
                 new_portfolio.append(p)
