@@ -10,7 +10,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     V25.0 Pure Trend-Follow Backtest:
     - Pure LONG-only momentum
     - Dynamic Leverage based on Market Breadth
-    - Reverted to V21 Perfect Order (Removed ret60 alpha filter)
+    - Pure V21 Perfect Order Pullback Logic (No RS Alpha Filter)
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -49,7 +49,6 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             today_open = open_np[i, tidx]
             today_high = high_np[i, tidx]
             today_low = low_np[i, tidx]
-            atr = atr_np[i, tidx]
             
             if np.isnan(today_open):
                 p['held_days'] += 1
@@ -65,14 +64,19 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             exit_p = None
             exit_reason = ""
             
-            if use_sma_exit and p.get('exit_next_open', False):
-                exit_p, exit_reason = today_open, "SMA20 Breach / Stagnation"
+            # Time Stop (60d)
+            if p['held_days'] >= 60:
+                exit_p, exit_reason = today_open, "Time Stop (60d)"
             
+            # Technical Exit (SMA20 Breach)
+            if exit_p is None and use_sma_exit and p.get('exit_next_open', False):
+                exit_p, exit_reason = today_open, "SMA20 Breach"
+            
+            # Risk Stops (SL/TP)
             if exit_p is None:
                 if today_open <= p['sl_price']: exit_p, exit_reason = today_open, "SL (Gap)"
                 elif today_low <= p['sl_price']: exit_p, exit_reason = p['sl_price'], "SL"
                 elif today_high >= p['tp_price']: exit_p, exit_reason = p['tp_price'], "TP"
-                elif p['held_days'] >= 60: exit_p, exit_reason = today_open, "Time Stop (60d)"
             
             if exit_p is not None:
                 real_exit = exit_p * (1.0 - slippage)
@@ -112,12 +116,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if len(portfolio) >= max_pos: continue
         
         c_u, s5_u, s20_u, s100_u = close_np[i, univ_indices], sma5_np[i, univ_indices], sma20_np[i, univ_indices], sma100_np[i, univ_indices]
-        atr_u, rs_u = atr_np[i, univ_indices], (s5_u/s100_u*100)
+        atr_u, rs_u = atr_np[i, univ_indices], (s5_u/s20_u*100) # Using relative strength over medium term
         
-        # [V25.0] Pure Perfect Order Pullback
+        # [V21] Pure Perfect Order Pullback (Reverted)
         mask = (s5_u > s20_u) & (s20_u > s100_u) & (c_u < s20_u * 1.05) & (c_u > s20_u * 0.95)
         
         if mask.any():
+            # Sort by Relative Strength (SMA5/SMA20 ratio)
             candidates = sorted([(rs_u[idx], univ_indices[idx]) for idx, m in enumerate(mask) if m], 
                                 key=lambda x: x[0], reverse=True)[:5]
             
@@ -128,7 +133,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 buy_v = open_np[i+1, s_idx]
                 if not np.isnan(buy_v) and buy_v > 0:
                     entry_p = buy_v * (1.0 + slippage)
-                    # [V25.0] Equal Weight Sizing (Equity * Leverage / MaxPos)
+                    # Sizing based on Dynamic Leverage
                     sh = ((total_equity * curr_lev / max_pos) / entry_p // 100) * 100
                     
                     if sh >= 100:
@@ -141,5 +146,4 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         })
 
     final_equity = cash + sum((np.nan_to_num(close_np[-1, p['s_idx']]) - p['buy_price']) * p['shares'] for p in portfolio)
-    # Changed return to include raw trade_ledger
     return float(final_equity), trade_count, monthly_assets, trade_ledger

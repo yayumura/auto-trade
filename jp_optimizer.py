@@ -14,7 +14,7 @@ from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # --- [Overdrive Mode] Leverage 3.0x forced for peak alpha discovery ---
+    # --- [Overdrive Mode] Fixed 3.0x Leverage for Peak Alpha Discovery ---
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -24,22 +24,26 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # ★OVERDRIVE: 信用レバレッジ3倍を固定適用
+        leverage_rate=3.0, # ★Fixed 3.0x leverage
         breadth_threshold=p['breadth'],
         exit_buffer=p.get('exit_buffer', 0.985)
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
 def optimize_jp_imperial(cache_path):
+    if not os.path.exists(cache_path):
+        print(f"Error: Cache not found at {cache_path}")
+        return
+
     print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
     with open(cache_path, 'rb') as f:
         all_data = pickle.load(f)
 
+    # Data Normalization
     new_cols = []
     for col in all_data.columns:
         ticker, field = col[0], col[1]
-        if isinstance(field, tuple):
-            field = field[0]
+        if isinstance(field, tuple): field = field[0]
         new_cols.append((ticker, field))
     all_data.columns = pd.MultiIndex.from_tuples(new_cols)
 
@@ -66,13 +70,13 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [V25.0] Peak Alpha Selection Optimization ---
+    # --- [V25.0] Optimized Search Grid ---
     grid = []
     
     breadth_range      = [0.30]        
-    sl_range           = [8.0, 10.0, 12.0]   
-    tp_range           = [20.0, 30.0, 40.0]  
-    max_pos_range      = [5, 7]                
+    sl_range           = [8.0, 10.0, 12.0]   # As requested for V21/V25 peak performance
+    tp_range           = [20.0, 30.0, 40.0]  # As requested for V21/V25 peak performance
+    max_pos_range      = [5, 7]              # As requested for V21/V25 peak performance
     exit_buffer_range  = [0.985]             
 
     for b in breadth_range:           
@@ -84,7 +88,7 @@ def optimize_jp_imperial(cache_path):
                             "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
                         })
     
-    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x)...")
+    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x Fixed)...")
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -100,23 +104,24 @@ def optimize_jp_imperial(cache_path):
     df_res = df_res.sort_values('return_pct', ascending=False)
     
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE Overdrive - [PHYSICS BREAKER] RESULTS")
+    print("🏆 IMPERIAL ORACLE V25.0 Optimizer - [V21 REBORN] RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
-    best = df_res.iloc[0]
-    print(f"🥇 BEST OVERDRIVE CONFIGURATION (LEVERAGE 3.0x):")
-    print(f" - Max Positions:     {best['max_pos']:.0f}")
-    print(f" - Breadth Threshold: {best['breadth']:.2f}")
-    print(f" - Stop Loss:         ATR * {best['sl']}")
-    print(f" - Profit Target:     ATR * {best['tp']}")
-    print(f"📈 Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
-    print("="*80)
+    if not df_res.empty:
+        best = df_res.iloc[0]
+        print(f"🥇 BEST CONFIGURATION (Leverage 3.0x Fixed):")
+        print(f" - Max Positions:     {best['max_pos']:.0f}")
+        print(f" - Breadth Threshold: {best['breadth']:.2f}")
+        print(f" - Stop Loss:         ATR * {best['sl']}")
+        print(f" - Profit Target:     ATR * {best['tp']}")
+        print(f"📈 Performance:       {best['return_pct']:+.2f}% ({best['trades']} trades)")
+        print("="*80)
 
 if __name__ == "__main__":
     if not os.path.exists("data_cache"):
-        print("❌ Error: Please run from the project root directory.")
+        print("❌ Error: Please run from the project root directory (auto-trade/).")
         sys.exit(1)
         
     optimize_jp_imperial("data_cache/jp_broad/jp_mega_cache.pkl")

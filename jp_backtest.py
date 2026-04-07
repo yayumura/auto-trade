@@ -125,6 +125,8 @@ def run_jp_broad_backtest(cache_path):
         ledger_path = "data/simulation/trade_ledger.csv"
         ledger_df.to_csv(ledger_path, index=False, encoding="utf-8-sig")
         print(f"📊 Trade Ledger saved to: {ledger_path}")
+    else:
+        print("⚠️ No trades occurred, ledger not saved.")
 
     print("=" * 50 + "\n")
 
