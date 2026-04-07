@@ -21,29 +21,25 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
     
     for p in portfolio:
         code = str(p['code'])
-        # V27.0 is LONG only
-        direction = 'LONG'
         
         # 1. Price Acquisition
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
+            today_high = realtime_buffers[code].get_day_high() 
         else:
             current_price = float(p.get('current_price', p['buy_price']))
+            today_high = current_price # Fallback
             
         buy_price = float(p['buy_price'])
         atr = float(p.get('buy_atr', 0))
         
-        # 2. Stop Loss / Trailing Stop
+        # 2. Stop Loss / Trailing Stop (V21: Trail from High)
         sl_mult = ATR_STOP_LOSS
         tp_mult = TARGET_PROFIT_MULT
         sl_price = float(p.get('sl_price', 0))
         
-        # [V27.0 Fix] Trailing stop update
-        sl_price = max(sl_price, current_price - (atr * sl_mult))
-        
-        # 3*ATR Protection
-        if current_price >= buy_price + (atr * 3.0):
-            sl_price = max(sl_price, buy_price * 1.001)
+        # [RESTORED] Trailing stop update from High
+        sl_price = max(sl_price, today_high - (atr * sl_mult))
             
         p['sl_price'] = sl_price
         target_price = buy_price + (atr * tp_mult)
@@ -144,7 +140,7 @@ def calculate_all_technicals_v12(data_df):
     tr3 = (low - prev_close).abs()
     tr = pd.DataFrame(np.maximum(np.maximum(tr1.values, tr2.values), tr3.values), index=close.index, columns=close.columns)
     bundle['ATR'] = tr.rolling(20).mean()
-    bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
+    bundle['RS'] = (bundle['SMA5'] / bundle['SMA20'] * 100).fillna(0)
     bundle['Open'] = data_df.xs('Open', axis=1, level=1)
     
     # 60-day Return (Vectorized)
@@ -166,12 +162,11 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
     """
-    V27.0 Holy Grail Selection:
-    - Pure LONG Strategy
-    - Market Breadth check (br >= 0.20 needed)
-    - [Fix] Relative Strength uses SMA5 / SMA100
+    V28.0 [Back to Basics] Selection:
+    - Pure LONG + Pullback (V21)
+    - Breadth Threshold: 0.30
     """
-    if breadth < 0.20: return []
+    if breadth < 0.30: return []
     
     bundle = calculate_all_technicals_v12(data_df)
     close = bundle['Close'].iloc[-1]
@@ -212,22 +207,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth=0.5):
 
     return sorted(candidates, key=lambda x: x['rs'], reverse=True)[:MAX_POSITIONS]
 
-def calculate_position_size(total_equity, entry_price, atr, breadth=0.5, max_pos=10):
+def calculate_position_size(total_equity, entry_price, atr, leverage=3.0, max_pos=7):
     """
-    V27.0 Holy Grail Sizing:
-    Dynamic Leverage based on Market Breadth (br >= 0.5->3x, 0.4->2x, 0.2->1x)
+    V21 (V28.0) Sizing: Fixed leverage based on configuration.
     """
     if entry_price <= 0: return 0
-    
-    # 資金管理: 動的レバレッジ適用
-    lev = 0.0
-    if breadth >= 0.50: lev = 3.0
-    elif breadth >= 0.40: lev = 2.0
-    elif breadth >= 0.20: lev = 1.0
-    
-    if lev <= 0: return 0
-    
-    allocation_yen = (total_equity * lev) / max_pos
+    allocation_yen = (total_equity * leverage) / max_pos
     shares = allocation_yen / entry_price
     return (int(shares) // 100) * 100
 
