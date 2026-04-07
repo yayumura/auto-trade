@@ -104,6 +104,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             buying_power = (total_equity * current_leverage) - held_value
             
             c_u = close_np[i, univ_indices]
+            o_u = open_np[i, univ_indices]
+            h_u = high_np[i, univ_indices]
+            l_u = low_np[i, univ_indices]
             s100_u = sma100_np[i, univ_indices]
             rsi2_u = rsi2_np[i, univ_indices]
             bb_lower_2_u = bb_lower_2_np[i, univ_indices]
@@ -112,7 +115,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             is_long_uptrend = (c_u > s100_u)
             is_panic_sold = (rsi2_u < 10) & (c_u < bb_lower_2_u)
             
-            valid_mask = is_long_uptrend & is_panic_sold
+            # --- V18.1 追加: スナイパー・エントリー（日中反発サイン） ---
+            # 条件1: 終値が当日の変動幅（高値 - 安値）の半分より上で引けている（長い下ヒゲ、反発の証拠）
+            is_rebound = (c_u - l_u) / (h_u - l_u + 1e-9) >= 0.5
+            # 条件2: 陽線（終値 > 始値）
+            is_white_candle = (c_u > o_u)
+            
+            # どちらかの反発サインが出ていること
+            is_strong_close = is_rebound | is_white_candle
+            
+            valid_mask = is_long_uptrend & is_panic_sold & is_strong_close
             valid_idx = univ_indices[valid_mask]
             
             if len(valid_idx) > 0:

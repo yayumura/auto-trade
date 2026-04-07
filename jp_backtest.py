@@ -72,17 +72,17 @@ def run_jp_broad_backtest(cache_path):
     # RUN BACKTEST (V17.0 IMPERIAL ORACLE SYNC)
     from backtest import run_backtest_v16_production
     
-    print("\n🚀 Starting Japan IMPERIAL ORACLE Backtest (Short Swing Sync)...")
+    print("\n🚀 Starting Japan IMPERIAL ORACLE Backtest (Aggressive Short Swing Sync)...")
     final_assets, trade_count, monthly_assets, trade_results = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
         timeline=timeline,
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
-        max_pos=7,
+        max_pos=5,
         sl_mult=2.0,
-        tp_mult=2.0,
-        leverage_rate=2.0,
+        tp_mult=3.0,
+        leverage_rate=3.0,
         breadth_threshold=0.4,
         slippage=0.001,
         max_hold_days=5,
