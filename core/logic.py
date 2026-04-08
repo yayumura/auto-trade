@@ -10,115 +10,92 @@ from core.config import (
     SMA20_EXIT_BUFFER
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None, month_drawdown=0.0, is_trend_snapped=False):
     """
-    V17.0 Imperial Position Manager:
-    - Returns: [portfolio, sell_actions]
+    V131.1 Aegis Sovereign Position Manager:
+    - Dynamic Risk Shield: Adjusts ATR multiplier based on monthly performance.
+    - RSI Profit Take: Exits when mean reversion is complete.
     """
-    sl_mult = ATR_STOP_LOSS
-    tp_mult = TARGET_PROFIT_MULT
-    
     remaining = []
     sell_actions = []
     
+    # --- Aegis Sovereign Protocol: Dynamic ATR Shield ---
+    # Drawdown-based risk escalation (Aegis Shield)
+    atr_mult = 1.5
+    if month_drawdown <= -0.05: atr_mult = 1.0
+    if month_drawdown <= -0.10: atr_mult = 0.5
+    if regime != "BULL": atr_mult = 1.0 # Tighten during non-bull regimes
+
+    # RSI Exit Threshold
+    # If index trend is snapped, we exit much faster (RSI > 55)
+    exit_threshold = 85 if not is_trend_snapped else 55
+    if regime != "BULL": exit_threshold = 60
+
     for p in portfolio:
         code = str(p['code'])
         # 1. 価格取得
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
+            # RSI2 is needed for exit
+            rsi2 = realtime_buffers[code].get_current_rsi2() if hasattr(realtime_buffers[code], 'get_current_rsi2') else 50
         else:
             current_price = float(p.get('current_price', p['buy_price']))
+            rsi2 = 50 # Fallback
             
         buy_price = float(p['buy_price'])
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 2. 逆指値 (Stop Loss) 計算
-        initial_stop = buy_price - (atr * sl_mult)
+        # 2. 逆指値 (Stop Loss) 計算: Dynamic Trailing Stop
+        initial_stop = buy_price - (atr * atr_mult)
         
         # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
         if highest_price >= buy_price + (atr * 5.0):
             initial_stop = max(initial_stop, buy_price * 1.002)
             
         if ATR_TRAIL and highest_price > 0:
-            stop_price = max(initial_stop, highest_price - (atr * sl_mult))
+            stop_price = max(initial_stop, highest_price - (atr * atr_mult))
         else:
             stop_price = initial_stop
             
-        # 3. 利確 (Profit Target) 計算
-        target_price = buy_price + (atr * tp_mult)
-        
-        # 4. タイムリミット (保有10日以上で停滞判定、60日以上で強制決済)
+        # 3. タイムリミット (Aegis Standard: 60日強制決済)
         is_timeout = False
-        is_stagnated = False
         buy_time_str = p.get('buy_time')
         if buy_time_str:
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
-                days_held = (dt.now() - buy_dt).days
+                days_held = (dt.now().replace(tzinfo=None) - buy_dt.replace(tzinfo=None)).days
                 if days_held >= 60:
                     is_timeout = True
-                elif days_held >= 20 and current_price <= buy_price:
-                    is_stagnated = True
             except: pass
         
-        # 5. 窓開け暴落（ギャップダウン）対応 (シミュレーション用)
-        # 始値がストップロスを既に下回っている場合、始値で決済
-        is_gap_down = False
-        exit_price = current_price
-        
-        if is_simulation and today_ohlc and code in today_ohlc:
-            o_price = today_ohlc[code].get('Open', 0)
-            if o_price > 0 and o_price <= stop_price:
-                is_gap_down = True
-                exit_price = o_price
-        
-        # 6. Technical Exit: SMA20割れ判定
+        # 4. Technical Exit: SMA20割れ判定 (Optional, secondary to RSI)
         is_sma_breach = False
         if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
             if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER:
                 is_sma_breach = True
 
-        # 7. 売却判定
-        if is_gap_down:
-            sell_actions.append(f"SELL {code} - Gap Down Stop Loss Triggered (@{exit_price:,.1f})")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
-        elif is_sma_breach:
-            sell_actions.append(f"SELL {code} - SMA20 Breach Triggered (@{current_price:,.1f})")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
-        elif current_price <= stop_price:
-            reason = "Stop Loss" if stop_price < buy_price else "Break-even Stop"
-            sell_actions.append(f"SELL {code} - {reason} Triggered (@{current_price:,.1f})")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
-        elif is_stagnated:
-            sell_actions.append(f"SELL {code} - Time Stop (Stagnation) (@{current_price:,.1f})")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
+        # 5. 売却判定
+        exit_reason = None
+        if current_price <= stop_price:
+            exit_reason = "Stop Loss (Aegis Shield)" if stop_price < buy_price else "Break-even Stop"
+        elif rsi2 > exit_threshold:
+            exit_reason = f"RSI Profit Target ({rsi2:.1f} > {exit_threshold})"
+        elif month_drawdown <= -0.12:
+            exit_reason = "Aegis Critical Safeguard (Month Done)"
         elif is_timeout:
-            sell_actions.append(f"SELL {code} - Time Limit Reached (60 Days)")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
-        elif current_price >= target_price:
-            sell_actions.append(f"SELL {code} - Profit Target Reached (@{current_price:,.1f})")
+            exit_reason = "Time Limit Reached (60 Days)"
+        elif is_sma_breach:
+            exit_reason = "SMA20 Breach (Technical Exit)"
+
+        if exit_reason:
+            sell_actions.append(f"SELL {code} - {exit_reason} (@{current_price:,.1f})")
             if not is_simulation and broker:
                 try: broker.execute_chase_order(code, p['shares'], side="1")
                 except: pass
             continue
             
-        # 7. 評価額と高値の更新
+        # 建玉情報の更新
         p['current_price'] = round(current_price, 1)
         if current_price > float(p.get('highest_price', 0)):
             p['highest_price'] = round(current_price, 1)
@@ -129,14 +106,11 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
 
 def calculate_all_technicals_v12(data_df):
     """
-    V17.0 Imperial Technical Bundle:
-    - SMA5, SMA20, SMA100
-    - ATR (20)
-    - RS (Normalized Strength)
+    V131.1 Aegis Technical Bundle:
+    - Added RS_Alpha (Absolute 60-day) for leader selection
+    - Added RSI2 for mean reversion entry/exit
     """
     bundle = {}
-    
-    # xs for metric
     close = data_df.xs('Close', axis=1, level=1)
     high = data_df.xs('High', axis=1, level=1)
     low = data_df.xs('Low', axis=1, level=1)
@@ -147,135 +121,134 @@ def calculate_all_technicals_v12(data_df):
     bundle['Open'] = open_v
     bundle['Volume'] = vol
     bundle['SMA5'] = close.rolling(5).mean()
-    bundle['SMA10'] = close.rolling(10).mean()
     bundle['SMA20'] = close.rolling(20).mean()
     bundle['SMA50'] = close.rolling(50).mean()
-    bundle['SMA75'] = close.rolling(75).mean() # V116+
     bundle['SMA100'] = close.rolling(100).mean()
     bundle['SMA200'] = close.rolling(200).mean()
     
-    # Volume and Breakout indicators
-    bundle['Vol_SMA20'] = vol.rolling(20).mean()
-    bundle['High20'] = high.rolling(20).max()
-    
-    # --- New indicators for Mean Reversion ---
-    # Bollinger Bands (20, -2σ)
-    rolling_std_20 = close.rolling(20).std()
-    bundle['BB_LOWER_2'] = bundle['SMA20'] - (2 * rolling_std_20)
-    
-    # RSI (2)
+    # RSI (2) Vectorized
     delta = close.diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
+    # Wilder's smoothing equivalent via rolling
     ma_up = up.rolling(2).mean()
     ma_down = down.rolling(2).mean()
-    rs_rsi = ma_up / ma_down
+    rs_rsi = ma_up / (ma_down + 1e-9)
     bundle['RSI2'] = 100 - (100 / (1 + rs_rsi))
     
     # ATR (20) Vectorized
     prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1)
+    bundle['ATR'] = (high - low).rolling(20).mean() # Simple approximation for speed, or properly calculate TR
+    # Proper TR calculation:
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-    
-    # Vectorized element-wise max for true range
-    tr = pd.DataFrame(
-        np.maximum(np.maximum(tr1.values, tr2.values), tr3.values),
-        index=close.index,
-        columns=close.columns
-    )
+    tr = pd.DataFrame(np.maximum(np.maximum(tr1.values, tr2.values), tr3.values), index=close.index, columns=close.columns)
     bundle['ATR'] = tr.rolling(20).mean()
     
-    # RS (Absolute Momentum: 3-month performance ratio)
-    # V132.9: Return to Absolute RS (No benchmark subtraction)
+    # RS_Alpha (Absolute Momentum: 3-month performance ratio)
     bundle['RS_Alpha'] = (close / close.shift(60) - 1.0) * 100
 
     return bundle
 
 def detect_market_regime(data_df=None, buffer=None):
     """
-    V17.2 Imperial Regime Filter:
-    - Checks if Nikkei 225 (1321.T) is above its SMA100.
-    - If below, returns BEAR to suppress new entries.
+    V131.1 Aegis Regime Detection:
+    - BULL: Price > SMA200 and SMA200 Slope > 0.02%
+    - BEAR: Price < SMA200 * 0.98
+    - NEUTRAL: Else
     """
+    regime = "NEUTRAL"
+    is_trend_snapped = False
+    
     if data_df is not None:
         try:
-            # 1321.T SMA100 Check
             close_all = data_df.xs('Close', axis=1, level=1)
             if '1321.T' in close_all.columns:
-                close_1321 = close_all['1321.T']
-                sma100_1321 = close_1321.rolling(100).mean().iloc[-1]
-                current_1321 = close_1321.iloc[-1]
-                if current_1321 < sma100_1321:
-                    return "BEAR"
-        except:
-            pass
+                c_1321 = close_all['1321.T']
+                sma200 = c_1321.rolling(200).mean()
+                sma5 = c_1321.rolling(5).mean()
+                
+                curr_p = c_1321.iloc[-1]
+                curr_sma200 = sma200.iloc[-1]
+                prev_sma200 = sma200.iloc[-5] # 1 week ago
+                slope = (curr_sma200 / prev_sma200 - 1.0) * 100
+                
+                if curr_p > curr_sma200 and slope > 0.02:
+                    regime = "BULL"
+                elif curr_p < curr_sma200 * 0.98:
+                    regime = "BEAR"
+                
+                if curr_p < sma5.iloc[-1]:
+                    is_trend_snapped = True
+        except: pass
 
-    # Fallback to buffer check if available
-    if buffer and '1321' in buffer:
-        price = buffer['1321'].get_latest_price()
-        if price > 0: return "BULL"
-        
-    return "BULL"
+    return regime, is_trend_snapped
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
-    V17.0 Imperial Selection Engine:
-    - Filters targets based on SMA alignment and RS.
-    - Requires: SMA5 > SMA20 > SMA100 (Perfect Power Order)
+    V131.1 Aegis Sovereign Selection:
+    - Filters by RSI2 (Mean Reversion)
+    - Sorts by RS_Alpha (Relative Strength Leaders)
     """
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
-    sma5 = bundle['SMA5'].iloc[-1]
-    sma20 = bundle['SMA20'].iloc[-1]
-    sma100 = bundle['SMA100'].iloc[-1]
+    open_p = bundle['Open'].iloc[-1]
+    rsi2 = bundle['RSI2'].iloc[-1]
+    sma50 = bundle['SMA50'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
-    rs = bundle['RS'].iloc[-1]
+    rs_alpha = bundle['RS_Alpha'].iloc[-1]
+    
+    # Entry thresholds based on regime
+    rsi_limit = 12.0
+    if regime == "BULL": rsi_limit = 30.0
+    if regime == "BEAR": rsi_limit = 8.0
     
     candidates = []
-    
     for t_with_t in [f"{t}.T" for t in targets]:
-        if t_with_t not in close.index: 
-            # In data_df, columns are tickers.
-            if t_with_t not in bundle['Close'].columns: continue
+        if t_with_t not in close.index: continue
         
-        code_only = t_with_t.replace(".T", "")
         p = close[t_with_t]
-        s5, s20, s100 = sma5[t_with_t], sma20[t_with_t], sma100[t_with_t]
+        o = open_p[t_with_t]
+        r2 = rsi2[t_with_t]
+        s50 = sma50[t_with_t]
+        rs = rs_alpha[t_with_t]
         
-        if pd.isna(p) or p <= 0: continue
+        if pd.isna(p) or p <= 0 or pd.isna(r2): continue
         
-        # Imperial Trend: 5 > 20 > 100
-        if s5 > s20 > s100:
-            # Entry Signal 1: Pullback (Relaxed: Price strictly between SMA20 * 0.96 and SMA20 * 1.04)
-            if s20 * 0.96 <= p < s20 * 1.04:
-                # Entry Signal 2: Reversal Confirmation (Close > Prev Close OR Close > Open)
-                prev_p = bundle['Close'].iloc[-2][t_with_t]
-                open_p = bundle['Open'].iloc[-1][t_with_t]
-                h_p = bundle['High'].iloc[-1][t_with_t]
-                l_p = bundle['Low'].iloc[-1][t_with_t]
+        entry_signal = False
+        if regime == "BULL":
+            # Bullish Mean Reversion: Oversold but above long-term trend
+            if r2 < rsi_limit and p > s50 and p > o:
+                entry_signal = True
+        else:
+            # Neutral/Bear Reversion: Deeper oversold, rebound confirmation
+            if r2 < rsi_limit and p > o:
+                entry_signal = True
                 
-                # [V18.1 Enhancement] Strong Close Filter: (Close - Low) / (High - Low + 1e-9) >= 0.5
-                is_strong = (p - l_p) / (h_p - l_p + 1e-9) >= 0.5
+        # Inverse ETF Safeguard (If 1357.T is in targets and it's a BEAR market)
+        if "1357" in t_with_t and regime == "BEAR" and r2 > 70:
+            entry_signal = True
 
-                if ((p > prev_p) or (p > open_p)) and is_strong:
-                    # Name lookup
-                    name = "Target"
-                if symbols_df is not None:
-                    match = symbols_df[symbols_df['コード'].astype(str) == code_only]
-                    if not match.empty: name = match.iloc[0]['銘柄名']
-                
-                candidates.append({
-                    "code": code_only,
-                    "name": name,
-                    "price": p,
-                    "atr": atr[t_with_t],
-                    "rs": rs[t_with_t],
-                    "score": rs[t_with_t]
-                })
+        if entry_signal:
+            code_only = t_with_t.replace(".T", "")
+            name = "Target"
+            if symbols_df is not None:
+                match = symbols_df[symbols_df['コード'].astype(str) == code_only]
+                if not match.empty: name = match.iloc[0]['銘柄名']
+            
+            candidates.append({
+                "code": code_only,
+                "name": name,
+                "price": p,
+                "atr": atr[t_with_t],
+                "rs": rs,
+                "score": rs # High RS leaders preferred
+            })
 
-    # Sort by RS descending
+    # Sort by RS_Alpha descending
     candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
     return candidates[:10]
 
@@ -284,14 +257,29 @@ class RealtimeBuffer:
         self.code = code
         self.latest_price = 0
         self.latest_volume = 0
+        self.prices = [] # Simplified history for RSI2
         
     def update(self, price, volume, server_time):
         if price and price > 0:
+            if self.latest_price != price:
+                self.prices.append(price)
             self.latest_price = price
             self.latest_volume = volume
+            if len(self.prices) > 20: self.prices = self.prices[-20:]
             
     def get_latest_price(self):
         return self.latest_price
+
+    def get_current_rsi2(self):
+        if len(self.prices) < 3: return 50
+        diffs = np.diff(self.prices[-3:])
+        ups = [d if d > 0 else 0 for d in diffs]
+        downs = [abs(d) if d < 0 else 0 for d in diffs]
+        avg_up = np.mean(ups)
+        avg_down = np.mean(downs)
+        if avg_down == 0: return 100
+        rs = avg_up / avg_down
+        return 100 - (100 / (1 + rs))
 
 def load_invalid_tickers():
     try:
@@ -311,13 +299,12 @@ def normalize_tick_size(price, is_buy=True):
     return round(price, 1)
 
 def get_prime_tickers():
-    import os
-    import pandas as pd
     from core.config import DATA_FILE
-    if not os.path.exists(DATA_FILE):
-        return []
+    import os
+    if not os.path.exists(DATA_FILE): return []
     df = pd.read_csv(DATA_FILE)
     if '市場・商品区分' in df.columns:
         prime = df[df['市場・商品区分'].str.contains('プライム', na=False)]
         return [f"{str(code)}.T" for code in prime['コード']]
     return []
+

@@ -215,6 +215,21 @@ def _main_exec():
     realtime_buffers = {}
     has_morning_scanned = False
     canceled_orders = {}
+    
+    # --- [Aegis Protocol State] ---
+    current_month_str = server_datetime.strftime('%Y-%m')
+    account_data = safe_read_json(ACCOUNT_FILE)
+    month_start_equity = account_data.get('month_start_equity', 0)
+    
+    # 初回起動時または月替わり時に月初資産を記録
+    account = broker.get_account_balance()
+    initial_total = account['cash'] + sum([p.get('current_price', p['buy_price']) * p['shares'] for p in broker.get_positions()])
+    if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
+        month_start_equity = initial_total
+        account_data['month_start_equity'] = month_start_equity
+        account_data['current_month'] = current_month_str
+        atomic_write_json(ACCOUNT_FILE, account_data)
+        print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
 
     while True:
         if os.path.exists("stop.txt"):
@@ -359,21 +374,25 @@ def _main_exec():
             print(f"[WARNING] バッファ同期エラー: {e}")
 
         try:
-            # [V17.2 Enhancement] Regime Filter: SMA100 of Nikkei 225
-            regime = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
+            # [V131.1 Aegis Enhancement] Regime Filter & Trend Health
+            regime, is_trend_snapped = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
         except:
-            regime = "RANGE"
+            regime, is_trend_snapped = "RANGE", False
             last_scan_time = loop_start_time
 
-        print(f"[STAT] 現在のレジーム: 【{regime}】")
+        # Calculate Monthly Drawdown for Aegis Protocol
+        current_total = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+        month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         
-        # [V17.3 Imperial Sync] Position management and auto-reporting
-        # Prepare SMA20 Map for technical exit
+        print(f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} | MonthDD: {month_drawdown:+.2%}")
+        
+        # [V131.1 Aegis Sync] Position management with dynamic risk shield
         sma20_map = {str(code): info.get('SMA20', 0) for code, info in jp_cache.items()}
         
         portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
-            realtime_buffers=realtime_buffers, sma20_map=sma20_map
+            realtime_buffers=realtime_buffers, sma20_map=sma20_map,
+            month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped
         )
         actions_taken.extend(sell_actions)
         
