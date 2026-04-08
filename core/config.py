@@ -65,18 +65,18 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V21.0 (Dynamic Risk Management Sync) ---
-USE_DYNAMIC_LEVERAGE  = True   # ★NEW: 市場環境（Breadth）に応じてレバレッジを自動調整
-MAX_POSITIONS         = 7      # ★NEW: 7 stocks (超集中投資)
-BREADTH_THRESHOLD     = 0.20   # ★NEW: 0.20 (総悲観の底から現物で拾い始める設定)
+# --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
+USE_DYNAMIC_LEVERAGE  = True   
+MAX_POSITIONS         = 4      # ★Optimized: Concentrated 4-Horsemen 
+BREADTH_THRESHOLD     = 0.30   # ★Optimized: More stable environment
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
-LEVERAGE_RATE         = 3.0    # 最大レバレッジ (Breadth >= 0.5 の時)
-MAX_ALLOCATION_PCT    = 0.428  # (LEVERAGE 3.0 / 7 POS ≒ 0.428)
+LEVERAGE_RATE         = 2.5    # ★Optimized: Performance Sweet Spot
+MAX_ALLOCATION_PCT    = 0.625  # (LEVERAGE 2.5 / 4 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 6.0    # ★NEW: 6.0 (動的レバによる防御を前提に損切り幅を適正化)
-TARGET_PROFIT_MULT    = 20.0   # ★NEW: 20.0 (確実な利益確定によるドローダウン抑制)
+ATR_STOP_LOSS         = 3.0    # ★Optimized: Proper breathing room
+TARGET_PROFIT_MULT    = 40.0   # ★Optimized: Captured deep reversion
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price

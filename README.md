@@ -19,12 +19,12 @@
 
 ## 💎 バックテスト実績 (V131.0 Aegis / 2021.04〜2026.04)
 
-| Aegis Sovereign V131.0 | 投資実績 |
+| Aegis Sovereign V131.0 (Opt) | 投資実績 |
 |:---|---:|
-| **総利益率** | **+279.87%** |
-| **最終資産** | **3,798,657 円** |
+| **総利益率** | **+470.98%** |
+| **最終資産** | **5,709,772 円** |
 | **勝率** | **59.63%** |
-| **総取引回数** | 161 回 (厳格な精鋭投資) |
+| **総取引回数** | 155 回 (精鋭集中投資) |
 | 初期資産 | 1,000,000 円 |
 | 期間 | 2021年4月5日 〜 2026年4月3日 |
 
@@ -130,5 +130,5 @@ python jp_optimizer.py
 > 見つかった最適なパラメータは `core/config.py` 内の変数（`TARGET_PROFIT_MULT` や `ATR_STOP_LOSS` 等）に反映させてください。
 
 ---
-*Last updated: 2026-04-08 — Aegis Sovereign V131.0*  
-*Profit Magnitude: +279.87% (Expectancy-Positive Core)*
+*Last updated: 2026-04-08 — Aegis Sovereign V131.0 (Optimized)*  
+*Profit Magnitude: +470.98% (Diamond Standard V131.1)*
