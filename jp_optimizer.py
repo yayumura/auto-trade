@@ -14,7 +14,7 @@ from core.config import INITIAL_CASH
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # --- Short Swing Mode (Aggressive Overdrive) ---
+    # --- Concentrated Elite Mode (V89.0) ---
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -24,14 +24,14 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # ★OVERDRIVE: レバレッジ3.0倍に引き上げ
+        leverage_rate=p['leverage'], # Dynamic Leverage from Grid
         breadth_threshold=p['breadth'],
         max_hold_days=p['max_hold_days']
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
 def optimize_jp_imperial(cache_path):
-    print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
+    print(f"Loading JP Mega-Data Cache: {cache_path}")
     with open(cache_path, 'rb') as f:
         all_data = pickle.load(f)
 
@@ -67,24 +67,31 @@ def optimize_jp_imperial(cache_path):
     timeline = bundle['Close'].index
     
     # --- Aggressive Mean Reversion Search ---
-    grid = []
     
-    breadth_range       = [0.1, 0.2, 0.3, 0.4]    # 地合い判定
-    sl_range            = [1.0, 1.5, 2.0]         # 浅い損切り
-    tp_range            = [2.0, 3.0, 4.0]         # 早めの利確
-    max_pos_range       = [5, 7, 10]              # 高回転のための分散
-    max_hold_days_range = [3, 4, 5, 7]           # 短期保有
+    # --- Sovereign Optimization Grid (V131.3) ---
+    param_grid = {
+        'breadth': [0.3],
+        'sl_mult': [3.0, 4.5],
+        'tp_mult': [40.0, 60.0, 80.0],
+        'max_pos': [3, 4, 5],
+        'leverage_rate': [2.0, 2.5],
+        'max_hold_days': [30]
+    }
 
-    for b in breadth_range:           
-        for sl in sl_range:          
-            for tp in tp_range: 
-                for p_size in max_pos_range:          
-                    for mhd in max_hold_days_range: 
-                        grid.append({
-                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "max_hold_days": mhd
-                        })
+    grid = []
+    for b in param_grid['breadth']:           
+        for sl in param_grid['sl_mult']:          
+            for tp in param_grid['tp_mult']: 
+                for p_size in param_grid['max_pos']:
+                    for lev in param_grid['leverage_rate']:
+                        for mhd in param_grid['max_hold_days']: 
+                            grid.append({
+                                "breadth": b, "sl": sl, "tp": tp, 
+                                "max_pos": p_size, "leverage": lev, "max_hold_days": mhd
+                            })
     
-    print(f"🚀 [AGGRESSIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x)...")
+    print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
+
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -103,20 +110,21 @@ def optimize_jp_imperial(cache_path):
     df_res.to_csv("opt_results.csv", index=False)
     
     print("\n" + "="*80)
-    print("🏆 SHORT SWING (MEAN REVERSION) RESULTS")
+    print("SHORT SWING (MEAN REVERSION) RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
     best = df_res.iloc[0]
-    print(f"🥇 BEST SHORT SWING CONFIGURATION:")
+    print(f"BEST SHORT SWING CONFIGURATION:")
     print(f" - Max Positions:     {best['max_pos']:.0f}")
     print(f" - Breadth Threshold: {best['breadth']:.2f}")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
     print(f" - Max Hold Days:     {best['max_hold_days']:.0f}")
-    print(f"📈 Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
+    print(f"Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
     print("="*80)
+
 
 if __name__ == "__main__":
     if not os.path.exists("data_cache"):

@@ -51,8 +51,8 @@ else:
 
 # [Imperial Safeguard] 実行時に保存先を絶対的に宣言する
 if DEBUG_MODE:
-    print(f"📡 [IMPERIAL_CONFIG] PROJECT_ROOT -> {PROJECT_ROOT}")
-    print(f"📡 [IMPERIAL_CONFIG] DATA_ROOT -> {DATA_ROOT}")
+    print(f"[IMPERIAL_CONFIG] PROJECT_ROOT -> {PROJECT_ROOT}")
+    print(f"[IMPERIAL_CONFIG] DATA_ROOT -> {DATA_ROOT}")
 
 # すべて絶対パスに変換
 DATA_ROOT_STR       = str(DATA_ROOT)

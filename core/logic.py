@@ -140,11 +140,23 @@ def calculate_all_technicals_v12(data_df):
     close = data_df.xs('Close', axis=1, level=1)
     high = data_df.xs('High', axis=1, level=1)
     low = data_df.xs('Low', axis=1, level=1)
+    open_v = data_df.xs('Open', axis=1, level=1)
+    vol = data_df.xs('Volume', axis=1, level=1)
     
     bundle['Close'] = close
+    bundle['Open'] = open_v
+    bundle['Volume'] = vol
     bundle['SMA5'] = close.rolling(5).mean()
+    bundle['SMA10'] = close.rolling(10).mean()
     bundle['SMA20'] = close.rolling(20).mean()
+    bundle['SMA50'] = close.rolling(50).mean()
+    bundle['SMA75'] = close.rolling(75).mean() # V116+
     bundle['SMA100'] = close.rolling(100).mean()
+    bundle['SMA200'] = close.rolling(200).mean()
+    
+    # Volume and Breakout indicators
+    bundle['Vol_SMA20'] = vol.rolling(20).mean()
+    bundle['High20'] = high.rolling(20).max()
     
     # --- New indicators for Mean Reversion ---
     # Bollinger Bands (20, -2σ)
@@ -174,12 +186,10 @@ def calculate_all_technicals_v12(data_df):
     )
     bundle['ATR'] = tr.rolling(20).mean()
     
-    # RS (Momentum Strength: SMA5 / SMA100 Ratio)
-    bundle['RS'] = (bundle['SMA5'] / bundle['SMA100'] * 100).fillna(0)
-    
-    # Store Open for reversal check
-    bundle['Open'] = data_df.xs('Open', axis=1, level=1)
-    
+    # RS (Absolute Momentum: 3-month performance ratio)
+    # V132.9: Return to Absolute RS (No benchmark subtraction)
+    bundle['RS_Alpha'] = (close / close.shift(60) - 1.0) * 100
+
     return bundle
 
 def detect_market_regime(data_df=None, buffer=None):
