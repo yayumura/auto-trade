@@ -10,7 +10,9 @@ sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
-from core.config import INITIAL_CASH
+from core.config import (
+    INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER
+)
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
@@ -24,9 +26,11 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=p['leverage'], # Dynamic Leverage from Grid
+        leverage_rate=p['leverage'],
         breadth_threshold=p['breadth'],
-        max_hold_days=p['max_hold_days']
+        max_hold_days=p['max_hold_days'],
+        use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with production config
+        exit_buffer=SMA20_EXIT_BUFFER      # Sync with production config
     )
     return {**p, "final": final_assets, "trades": trade_count}
 

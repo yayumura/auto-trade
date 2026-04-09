@@ -49,7 +49,7 @@ from core.config import (
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
+    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -215,6 +215,7 @@ def _main_exec():
     realtime_buffers = {}
     has_morning_scanned = False
     canceled_orders = {}
+    cooling_days = 0 # [V132] Over-trading prevention
     
     # --- [Aegis Protocol State] ---
     current_month_str = server_datetime.strftime('%Y-%m')
@@ -250,6 +251,9 @@ def _main_exec():
             ensure_kabu_station_running()
             
         print(f"\n[{datetime.datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
+        if cooling_days > 0:
+            print(f"🛡️ [Cooling] {cooling_days} cycles remaining. Skipping entry scan.")
+            cooling_days -= 1
 
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
@@ -395,6 +399,8 @@ def _main_exec():
             month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped
         )
         actions_taken.extend(sell_actions)
+        if sell_actions:
+            cooling_days = COOLING_DAYS
         
         # [V17.0 Final Persistence]
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
@@ -404,6 +410,7 @@ def _main_exec():
         should_scan = True
         if regime == "BEAR": should_scan = False
         elif len(portfolio) >= MAX_POSITIONS: should_scan = False
+        elif cooling_days > 0: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= datetime.time(14, 0) and not DEBUG_MODE: should_scan = False
         
@@ -469,14 +476,11 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # Determine Current Leverage
+                    # Determine Current Leverage (Shared Logic)
                     if USE_DYNAMIC_LEVERAGE:
-                        if breadth_val >= 0.50: dynamic_lev = 3.0
-                        elif breadth_val >= 0.40: dynamic_lev = 2.0
-                        elif breadth_val >= 0.30: dynamic_lev = 1.0
-                        else:
-                            print("🛡️ [Safeguard] Breadth below 30%. Suppressing new entries for this cycle.")
-                            dynamic_lev = 0.0
+                        dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
+                        if dynamic_lev <= 0:
+                            print("🛡️ [Safeguard] Breadth below threshold. Suppressing new entries for this cycle.")
                     else:
                         dynamic_lev = LEVERAGE_RATE
                     

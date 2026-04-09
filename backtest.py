@@ -1,17 +1,22 @@
 import pandas as pd
 import numpy as np
+from core.logic import (
+    calculate_aegis_shield, get_exit_thresholds, 
+    calculate_dynamic_leverage, check_entry_signal
+)
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=1000000, max_pos=2, 
-                               sl_mult=5.0, tp_mult=10.0, leverage_rate=2.2, breadth_threshold=0.3,
+                               sl_mult=3.0, tp_mult=40.0, leverage_rate=2.5, breadth_threshold=0.3,
                                slippage=0.001, use_sma_exit=False, exit_buffer=0.985, max_hold_days=30,
                                verbose=False):
     """
-    V38.0 Imperial Apex Reborn (Optimized Mean Reversion)
-    - Strong Rebound Confirmation: White Candle + Close > Prev Close.
-    - RS Filtering: RS > 102 (Only above average strength).
-    - High Turnover: Rapid Reversion Exit (Close > SMA5).
-    - Goal: Target 5% Monthly via 3.0x Leverage and High Win-Rate.
+    V132.0 Imperial Apex (Aegis Sovereign Sync)
+    - Full parity with live logic: RSI2 Mean Reversion + RS Leader Selection
+    - Aegis Shield: Monthly drawdown-based risk tightening
+    - Dynamic Leverage: Integrated breadth-based scaling
+    - Time Stop: 30-day limit
+    - Break-even Stop: ATR 5.0 Profit protection
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -24,65 +29,59 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     open_np = bundle_np['Open']
     high_np = bundle_np['High']
     low_np = bundle_np['Low']
-    sma5_np = bundle_np['SMA5']
-    sma100_np = bundle_np['SMA100']
     rsi2_np = bundle_np['RSI2']
     atr_np = bundle_np['ATR']
-    rs_np = bundle_np.get('RS', np.ones_like(close_np) * 100)
+    rs_alpha_np = bundle_np.get('RS_Alpha', np.zeros_like(close_np))
+    sma50_np = bundle_np.get('SMA50', np.zeros_like(close_np))
+    sma20_np = bundle_np.get('SMA20', np.zeros_like(close_np))
+    
     cooling_days = 0
     current_month = ""
     month_start_equity = initial_cash
     month_done = False
     
-    # --- V131.1 Aegis Sovereign Restoration ---
+    # Identify 1321.T for regime detection
+    idx_1321 = -1
+    for idx_t, t_ticker in enumerate(bundle_np['tickers']):
+        if t_ticker == '1321.T': 
+            idx_1321 = idx_t
+            break
+
     for i in range(1, T):
         curr_time = timeline[i]
         
-        # 0. Essential State
-        if cooling_days > 0:
-            cooling_days -= 1
-            
+        # 0. Monthly Tracking & Aegis Initialization
+        if cooling_days > 0: cooling_days -= 1
+        
         if curr_time.strftime('%Y-%m') != current_month:
             current_month = curr_time.strftime('%Y-%m')
+            # Calculate equity at start of month
             month_start_equity = cash + sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
             month_done = False 
 
         total_equity = cash + sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
+        month_drawdown = (total_equity / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         
-        # Global Regime
-        idx_1321 = -1
-        for idx_t, t_ticker in enumerate(bundle_np['tickers']):
-            if t_ticker == '1321.T': 
-                idx_1321 = idx_t
-                break
-        
-        sma200_val = bundle_np['SMA200'][i, idx_1321] if idx_1321 != -1 else 0
-        sma50_val = bundle_np['SMA50'][i, idx_1321] if idx_1321 != -1 else 0
-        price_1321 = close_np[i, idx_1321]
-        sma200_prev = bundle_np['SMA200'][i-5, idx_1321] if (idx_1321 != -1 and i > 5) else sma200_val
-        slope_pct = (sma200_val / sma200_prev - 1.0) * 100 if sma200_prev != 0 else 0
-        
-        is_overheated = (price_1321 > sma50_val * 1.10)
-        
-        engine_mode = "NEUTRAL"
-        if price_1321 > sma200_val and slope_pct > 0.02:
-            engine_mode = "BULL"
-        elif price_1321 < (sma200_val * 0.98):
-            engine_mode = "BEAR"
-        
-        # --- V131.0 Aegis Sovereign Restoration ---
-        month_drawdown = (total_equity / month_start_equity) - 1.0
-        is_caution_zone = (month_drawdown <= -0.05)
-        is_danger_zone = (month_drawdown <= -0.10)
-        
-        if not month_done and month_drawdown <= -0.12: 
-            month_done = True 
+        # Regime Detection (Aegis Standard)
+        regime = "NEUTRAL"
+        is_trend_snapped = False
+        if idx_1321 != -1:
+            p_1321 = close_np[i, idx_1321]
+            s200_1321 = bundle_np['SMA200'][i, idx_1321]
+            s200_prev = bundle_np['SMA200'][i-5, idx_1321] if i > 5 else s200_1321
+            slope = (s200_1321 / s200_prev - 1.0) * 100 if s200_prev != 0 else 0
             
-        # Index Trend Health
-        idx_sma5 = bundle_np['SMA5'][i, idx_1321] if idx_1321 != -1 else 0
-        is_trend_snapped = (price_1321 < idx_sma5)
-        
-        # 1. Management (Aegis Sovereign Protocol)
+            if p_1321 > s200_1321 and slope > 0.02: regime = "BULL"
+            elif p_1321 < s200_1321 * 0.98: regime = "BEAR"
+            
+            s5_1321 = bundle_np['SMA5'][i, idx_1321]
+            if p_1321 < s5_1321: is_trend_snapped = True
+
+        # --- Aegis Sovereign Protocol Sync ---
+        atr_shield_mult = calculate_aegis_shield(month_drawdown, regime)
+        if month_drawdown <= -0.12: month_done = True 
+
+        # 1. Management
         new_portfolio = []
         for p in portfolio:
             tidx = p['s_idx']
@@ -91,6 +90,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_low = low_np[i, tidx]
             t_close = close_np[i, tidx]
             t_atr = atr_np[i, tidx]
+            r2 = rsi2_np[i, tidx]
+            
             if np.isnan(t_close):
                 new_portfolio.append(p)
                 continue
@@ -98,24 +99,33 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             p['max_price'] = max(p.get('max_price', t_close), t_close)
             exit_p = None
             
-            # Dynamic Risk Shield
-            atr_mult = 1.5
-            if is_caution_zone: atr_mult = 1.0
-            if is_danger_zone: atr_mult = 0.5
-            if engine_mode != "BULL": atr_mult = 1.0
+            # --- Exit Conditions (Aegis Sovereign Sync) ---
             
-            tsl_price = p['max_price'] - (atr_mult * t_atr)
+            # A. Dynamic Trailing Stop (using sl_mult * atr_shield_mult)
+            current_sl_dist = sl_mult * t_atr * atr_shield_mult
+            initial_stop_price = p['buy_price'] - current_sl_dist
             
-            # Dynamic Exit Threshold
-            rsi_val = rsi2_np[i, tidx]
-            exit_threshold = 85 if not is_trend_snapped else 55
-            if engine_mode != "BULL": exit_threshold = 60
+            # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
+            if p['max_price'] >= p['buy_price'] + (t_atr * 5.0):
+                initial_stop_price = max(initial_stop_price, p['buy_price'] * 1.002)
+                
+            tsl_price = max(initial_stop_price, p['max_price'] - current_sl_dist)
             
-            if t_open <= tsl_price or t_low <= tsl_price:
+            # B. RSI Profit Target (Shared Logic)
+            exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
+            
+            # C. Time Stop
+            p['held_days'] = p.get('held_days', 0) + 1
+            
+            if t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
-            elif rsi_val > exit_threshold:
+            elif r2 > exit_threshold:
                 exit_p = t_close
-            elif is_danger_zone: 
+            elif p['held_days'] >= max_hold_days:
+                exit_p = t_close
+            elif use_sma_exit and t_close < sma20_np[i, tidx] * exit_buffer:
+                exit_p = t_close
+            elif month_done:
                 exit_p = t_close
             
             if exit_p is not None:
@@ -124,7 +134,6 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 cash += final_exit * p['shares']
                 cooling_days = 2
             else:
-                p['held_days'] = p.get('held_days', 0) + 1
                 new_portfolio.append(p)
         portfolio = new_portfolio
         
@@ -132,55 +141,43 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         total_equity = cash + sum(np.nan_to_num(close_np[i, pos['s_idx']]) * pos['shares'] for pos in portfolio)
         monthly_assets[current_month] = float(total_equity)
 
-        # 2. Entry
+        # 2. Entry (Aegis Sovereign Strategy)
         if i + 1 >= T or month_done or cooling_days > 0: continue 
         
-        per_slot_size = (leverage_rate / max_pos)
-        rs_alphas = bundle_np.get('RS_Alpha', np.zeros_like(close_np))[i, :]
-        valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
-        top_indices = sorted(valid_indices, key=lambda x: rs_alphas[x], reverse=True)[:max_pos]
+        # Breadth-based Dynamic Leverage (Shared Logic)
+        dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
+            
+        if dynamic_lev <= 0: continue
         
-        for s_idx in top_indices:
+        # Candidate Selection: Sort by RS Alpha
+        rs_alphas = rs_alpha_np[i, :]
+        valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
+        sorted_candidates = sorted(valid_indices, key=lambda x: rs_alphas[x], reverse=True)
+        
+        for s_idx in sorted_candidates:
             if len(portfolio) >= max_pos: break 
             if any(p['s_idx'] == s_idx for p in portfolio): continue
             
-            rsi_val = rsi2_np[i, s_idx]
+            r2 = rsi2_np[i, s_idx]
             t_close = close_np[i, s_idx]
             t_open = open_np[i, s_idx]
-            t_sma50 = bundle_np['SMA50'][i, s_idx]
+            t_sma50 = sma50_np[i, s_idx]
             
-            current_slot_size = per_slot_size * (0.5 if is_overheated else 1.0)
-            entry_signal = False
-            if engine_mode == "BULL":
-                if rsi_val < 30.0 and t_close > t_sma50 and t_close > t_open:
-                    entry_signal = True
-            elif engine_mode == "NEUTRAL":
-                if rsi_val < 12.0 and t_close > t_open:
-                    entry_signal = True
-            elif engine_mode == "BEAR":
-                if rsi_val < 8.0 and t_close > t_open:
-                    entry_signal = True
-                elif bundle_np['tickers'][s_idx] == '1357.T' and rsi_val > 70:
-                    entry_signal = True
-            
+            # Entry Signal (Shared Logic)
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma50)
+                    
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
-                shares = int((total_equity * current_slot_size) / real_buy)
+                # Sizing: (Equity * Leverage) / Max_Pos / Price
+                shares = int((total_equity * dynamic_lev / max_pos) / real_buy)
                 if shares > 0:
                     t_atr = atr_np[i, s_idx]
                     portfolio.append({
                         's_idx': s_idx, 'buy_price': real_buy,
-                        'sl_price': real_buy - (2.2 * t_atr), 
                         'shares': shares, 'held_days': 0, 'max_price': real_buy
                     })
                     cash -= real_buy * shares
                     trade_count += 1
-
-
-
-
-
-
 
     final = cash + sum(np.nan_to_num(close_np[-1, p['s_idx']]) * p['shares'] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results

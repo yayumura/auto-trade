@@ -19,17 +19,9 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
     remaining = []
     sell_actions = []
     
-    # --- Aegis Sovereign Protocol: Dynamic ATR Shield ---
-    # Drawdown-based risk escalation (Aegis Shield)
-    atr_mult = 1.5
-    if month_drawdown <= -0.05: atr_mult = 1.0
-    if month_drawdown <= -0.10: atr_mult = 0.5
-    if regime != "BULL": atr_mult = 1.0 # Tighten during non-bull regimes
-
-    # RSI Exit Threshold
-    # If index trend is snapped, we exit much faster (RSI > 55)
-    exit_threshold = 85 if not is_trend_snapped else 55
-    if regime != "BULL": exit_threshold = 60
+    # --- Aegis Sovereign Protocol Sync ---
+    atr_shield_mult = calculate_aegis_shield(month_drawdown, regime)
+    exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
 
     for p in portfolio:
         code = str(p['code'])
@@ -47,25 +39,27 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         highest_price = float(p.get('highest_price', 0))
         
         # 2. 逆指値 (Stop Loss) 計算: Dynamic Trailing Stop
-        initial_stop = buy_price - (atr * atr_mult)
+        # Use ATR_STOP_LOSS from config, but scaled by Aegis Shield
+        current_sl_dist = ATR_STOP_LOSS * atr * atr_shield_mult
+        initial_stop = buy_price - current_sl_dist
         
         # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
         if highest_price >= buy_price + (atr * 5.0):
             initial_stop = max(initial_stop, buy_price * 1.002)
             
         if ATR_TRAIL and highest_price > 0:
-            stop_price = max(initial_stop, highest_price - (atr * atr_mult))
+            stop_price = max(initial_stop, highest_price - current_sl_dist)
         else:
             stop_price = initial_stop
             
-        # 3. タイムリミット (Aegis Standard: 60日強制決済)
+        # 3. タイムリミット (Aegis Standard: 30日強制決済)
         is_timeout = False
         buy_time_str = p.get('buy_time')
         if buy_time_str:
             try:
                 buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
                 days_held = (dt.now().replace(tzinfo=None) - buy_dt.replace(tzinfo=None)).days
-                if days_held >= 60:
+                if days_held >= 30: # [V132] Optimized from 60 to 30
                     is_timeout = True
             except: pass
         
@@ -84,7 +78,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         elif month_drawdown <= -0.12:
             exit_reason = "Aegis Critical Safeguard (Month Done)"
         elif is_timeout:
-            exit_reason = "Time Limit Reached (60 Days)"
+            exit_reason = "Time Limit Reached (30 Days)"
         elif is_sma_breach:
             exit_reason = "SMA20 Breach (Technical Exit)"
 
@@ -103,6 +97,46 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         remaining.append(p)
 
     return remaining, sell_actions
+
+# --- Common Decision Core (Parity Logic) ---
+
+def calculate_aegis_shield(month_drawdown, regime="BULL"):
+    """V132.0 Shared Risk Scaling Logic"""
+    atr_shield_mult = 1.0
+    if month_drawdown <= -0.05: atr_shield_mult = 0.66
+    if month_drawdown <= -0.10: atr_shield_mult = 0.33
+    if regime != "BULL": atr_shield_mult = 0.8 # [V131.1 Sync]
+    return atr_shield_mult
+
+def get_exit_thresholds(regime, is_trend_snapped):
+    """V132.0 Shared RSI Exit Thresholds"""
+    exit_threshold = 85 if not is_trend_snapped else 55
+    if regime != "BULL": exit_threshold = 60
+    return exit_threshold
+
+def calculate_dynamic_leverage(breadth_val, config_leverage=2.5):
+    """V132.0 Shared Leverage Scaling"""
+    if breadth_val >= 0.50: dynamic_lev = 3.0
+    elif breadth_val >= 0.40: dynamic_lev = 2.0
+    elif breadth_val >= 0.30: dynamic_lev = 1.0
+    else: dynamic_lev = 0.0
+    return min(dynamic_lev, config_leverage) if dynamic_lev > 0 else 0
+
+def check_entry_signal(regime, rsi2, price, open_p, sma50):
+    """V132.0 Shared Entry Signal Logic"""
+    rsi_limit = 12.0
+    if regime == "BULL": rsi_limit = 30.0
+    if regime == "BEAR": rsi_limit = 8.0
+    
+    if regime == "BULL":
+        # Bullish Mean Reversion: Oversold but above long-term trend
+        if rsi2 < rsi_limit and price > sma50 and price > open_p:
+            return True
+    else:
+        # Neutral/Bear Reversion: Deeper oversold, rebound confirmation
+        if rsi2 < rsi_limit and price > open_p:
+            return True
+    return False
 
 def calculate_all_technicals_v12(data_df):
     """
@@ -218,15 +252,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         
         if pd.isna(p) or p <= 0 or pd.isna(r2): continue
         
-        entry_signal = False
-        if regime == "BULL":
-            # Bullish Mean Reversion: Oversold but above long-term trend
-            if r2 < rsi_limit and p > s50 and p > o:
-                entry_signal = True
-        else:
-            # Neutral/Bear Reversion: Deeper oversold, rebound confirmation
-            if r2 < rsi_limit and p > o:
-                entry_signal = True
+        entry_signal = check_entry_signal(regime, r2, p, o, s50)
                 
         # Inverse ETF Safeguard (If 1357.T is in targets and it's a BEAR market)
         if "1357" in t_with_t and regime == "BEAR" and r2 > 70:
@@ -250,7 +276,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
 
     # Sort by RS_Alpha descending
     candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
-    return candidates[:10]
+    return candidates # Return all, not just top 10, for better backtest coverage
 
 class RealtimeBuffer:
     def __init__(self, code, initial_df=None, interval_mins=15):

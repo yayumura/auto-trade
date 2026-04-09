@@ -79,14 +79,15 @@ def run_jp_broad_backtest(cache_path):
         timeline=timeline,
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
-        max_pos=4,
-        sl_mult=3.0,
-        tp_mult=40.0,
-        leverage_rate=2.5,
-        breadth_threshold=0.30,
+        max_pos=MAX_POSITIONS, # Sync with config
+        sl_mult=ATR_STOP_LOSS, # Sync with config
+        tp_mult=TARGET_PROFIT_MULT, # Sync with config
+        leverage_rate=LEVERAGE_RATE, # Sync with config
+        breadth_threshold=BREADTH_THRESHOLD, # Sync with config
         slippage=0.001,
         max_hold_days=30,
-        use_sma_exit=False,
+        use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with config
+        exit_buffer=SMA20_EXIT_BUFFER, # Sync with config
         verbose=False
     )
 

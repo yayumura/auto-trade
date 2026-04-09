@@ -67,11 +67,11 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 4      # ★Optimized: Concentrated 4-Horsemen 
+MAX_POSITIONS         = 3      # ★Optimized: Concentrated 3-Elite Strategy
 BREADTH_THRESHOLD     = 0.30   # ★Optimized: More stable environment
 MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
 LEVERAGE_RATE         = 2.5    # ★Optimized: Performance Sweet Spot
-MAX_ALLOCATION_PCT    = 0.625  # (LEVERAGE 2.5 / 4 POS)
+MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
@@ -87,6 +87,7 @@ SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
+COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():
