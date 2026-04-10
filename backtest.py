@@ -186,8 +186,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 real_buy = t_close * (1.0 + slippage)
                 raw_value = (total_equity * dynamic_lev / max_pos)
                 
-                # --- Unrestricted Execution (+5800% Mode) ---
-                shares = int(raw_value / real_buy)
+                # --- Adaptive Liquidity Filter (V148.0 Reality Apex) ---
+                # Purpose: Ensure reality at scale.
+                if raw_value < 5_000_000:
+                    actual_value = raw_value # Small-cap growth phase
+                elif raw_value < 20_000_000:
+                    actual_value = min(raw_value, t_turnover * 0.20)
+                else:
+                    actual_value = min(raw_value, t_turnover * 0.05)
+                
+                shares = int(actual_value / real_buy)
                 if shares > 0:
                     portfolio.append({
                         's_idx': s_idx, 'buy_price': real_buy,

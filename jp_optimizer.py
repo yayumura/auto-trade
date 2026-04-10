@@ -29,8 +29,9 @@ def run_single_opt(params_pack):
         leverage_rate=p['leverage'],
         breadth_threshold=p['breadth'],
         max_hold_days=p['max_hold_days'],
-        use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with production config
-        exit_buffer=SMA20_EXIT_BUFFER      # Sync with production config
+        slippage=0.003, # ★Reality Sync (Consistent with jp_backtest.py)
+        use_sma_exit=EXIT_ON_SMA20_BREACH, 
+        exit_buffer=SMA20_EXIT_BUFFER
     )
     return {**p, "final": final_assets, "trades": trade_count}
 

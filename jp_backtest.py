@@ -84,7 +84,7 @@ def run_jp_broad_backtest(cache_path):
         tp_mult=TARGET_PROFIT_MULT, # Sync with config
         leverage_rate=LEVERAGE_RATE, # Sync with config
         breadth_threshold=BREADTH_THRESHOLD, # Sync with config
-        slippage=0.001,
+        slippage=0.003,
         max_hold_days=30,
         use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with config
         exit_buffer=SMA20_EXIT_BUFFER, # Sync with config
