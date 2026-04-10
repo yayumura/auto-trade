@@ -70,7 +70,7 @@ USE_DYNAMIC_LEVERAGE  = True
 MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
 BREADTH_THRESHOLD     = 0.30   
 MAX_RISK_PER_TRADE    = 0.01   
-LEVERAGE_RATE         = 2.0    
+LEVERAGE_RATE         = 1.0    # ★V149: Optimizer Golden Ratio (Lower Lev = Higher Trend Endurance)
 MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
