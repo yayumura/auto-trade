@@ -93,7 +93,7 @@ def release_lock():
 from core.logic import (
     detect_market_regime, manage_positions_live, select_best_candidates, 
     load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
-    RealtimeBuffer
+    RealtimeBuffer, calculate_aegis_shield
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -476,13 +476,14 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # Determine Current Leverage (Shared Logic)
+                    # Determine Current Leverage (Shared Logic V133)
+                    shield_mult = calculate_aegis_shield(month_drawdown, regime)
                     if USE_DYNAMIC_LEVERAGE:
-                        dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
+                        dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE, shield_mult=shield_mult)
                         if dynamic_lev <= 0:
-                            print("🛡️ [Safeguard] Breadth below threshold. Suppressing new entries for this cycle.")
+                            print("🛡️ [Safeguard] Breadth or Shield below threshold. Suppressing new entries.")
                     else:
-                        dynamic_lev = LEVERAGE_RATE
+                        dynamic_lev = LEVERAGE_RATE * shield_mult
                     
                     print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
                 else:

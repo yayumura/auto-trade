@@ -10,77 +10,65 @@ from core.config import (
     SMA20_EXIT_BUFFER
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None, month_drawdown=0.0, is_trend_snapped=False):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
-    V131.1 Aegis Sovereign Position Manager:
-    - Dynamic Risk Shield: Adjusts ATR multiplier based on monthly performance.
-    - RSI Profit Take: Exits when mean reversion is complete.
+    V143.0 Adaptive Alpha Manager:
+    - Growth Focus: 3.0 ATR base trail.
+    - Market Shield: Tightens to 1.5 ATR if Breadth < 0.45.
+    - Safe Mode: Tightens to 1.0 ATR if Month DD > 7%.
     """
     remaining = []
     sell_actions = []
     
-    # --- Aegis Sovereign Protocol Sync ---
-    atr_shield_mult = calculate_aegis_shield(month_drawdown, regime)
     exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
 
     for p in portfolio:
         code = str(p['code'])
-        # 1. 価格取得
+        # 1. Price Acquisition
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
-            # RSI2 is needed for exit
             rsi2 = realtime_buffers[code].get_current_rsi2() if hasattr(realtime_buffers[code], 'get_current_rsi2') else 50
         else:
             current_price = float(p.get('current_price', p['buy_price']))
-            rsi2 = 50 # Fallback
+            rsi2 = 50 
             
         buy_price = float(p['buy_price'])
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 2. 逆指値 (Stop Loss) 計算: Dynamic Trailing Stop
-        # Use ATR_STOP_LOSS from config, but scaled by Aegis Shield
-        current_sl_dist = ATR_STOP_LOSS * atr * atr_shield_mult
-        initial_stop = buy_price - current_sl_dist
+        # 2. Adaptive Stop Multiplier
+        stop_mult = 3.0 # Base (High performance)
         
-        # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
-        if highest_price >= buy_price + (atr * 5.0):
-            initial_stop = max(initial_stop, buy_price * 1.002)
-            
-        if ATR_TRAIL and highest_price > 0:
-            stop_price = max(initial_stop, highest_price - current_sl_dist)
+        # Protective triggers
+        if market_breadth < 0.45: stop_mult = 1.5 # Market rotation protection
+        if month_drawdown <= -0.07: stop_mult = 1.0 # Emergency lockdown
+        
+        stop_dist = stop_mult * atr 
+        initial_stop = buy_price - stop_dist
+        
+        # Trailing
+        if current_price > buy_price:
+             tsl_price = max(initial_stop, highest_price - stop_dist)
         else:
-            stop_price = initial_stop
+             tsl_price = initial_stop
             
-        # 3. タイムリミット (Aegis Standard: 30日強制決済)
-        is_timeout = False
-        buy_time_str = p.get('buy_time')
-        if buy_time_str:
-            try:
-                buy_dt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
-                days_held = (dt.now().replace(tzinfo=None) - buy_dt.replace(tzinfo=None)).days
-                if days_held >= 30: # [V132] Optimized from 60 to 30
-                    is_timeout = True
-            except: pass
-        
-        # 4. Technical Exit: SMA20割れ判定 (Optional, secondary to RSI)
-        is_sma_breach = False
-        if EXIT_ON_SMA20_BREACH and sma20_map and code in sma20_map:
-            if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER:
-                is_sma_breach = True
+        # 3. Technical Trend Exit
+        is_trend_broken = False
+        if sma20_map and code in sma20_map:
+            # 2.5% buffer for optimized endurance
+            if current_price < float(sma20_map[code]) * 0.975: 
+                is_trend_broken = True
 
-        # 5. 売却判定
+        # 4. Sell Decision
         exit_reason = None
-        if current_price <= stop_price:
-            exit_reason = "Stop Loss (Aegis Shield)" if stop_price < buy_price else "Break-even Stop"
+        if current_price <= tsl_price:
+            exit_reason = f"Trail Stop ({stop_mult:.1f} ATR)"
         elif rsi2 > exit_threshold:
-            exit_reason = f"RSI Profit Target ({rsi2:.1f} > {exit_threshold})"
-        elif month_drawdown <= -0.12:
-            exit_reason = "Aegis Critical Safeguard (Month Done)"
-        elif is_timeout:
-            exit_reason = "Time Limit Reached (30 Days)"
-        elif is_sma_breach:
-            exit_reason = "SMA20 Breach (Technical Exit)"
+            exit_reason = f"Profit Peak ({rsi2:.1f})"
+        elif is_trend_broken:
+            exit_reason = "Trend Breach (SMA20)"
+        elif month_drawdown <= -0.15: # Doomsday
+            exit_reason = "System Circuit Breaker"
 
         if exit_reason:
             sell_actions.append(f"SELL {code} - {exit_reason} (@{current_price:,.1f})")
@@ -89,53 +77,42 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
                 except: pass
             continue
             
-        # 建玉情報の更新
         p['current_price'] = round(current_price, 1)
         if current_price > float(p.get('highest_price', 0)):
             p['highest_price'] = round(current_price, 1)
-            
         remaining.append(p)
 
     return remaining, sell_actions
 
-# --- Common Decision Core (Parity Logic) ---
-
 def calculate_aegis_shield(month_drawdown, regime="BULL"):
-    """V132.0 Shared Risk Scaling Logic"""
-    atr_shield_mult = 1.0
-    if month_drawdown <= -0.05: atr_shield_mult = 0.66
-    if month_drawdown <= -0.10: atr_shield_mult = 0.33
-    if regime != "BULL": atr_shield_mult = 0.8 # [V131.1 Sync]
-    return atr_shield_mult
+    """V140.0 Adaptive Exposure"""
+    if month_drawdown <= -0.05: return 0.5
+    if month_drawdown <= -0.10: return 0.0 # Shutdown entry
+    return 1.0
 
 def get_exit_thresholds(regime, is_trend_snapped):
-    """V132.0 Shared RSI Exit Thresholds"""
-    exit_threshold = 85 if not is_trend_snapped else 55
-    if regime != "BULL": exit_threshold = 60
-    return exit_threshold
+    """V140.0 Profit Locking (Ride to 90+ in Bulls)"""
+    if regime == "BULL": return 92
+    return 80
 
-def calculate_dynamic_leverage(breadth_val, config_leverage=2.5):
-    """V132.0 Shared Leverage Scaling"""
-    if breadth_val >= 0.50: dynamic_lev = 3.0
-    elif breadth_val >= 0.40: dynamic_lev = 2.0
-    elif breadth_val >= 0.30: dynamic_lev = 1.0
-    else: dynamic_lev = 0.0
-    return min(dynamic_lev, config_leverage) if dynamic_lev > 0 else 0
+def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0):
+    """V140.0 Breadth Scaling"""
+    if breadth_val >= 0.60: base = 2.0
+    elif breadth_val >= 0.40: base = 1.0
+    else: base = 0.0
+    return min(base, config_leverage) * shield_mult
 
-def check_entry_signal(regime, rsi2, price, open_p, sma50):
-    """V132.0 Shared Entry Signal Logic"""
-    rsi_limit = 12.0
-    if regime == "BULL": rsi_limit = 30.0
-    if regime == "BEAR": rsi_limit = 8.0
+def check_entry_signal(regime, rsi2, price, open_p, sma20, sma200=0):
+    """V140.0 Momentum Entry: Buy Strength"""
+    if regime != "BULL": return False # Strictly Bull only for momentum
     
-    if regime == "BULL":
-        # Bullish Mean Reversion: Oversold but above long-term trend
-        if rsi2 < rsi_limit and price > sma50 and price > open_p:
-            return True
-    else:
-        # Neutral/Bear Reversion: Deeper oversold, rebound confirmation
-        if rsi2 < rsi_limit and price > open_p:
-            return True
+    # Perfect Order Confirmation: Price > SMA20 > SMA200
+    if price < sma20: return False
+    if sma200 > 0 and price < sma200 * 1.05: return False 
+    
+    # Entry on strength (RSI2 indicates buying pressure, not oversold)
+    if rsi2 > 40 and price > open_p:
+        return True
     return False
 
 def calculate_all_technicals_v12(data_df):
@@ -184,6 +161,11 @@ def calculate_all_technicals_v12(data_df):
     # RS_Alpha (Absolute Momentum: 3-month performance ratio)
     bundle['RS_Alpha'] = (close / close.shift(60) - 1.0) * 100
 
+    # Turnover (Value) calculation for liquidity filtering
+    if vol is not None:
+        turnover = close * vol
+        bundle['Turnover'] = turnover.rolling(5).median() # 5-day median turnover
+    
     return bundle
 
 def detect_market_regime(data_df=None, buffer=None):
@@ -222,23 +204,19 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
     """
-    V131.1 Aegis Sovereign Selection:
-    - Filters by RSI2 (Mean Reversion)
-    - Sorts by RS_Alpha (Relative Strength Leaders)
+    V140.0 Momentum Leader Selection:
+    - Universe: Stocks with RS_Alpha > 25.
+    - Sorting: RS_Alpha Descending.
     """
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
     open_p = bundle['Open'].iloc[-1]
     rsi2 = bundle['RSI2'].iloc[-1]
-    sma50 = bundle['SMA50'].iloc[-1]
+    sma20 = bundle['SMA20'].iloc[-1]
+    sma200 = bundle['SMA200'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
     rs_alpha = bundle['RS_Alpha'].iloc[-1]
-    
-    # Entry thresholds based on regime
-    rsi_limit = 12.0
-    if regime == "BULL": rsi_limit = 30.0
-    if regime == "BEAR": rsi_limit = 8.0
     
     candidates = []
     for t_with_t in [f"{t}.T" for t in targets]:
@@ -247,17 +225,15 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         p = close[t_with_t]
         o = open_p[t_with_t]
         r2 = rsi2[t_with_t]
-        s50 = sma50[t_with_t]
+        s20 = sma20[t_with_t]
+        s200 = sma200[t_with_t]
         rs = rs_alpha[t_with_t]
         
-        if pd.isna(p) or p <= 0 or pd.isna(r2): continue
+        if pd.isna(p) or p <= 0 or pd.isna(rs): continue
+        if rs < 25.0: continue # Momentum requirement
         
-        entry_signal = check_entry_signal(regime, r2, p, o, s50)
+        entry_signal = check_entry_signal(regime, r2, p, o, s20, s200)
                 
-        # Inverse ETF Safeguard (If 1357.T is in targets and it's a BEAR market)
-        if "1357" in t_with_t and regime == "BEAR" and r2 > 70:
-            entry_signal = True
-
         if entry_signal:
             code_only = t_with_t.replace(".T", "")
             name = "Target"
@@ -271,12 +247,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
                 "price": p,
                 "atr": atr[t_with_t],
                 "rs": rs,
-                "score": rs # High RS leaders preferred
+                "rsi2": r2,
+                "score": rs # Pure momentum score
             })
 
-    # Sort by RS_Alpha descending
     candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
-    return candidates # Return all, not just top 10, for better backtest coverage
+    return candidates 
 
 class RealtimeBuffer:
     def __init__(self, code, initial_df=None, interval_mins=15):

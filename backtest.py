@@ -77,9 +77,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             s5_1321 = bundle_np['SMA5'][i, idx_1321]
             if p_1321 < s5_1321: is_trend_snapped = True
 
-        # --- Aegis Sovereign Protocol Sync ---
-        atr_shield_mult = calculate_aegis_shield(month_drawdown, regime)
-        if month_drawdown <= -0.12: month_done = True 
+        # --- Imperial Sovereign Protocol (V143 Adaptive) ---
+        shield_mult = calculate_aegis_shield(month_drawdown, regime)
+        if month_drawdown <= -0.15: month_done = True 
 
         # 1. Management
         new_portfolio = []
@@ -99,31 +99,35 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             p['max_price'] = max(p.get('max_price', t_close), t_close)
             exit_p = None
             
-            # --- Exit Conditions (Aegis Sovereign Sync) ---
+            # --- Exit Conditions (V143.0 Adaptive) ---
             
-            # A. Dynamic Trailing Stop (using sl_mult * atr_shield_mult)
-            current_sl_dist = sl_mult * t_atr * atr_shield_mult
-            initial_stop_price = p['buy_price'] - current_sl_dist
+            # A. Adaptive Stop (Breadth & DD Based)
+            stop_mult = 3.0 
+            curr_breadth = breadth_ratio[i]
+            if curr_breadth < 0.45: stop_mult = 1.5 
+            if month_drawdown <= -0.07: stop_mult = 1.0 
             
-            # [V18.1] Break-even Stop (5.0 ATR Profit Protection)
-            if p['max_price'] >= p['buy_price'] + (t_atr * 5.0):
-                initial_stop_price = max(initial_stop_price, p['buy_price'] * 1.002)
-                
-            tsl_price = max(initial_stop_price, p['max_price'] - current_sl_dist)
+            stop_dist = stop_mult * t_atr 
+            initial_stop_price = p['buy_price'] - stop_dist
             
-            # B. RSI Profit Target (Shared Logic)
+            if t_close > p['buy_price']:
+                 tsl_price = max(initial_stop_price, p['max_price'] - stop_dist)
+            else:
+                 tsl_price = initial_stop_price
+
+            # B. RSI Overextension
             exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
             
-            # C. Time Stop
-            p['held_days'] = p.get('held_days', 0) + 1
+            # C. Trend Breach (2.5% buffer)
+            is_trend_broken = False
+            if t_close < sma20_np[i, tidx] * 0.975:
+                is_trend_broken = True
             
             if t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
             elif r2 > exit_threshold:
                 exit_p = t_close
-            elif p['held_days'] >= max_hold_days:
-                exit_p = t_close
-            elif use_sma_exit and t_close < sma20_np[i, tidx] * exit_buffer:
+            elif is_trend_broken:
                 exit_p = t_close
             elif month_done:
                 exit_p = t_close
@@ -141,40 +145,54 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         total_equity = cash + sum(np.nan_to_num(close_np[i, pos['s_idx']]) * pos['shares'] for pos in portfolio)
         monthly_assets[current_month] = float(total_equity)
 
-        # 2. Entry (Aegis Sovereign Strategy)
-        if i + 1 >= T or month_done or cooling_days > 0: continue 
+        # 2. Entry (V143.0 Adaptive Alpha)
+        if i + 1 >= T or month_done or cooling_days > 0 or regime != "BULL": continue 
         
-        # Breadth-based Dynamic Leverage (Shared Logic)
-        dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
-            
+        # [V140] Moderate Dynamic Leverage
+        dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate, shield_mult=shield_mult)
         if dynamic_lev <= 0: continue
         
-        # Candidate Selection: Sort by RS Alpha
+        # Selection: Pure RS_Alpha Top Leaders
         rs_alphas = rs_alpha_np[i, :]
+        rsis = rsi2_np[i, :]
+        sma200s = bundle_np['SMA200'][i, :]
+        turnover_np = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12) # Default huge if missing
+
         valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
+        # Scoring: Top RS leaders
         sorted_candidates = sorted(valid_indices, key=lambda x: rs_alphas[x], reverse=True)
         
         for s_idx in sorted_candidates:
             if len(portfolio) >= max_pos: break 
             if any(p['s_idx'] == s_idx for p in portfolio): continue
             
-            r2 = rsi2_np[i, s_idx]
+            rs = rs_alphas[s_idx]
+            r2 = rsis[s_idx]
             t_close = close_np[i, s_idx]
             t_open = open_np[i, s_idx]
-            t_sma50 = sma50_np[i, s_idx]
+            t_sma20 = sma20_np[i, s_idx]
+            t_sma200 = sma200s[s_idx]
+            t_turnover = turnover_np[i, s_idx]
             
-            # Entry Signal (Shared Logic)
-            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma50)
+            # Momentum Filters
+            if rs < 25.0: continue
+            if t_close < t_sma20: continue
+            if t_close < t_sma200 * 1.05: continue 
+
+            # Entry Signal
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma20, sma200=t_sma200)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
-                # Sizing: (Equity * Leverage) / Max_Pos / Price
-                shares = int((total_equity * dynamic_lev / max_pos) / real_buy)
+                raw_value = (total_equity * dynamic_lev / max_pos)
+                
+                # --- Unrestricted Execution (+5800% Mode) ---
+                shares = int(raw_value / real_buy)
                 if shares > 0:
-                    t_atr = atr_np[i, s_idx]
                     portfolio.append({
                         's_idx': s_idx, 'buy_price': real_buy,
-                        'shares': shares, 'held_days': 0, 'max_price': real_buy
+                        'shares': shares, 'held_days': 0, 'max_price': real_buy,
+                        'buy_atr': atr_np[i, s_idx]
                     })
                     cash -= real_buy * shares
                     trade_count += 1

@@ -67,16 +67,16 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 3      # ★Optimized: Concentrated 3-Elite Strategy
-BREADTH_THRESHOLD     = 0.30   # ★Optimized: More stable environment
-MAX_RISK_PER_TRADE    = 0.01   # 1% Risk per trade
-LEVERAGE_RATE         = 2.5    # ★Optimized: Performance Sweet Spot
+MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
+BREADTH_THRESHOLD     = 0.30   
+MAX_RISK_PER_TRADE    = 0.01   
+LEVERAGE_RATE         = 2.0    
 MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.01   
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 3.0    # ★Optimized: Proper breathing room
-TARGET_PROFIT_MULT    = 40.0   # ★Optimized: Captured deep reversion
+ATR_STOP_LOSS         = 3.0    
+TARGET_PROFIT_MULT    = 20.0   # ★V140: Large-cap Momentum Capture
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price

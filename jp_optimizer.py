@@ -72,13 +72,13 @@ def optimize_jp_imperial(cache_path):
     
     # --- Aggressive Mean Reversion Search ---
     
-    # --- Sovereign Optimization Grid (V131.3) ---
+    # --- Sovereign Optimization Grid (V132.1 Expanded) ---
     param_grid = {
-        'breadth': [0.3],
-        'sl_mult': [3.0, 4.5],
-        'tp_mult': [40.0, 60.0, 80.0],
-        'max_pos': [3, 4, 5],
-        'leverage_rate': [2.0, 2.5],
+        'breadth': [0.3, 0.5],
+        'sl_mult': [3.0, 5.0, 7.0],
+        'tp_mult': [20.0, 40.0, 80.0],
+        'max_pos': [3, 5, 8],
+        'leverage_rate': [1.0, 2.0, 3.0],
         'max_hold_days': [30]
     }
 
