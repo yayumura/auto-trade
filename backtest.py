@@ -104,7 +104,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # A. Adaptive Stop (Breadth & DD Based)
             stop_mult = 3.0 
             curr_breadth = breadth_ratio[i]
-            if curr_breadth < 0.45: stop_mult = 1.5 
+            if curr_breadth < breadth_threshold: stop_mult = 1.5 
             if month_drawdown <= -0.07: stop_mult = 1.0 
             
             stop_dist = stop_mult * t_atr 
@@ -118,9 +118,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # B. RSI Overextension
             exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
             
-            # C. Trend Breach (2.5% buffer)
+            # C. Trend Breach (Synced buffer)
             is_trend_broken = False
-            if t_close < sma20_np[i, tidx] * 0.975:
+            if t_close < sma20_np[i, tidx] * exit_buffer:
                 is_trend_broken = True
             
             if t_low <= tsl_price or t_open <= tsl_price:
@@ -128,6 +128,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             elif r2 > exit_threshold:
                 exit_p = t_close
             elif is_trend_broken:
+                exit_p = t_close
+            elif p.get('held_days', 0) >= max_hold_days:
                 exit_p = t_close
             elif month_done:
                 exit_p = t_close
@@ -138,6 +140,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 cash += final_exit * p['shares']
                 cooling_days = 2
             else:
+                p['held_days'] = p.get('held_days', 0) + 1
                 new_portfolio.append(p)
         portfolio = new_portfolio
         

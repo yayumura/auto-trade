@@ -68,7 +68,7 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 # --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   
 MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
-BREADTH_THRESHOLD     = 0.30   
+BREADTH_THRESHOLD     = 0.40   # ★FINAL SYNC: +1351% Growth Apex
 MAX_RISK_PER_TRADE    = 0.01   
 LEVERAGE_RATE         = 1.0    # ★V149: Optimizer Golden Ratio (Lower Lev = Higher Trend Endurance)
 MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
@@ -82,12 +82,13 @@ MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.985  # ★NEW: 0.985 (損切り・微益撤退のバランス最適化)
+SMA20_EXIT_BUFFER     = 0.975  # ★SYNC: 0.975 (2.5% Buffer for Alpha endurance)
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
+MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():

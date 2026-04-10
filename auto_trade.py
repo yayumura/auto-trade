@@ -215,7 +215,7 @@ def _main_exec():
     realtime_buffers = {}
     has_morning_scanned = False
     canceled_orders = {}
-    cooling_days = 0 # [V132] Over-trading prevention
+    cooling_until = None # [V132] Over-trading prevention (Date based parity)
     
     # --- [Aegis Protocol State] ---
     current_month_str = server_datetime.strftime('%Y-%m')
@@ -250,10 +250,12 @@ def _main_exec():
             send_discord_notify(msg)
             ensure_kabu_station_running()
             
-        print(f"\n[{datetime.datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
-        if cooling_days > 0:
-            print(f"🛡️ [Cooling] {cooling_days} cycles remaining. Skipping entry scan.")
-            cooling_days -= 1
+        print(f"\n[{datetime.datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (Phase: {phase.value})")
+        if cooling_until and server_datetime < cooling_until:
+            print(f"🛡️ [Cooling] Paused until {cooling_until.strftime('%Y-%m-%d %H:%M')}. Skipping entry scan.")
+            should_scan_override = False
+        else:
+            should_scan_override = True
 
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
@@ -400,7 +402,7 @@ def _main_exec():
         )
         actions_taken.extend(sell_actions)
         if sell_actions:
-            cooling_days = COOLING_DAYS
+            cooling_until = server_datetime + datetime.timedelta(days=COOLING_DAYS)
         
         # [V17.0 Final Persistence]
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
@@ -410,7 +412,7 @@ def _main_exec():
         should_scan = True
         if regime == "BEAR": should_scan = False
         elif len(portfolio) >= MAX_POSITIONS: should_scan = False
-        elif cooling_days > 0: should_scan = False
+        elif not should_scan_override: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= datetime.time(14, 0) and not DEBUG_MODE: should_scan = False
         

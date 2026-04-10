@@ -31,7 +31,7 @@ def run_single_opt(params_pack):
         max_hold_days=p['max_hold_days'],
         slippage=0.003, # ★Reality Sync (Consistent with jp_backtest.py)
         use_sma_exit=EXIT_ON_SMA20_BREACH, 
-        exit_buffer=SMA20_EXIT_BUFFER
+        exit_buffer=p['exit_buffer']   # ★Optimized Buffer Sync
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -75,25 +75,28 @@ def optimize_jp_imperial(cache_path):
     
     # --- Sovereign Optimization Grid (V132.1 Expanded) ---
     param_grid = {
-        'breadth': [0.3, 0.5],
-        'sl_mult': [3.0, 5.0, 7.0],
-        'tp_mult': [20.0, 40.0, 80.0],
-        'max_pos': [3, 5, 8],
-        'leverage_rate': [1.0, 2.0, 3.0],
+        'breadth': [0.3, 0.4, 0.45, 0.5],             # ★Pinpoint Golden Area
+        'exit_buffer': [0.97, 0.975, 0.98, 0.985],    # ★Buffer Optimization
+        'sl_mult': [3.0, 5.0],
+        'tp_mult': [20.0, 40.0],
+        'max_pos': [3],                              # Focusing on Imperial Elite
+        'leverage_rate': [1.0, 2.0],
         'max_hold_days': [30]
     }
 
     grid = []
     for b in param_grid['breadth']:           
-        for sl in param_grid['sl_mult']:          
-            for tp in param_grid['tp_mult']: 
-                for p_size in param_grid['max_pos']:
-                    for lev in param_grid['leverage_rate']:
-                        for mhd in param_grid['max_hold_days']: 
-                            grid.append({
-                                "breadth": b, "sl": sl, "tp": tp, 
-                                "max_pos": p_size, "leverage": lev, "max_hold_days": mhd
-                            })
+        for ex_b in param_grid['exit_buffer']:
+            for sl in param_grid['sl_mult']:          
+                for tp in param_grid['tp_mult']: 
+                    for p_size in param_grid['max_pos']:
+                        for lev in param_grid['leverage_rate']:
+                            for mhd in param_grid['max_hold_days']: 
+                                grid.append({
+                                    "breadth": b, "exit_buffer": ex_b,
+                                    "sl": sl, "tp": tp, 
+                                    "max_pos": p_size, "leverage": lev, "max_hold_days": mhd
+                                })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 
@@ -124,6 +127,7 @@ def optimize_jp_imperial(cache_path):
     print(f"BEST SHORT SWING CONFIGURATION:")
     print(f" - Max Positions:     {best['max_pos']:.0f}")
     print(f" - Breadth Threshold: {best['breadth']:.2f}")
+    print(f" - SMA20 Exit Buffer: {best['exit_buffer']:.3f} (Synced)")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
     print(f" - Max Hold Days:     {best['max_hold_days']:.0f}")

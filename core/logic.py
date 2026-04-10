@@ -7,7 +7,7 @@ from core.config import (
     MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
-    SMA20_EXIT_BUFFER
+    SMA20_EXIT_BUFFER, MAX_HOLD_DAYS
 )
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
@@ -40,7 +40,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         stop_mult = 3.0 # Base (High performance)
         
         # Protective triggers
-        if market_breadth < 0.45: stop_mult = 1.5 # Market rotation protection
+        if market_breadth < BREADTH_THRESHOLD: stop_mult = 1.5 # Market rotation protection
         if month_drawdown <= -0.07: stop_mult = 1.0 # Emergency lockdown
         
         stop_dist = stop_mult * atr 
@@ -55,8 +55,8 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         # 3. Technical Trend Exit
         is_trend_broken = False
         if sma20_map and code in sma20_map:
-            # 2.5% buffer for optimized endurance
-            if current_price < float(sma20_map[code]) * 0.975: 
+            # Buffer for optimized endurance (Synced with config)
+            if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER: 
                 is_trend_broken = True
 
         # 4. Sell Decision
@@ -69,6 +69,16 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             exit_reason = "Trend Breach (SMA20)"
         elif month_drawdown <= -0.15: # Doomsday
             exit_reason = "System Circuit Breaker"
+            
+        # 5. Time Stop (V17.0 Parity)
+        buy_time_str = p.get('buy_time')
+        if buy_time_str:
+            try:
+                bt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
+                days_held = (dt.now() - bt).days
+                if days_held >= MAX_HOLD_DAYS:
+                    exit_reason = f"Time Stop ({days_held} days)"
+            except: pass
 
         if exit_reason:
             sell_actions.append(f"SELL {code} - {exit_reason} (@{current_price:,.1f})")
