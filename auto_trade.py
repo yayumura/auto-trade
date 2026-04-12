@@ -49,7 +49,7 @@ from core.config import (
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS,
+    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT, BEAR_GAP_LIMIT,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -569,8 +569,8 @@ def _main_exec():
                                         special_quote_watchlist[str(item['code'])] = item
                                         continue
                                     gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
-                                    gap_threshold = 0.05 if regime == "BULL" else 0.02
-                                    if (regime == "BULL" and gap_pct < -0.02) or (regime != "BULL" and abs(gap_pct) > gap_threshold):
+                                    gap_threshold = BULL_GAP_LIMIT if regime == "BULL" else BEAR_GAP_LIMIT
+                                    if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_threshold):
                                         print(f"[Skip] {item['code']} Gap check failed: {gap_pct:.2%}")
                                         continue
                                     item['price'] = c_price

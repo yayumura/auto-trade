@@ -9,15 +9,14 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                initial_cash=1000000, max_pos=2, 
                                sl_mult=3.0, tp_mult=40.0, leverage_rate=2.5, breadth_threshold=0.3,
                                slippage=0.001, use_sma_exit=False, exit_buffer=0.985, max_hold_days=30,
-                               liquidity_limit=0.01,
+                               liquidity_limit=0.01, bull_gap_limit=0.10, bear_gap_limit=0.02,
                                verbose=False):
     """
-    V150.0 Imperial Apex (Reality Sync)
-    - Full parity with live logic: RSI2 Mean Reversion + RS Leader Selection
-    - Aegis Shield: Monthly drawdown-based risk tightening
-    - Dynamic Leverage: Integrated breadth-based scaling
-    - Time Stop: 30-day limit
-    - Liquidity Filter: Synced with config.py (Direct Parity)
+    V150.2 Imperial Apex (Full Logic Parity)
+    - Replicates live logic: RSI2 Mean Reversion + RS Leader Selection
+    - Aegis Shield & Dynamic Leverage: Verified Sync
+    - Gap Filter: Synced with BULL_GAP_LIMIT / BEAR_GAP_LIMIT
+    - Liquidity Filter: Synced with LIQUIDITY_LIMIT_RATE
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -178,6 +177,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_sma200 = sma200s[s_idx]
             t_turnover = turnover_np[i, s_idx]
             
+            # [V150.2 Reality Sync] Gap Filter Parity
+            prev_close = close_np[i-1, s_idx]
+            gap_pct = (t_open / prev_close - 1.0) if prev_close > 0 else 0
+            gap_limit = bull_gap_limit if regime == "BULL" else bear_gap_limit
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_limit):
+                continue
+
             # Momentum Filters
             if rs < 25.0: continue
             if t_close < t_sma20: continue

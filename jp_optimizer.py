@@ -11,7 +11,8 @@ from core.logic import calculate_all_technicals_v12
 from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
 from core.config import (
-    INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER
+    INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT
 )
 
 def run_single_opt(params_pack):
@@ -31,7 +32,10 @@ def run_single_opt(params_pack):
         max_hold_days=p['max_hold_days'],
         slippage=0.003, # ★Reality Sync (Consistent with jp_backtest.py)
         use_sma_exit=EXIT_ON_SMA20_BREACH, 
-        exit_buffer=p['exit_buffer']   # ★Optimized Buffer Sync
+        exit_buffer=p['exit_buffer'],   # ★Optimized Buffer Sync
+        liquidity_limit=LIQUIDITY_LIMIT_RATE, # ★Full Parity Sync
+        bull_gap_limit=p['bgap'],             # ★Optimized Search Parameter
+        bear_gap_limit=BEAR_GAP_LIMIT         # ★Full Parity Sync
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
@@ -73,14 +77,15 @@ def optimize_jp_imperial(cache_path):
     
     # --- Aggressive Mean Reversion Search ---
     
-    # --- Sovereign Optimization Grid (V132.1 Expanded) ---
+    # --- Sovereign Optimization Grid (V152.0 Profit Pursuit) ---
     param_grid = {
-        'breadth': [0.3, 0.4, 0.45, 0.5],             # ★Pinpoint Golden Area
-        'exit_buffer': [0.97, 0.975, 0.98, 0.985],    # ★Buffer Optimization
+        'breadth': [0.4, 0.5, 0.6],             
+        'exit_buffer': [0.975, 0.98],    
         'sl_mult': [3.0, 5.0],
         'tp_mult': [20.0, 40.0],
-        'max_pos': [3],                              # Focusing on Imperial Elite
-        'leverage_rate': [1.0, 2.0],
+        'max_pos': [3],                              
+        'leverage_rate': [1.0, 2.0, 3.0],
+        'bull_gap_limit': [0.10, 0.11, 0.12, 0.13],
         'max_hold_days': [30]
     }
 
@@ -89,14 +94,14 @@ def optimize_jp_imperial(cache_path):
         for ex_b in param_grid['exit_buffer']:
             for sl in param_grid['sl_mult']:          
                 for tp in param_grid['tp_mult']: 
-                    for p_size in param_grid['max_pos']:
-                        for lev in param_grid['leverage_rate']:
-                            for mhd in param_grid['max_hold_days']: 
-                                grid.append({
-                                    "breadth": b, "exit_buffer": ex_b,
-                                    "sl": sl, "tp": tp, 
-                                    "max_pos": p_size, "leverage": lev, "max_hold_days": mhd
-                                })
+                    for lev in param_grid['leverage_rate']:
+                        for bgap in param_grid['bull_gap_limit']:
+                            grid.append({
+                                "breadth": b, "exit_buffer": ex_b,
+                                "sl": sl, "tp": tp, 
+                                "max_pos": 3, "leverage": lev, 
+                                "bgap": bgap, "max_hold_days": 30
+                            })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 
@@ -130,6 +135,7 @@ def optimize_jp_imperial(cache_path):
     print(f" - SMA20 Exit Buffer: {best['exit_buffer']:.3f} (Synced)")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
+    print(f" - BULL Gap Limit:    {best['bgap']:.2%} (Optimized)")
     print(f" - Max Hold Days:     {best['max_hold_days']:.0f}")
     print(f"Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
     print("="*80)

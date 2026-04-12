@@ -70,25 +70,27 @@ USE_DYNAMIC_LEVERAGE  = True
 MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
 BREADTH_THRESHOLD     = 0.40   # ★FINAL SYNC: +1351% Growth Apex
 MAX_RISK_PER_TRADE    = 0.01   
-LEVERAGE_RATE         = 1.0    # ★V149: Optimizer Golden Ratio (Lower Lev = Higher Trend Endurance)
-MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
+LEVERAGE_RATE         = 3.0    # ★V152: Optimized Profit Pursuit (3.0x Leverage)
+MAX_ALLOCATION_PCT    = 1.0    # (LEVERAGE 3.0 / 3 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  # ★RE-TUNED: Balanced Efficiency (2.5%)
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 3.0    
-TARGET_PROFIT_MULT    = 20.0   # ★V140: Large-cap Momentum Capture
+ATR_STOP_LOSS         = 3.0    # ★V152: Precision SL (ATR * 3.0)
+TARGET_PROFIT_MULT    = 40.0   # ★V152: Extended Profit Run (ATR * 40.0)
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.975  # ★SYNC: 0.975 (2.5% Buffer for Alpha endurance)
+SMA20_EXIT_BUFFER     = 0.980  # ★V152: Optimized Fast-Trend Exit (0.980)
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
+BULL_GAP_LIMIT        = 0.13   # ★V152: Optimized Momentum Gap limit (13%)
+BEAR_GAP_LIMIT        = 0.02   # ★V151: Defensive Gap limit (2%)
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():
