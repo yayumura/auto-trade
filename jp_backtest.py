@@ -17,8 +17,8 @@ def run_jp_broad_backtest(cache_path):
         print(f"Error: Cache not found at {cache_path}")
         return
 
-    print("⚠️ WARNING: Ensure your dataset includes delisted tickers to avoid survivorship bias.")
-    print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
+    print("WARNING: Ensure your dataset includes delisted tickers to avoid survivorship bias.")
+    print(f"Loading JP Mega-Data Cache: {cache_path}")
     with open(cache_path, 'rb') as f:
         data = pickle.load(f)
 
@@ -43,9 +43,9 @@ def run_jp_broad_backtest(cache_path):
 
     # Verify 1321.T inclusion
     if '1321.T' in bundle['Close'].columns:
-        print("✅ 1321.T Found and Normalized.")
+        print("1321.T Found and Normalized.")
     else:
-        print("⚠️ 1321.T not found in primary close columns!")
+        print("1321.T not found in primary close columns!")
 
     # Universe Selection
     all_tickers = bundle['Close'].columns
@@ -56,7 +56,7 @@ def run_jp_broad_backtest(cache_path):
     bundle_np['tickers'] = list(all_tickers)
 
     # Indicators
-    print("🧪 Calculating Technical Indicators for JP Universe...")
+    print("Calculating Technical Indicators for JP Universe...")
     indicator_bundle = calculate_all_technicals_v12(data) # Pass full dataframe
     bundle_np.update({k: v.values for k, v in indicator_bundle.items()})
 
@@ -72,31 +72,32 @@ def run_jp_broad_backtest(cache_path):
     # RUN BACKTEST (V17.0 IMPERIAL ORACLE SYNC)
     from backtest import run_backtest_v16_production
     
-    print("\n🚀 Starting Japan IMPERIAL ORACLE Backtest (V17.0 Pullback Sync)...")
+    print("\nStarting Japan IMPERIAL ORACLE Backtest (V20.1 Premium Reversion Sync)...")
     final_assets, trade_count, monthly_assets, trade_results = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
         timeline=timeline,
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
-        max_pos=MAX_POSITIONS,
-        sl_mult=ATR_STOP_LOSS,
-        tp_mult=TARGET_PROFIT_MULT,
-        leverage_rate=LEVERAGE_RATE,
-        breadth_threshold=BREADTH_THRESHOLD,
-        slippage=0.001,
-        use_sma_exit=EXIT_ON_SMA20_BREACH,
-        exit_buffer=SMA20_EXIT_BUFFER,
+        max_pos=MAX_POSITIONS, # Sync with config
+        sl_mult=ATR_STOP_LOSS, # Sync with config
+        tp_mult=TARGET_PROFIT_MULT, # Sync with config
+        leverage_rate=LEVERAGE_RATE, # Sync with config
+        breadth_threshold=BREADTH_THRESHOLD, # Sync with config
+        slippage=0.003,
+        max_hold_days=30,
+        use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with config
+        exit_buffer=SMA20_EXIT_BUFFER, # Sync with config
         verbose=False
     )
 
     # Report
     print("="*50)
-    print("🇯🇵 JAPAN IMPERIAL ORACLE PERFORMANCE (V17.0)")
+    print("JAPAN IMPERIAL ORACLE PERFORMANCE (V17.0)")
     print("="*50)
     print(f"PERIOD:        {timeline[0].date()} to {timeline[-1].date()}")
-    print(f"INITIAL CASH:  ¥{INITIAL_CASH:,.0f}")
-    print(f"FINAL EQUITY:  ¥{final_assets:,.0f}")
+    print(f"INITIAL CASH:  Y{INITIAL_CASH:,.0f}")
+    print(f"FINAL EQUITY:  Y{final_assets:,.0f}")
     print(f"TOTAL RETURN:  {((final_assets/INITIAL_CASH)-1)*100:+.2f}%")
     print(f"TOTAL TRADES:  {trade_count}")
     
@@ -112,19 +113,16 @@ def run_jp_broad_backtest(cache_path):
         
         print(f"WIN RATE:      {win_rate:.2f}%")
         print(f"PROFIT FACTOR: {pf:.2f}")
-        print(f"AVERAGE WIN:   ¥{avg_win:,.0f}")
-        print(f"AVERAGE LOSS:  ¥{avg_loss:,.0f}")
+        print(f"AVERAGE WIN:   Y{avg_win:,.0f}")
+        print(f"AVERAGE LOSS:  Y{avg_loss:,.0f}")
     
     print("-" * 50)
     
     print("HISTORICAL EQUITY PROGRESS:")
     sorted_months = sorted(monthly_assets.keys())
     for m in sorted_months:
-        is_dec = m.endswith("-12")
-        is_recent = m in sorted_months[-12:]
-        if is_dec or is_recent:
-            val = monthly_assets[m]
-            print(f" {m:15} | ¥{val:12,.0f}")
+        val = monthly_assets[m]
+        print(f" {m:15} | Y{val:12,.0f}")
     print("="*50 + "\n")
 
 if __name__ == "__main__":

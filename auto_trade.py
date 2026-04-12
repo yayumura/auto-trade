@@ -49,7 +49,7 @@ from core.config import (
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST,
+    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -93,7 +93,7 @@ def release_lock():
 from core.logic import (
     detect_market_regime, manage_positions_live, select_best_candidates, 
     load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
-    RealtimeBuffer
+    RealtimeBuffer, calculate_aegis_shield
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -215,6 +215,22 @@ def _main_exec():
     realtime_buffers = {}
     has_morning_scanned = False
     canceled_orders = {}
+    cooling_until = None # [V132] Over-trading prevention (Date based parity)
+    
+    # --- [Aegis Protocol State] ---
+    current_month_str = server_datetime.strftime('%Y-%m')
+    account_data = safe_read_json(ACCOUNT_FILE)
+    month_start_equity = account_data.get('month_start_equity', 0)
+    
+    # 初回起動時または月替わり時に月初資産を記録
+    account = broker.get_account_balance()
+    initial_total = account['cash'] + sum([p.get('current_price', p['buy_price']) * p['shares'] for p in broker.get_positions()])
+    if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
+        month_start_equity = initial_total
+        account_data['month_start_equity'] = month_start_equity
+        account_data['current_month'] = current_month_str
+        atomic_write_json(ACCOUNT_FILE, account_data)
+        print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
 
     while True:
         if os.path.exists("stop.txt"):
@@ -234,7 +250,12 @@ def _main_exec():
             send_discord_notify(msg)
             ensure_kabu_station_running()
             
-        print(f"\n[{datetime.datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (サーバー時刻: {now_time.strftime('%H:%M:%S')} - Phase: {phase.value})")
+        print(f"\n[{datetime.datetime.now(JST).strftime('%H:%M:%S')}] [UP] 監視サイクル開始 (Phase: {phase.value})")
+        if cooling_until and server_datetime < cooling_until:
+            print(f"🛡️ [Cooling] Paused until {cooling_until.strftime('%Y-%m-%d %H:%M')}. Skipping entry scan.")
+            should_scan_override = False
+        else:
+            should_scan_override = True
 
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
@@ -359,23 +380,29 @@ def _main_exec():
             print(f"[WARNING] バッファ同期エラー: {e}")
 
         try:
-            # [V17.2 Enhancement] Regime Filter: SMA100 of Nikkei 225
-            regime = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
+            # [V131.1 Aegis Enhancement] Regime Filter & Trend Health
+            regime, is_trend_snapped = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
         except:
-            regime = "RANGE"
+            regime, is_trend_snapped = "RANGE", False
             last_scan_time = loop_start_time
 
-        print(f"[STAT] 現在のレジーム: 【{regime}】")
+        # Calculate Monthly Drawdown for Aegis Protocol
+        current_total = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+        month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         
-        # [V17.3 Imperial Sync] Position management and auto-reporting
-        # Prepare SMA20 Map for technical exit
+        print(f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} | MonthDD: {month_drawdown:+.2%}")
+        
+        # [V131.1 Aegis Sync] Position management with dynamic risk shield
         sma20_map = {str(code): info.get('SMA20', 0) for code, info in jp_cache.items()}
         
         portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
-            realtime_buffers=realtime_buffers, sma20_map=sma20_map
+            realtime_buffers=realtime_buffers, sma20_map=sma20_map,
+            month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped
         )
         actions_taken.extend(sell_actions)
+        if sell_actions:
+            cooling_until = server_datetime + datetime.timedelta(days=COOLING_DAYS)
         
         # [V17.0 Final Persistence]
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
@@ -385,6 +412,7 @@ def _main_exec():
         should_scan = True
         if regime == "BEAR": should_scan = False
         elif len(portfolio) >= MAX_POSITIONS: should_scan = False
+        elif not should_scan_override: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= datetime.time(14, 0) and not DEBUG_MODE: should_scan = False
         
@@ -450,16 +478,14 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # Determine Current Leverage
+                    # Determine Current Leverage (Shared Logic V133)
+                    shield_mult = calculate_aegis_shield(month_drawdown, regime)
                     if USE_DYNAMIC_LEVERAGE:
-                        if breadth_val >= 0.50: dynamic_lev = 3.0
-                        elif breadth_val >= 0.40: dynamic_lev = 2.0
-                        elif breadth_val >= 0.30: dynamic_lev = 1.0
-                        else:
-                            print("🛡️ [Safeguard] Breadth below 30%. Suppressing new entries for this cycle.")
-                            dynamic_lev = 0.0
+                        dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE, shield_mult=shield_mult)
+                        if dynamic_lev <= 0:
+                            print("🛡️ [Safeguard] Breadth or Shield below threshold. Suppressing new entries.")
                     else:
-                        dynamic_lev = LEVERAGE_RATE
+                        dynamic_lev = LEVERAGE_RATE * shield_mult
                     
                     print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
                 else:

@@ -10,11 +10,13 @@ sys.path.append(os.getcwd())
 from core.logic import calculate_all_technicals_v12
 from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
-from core.config import INITIAL_CASH
+from core.config import (
+    INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER
+)
 
 def run_single_opt(params_pack):
     univ_indices, bundle_np, timeline, breadth_ratio, p = params_pack
-    # --- [Overdrive Mode] Leverage 3.0x forced for peak alpha discovery ---
+    # --- Concentrated Elite Mode (V89.0) ---
     final_assets, trade_count, _, _ = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -24,14 +26,17 @@ def run_single_opt(params_pack):
         max_pos=p['max_pos'],
         sl_mult=p['sl'],
         tp_mult=p['tp'],
-        leverage_rate=3.0, # ★OVERDRIVE: 信用レバレッジ3倍を固定適用
+        leverage_rate=p['leverage'],
         breadth_threshold=p['breadth'],
-        exit_buffer=p.get('exit_buffer', 0.985)
+        max_hold_days=p['max_hold_days'],
+        slippage=0.003, # ★Reality Sync (Consistent with jp_backtest.py)
+        use_sma_exit=EXIT_ON_SMA20_BREACH, 
+        exit_buffer=p['exit_buffer']   # ★Optimized Buffer Sync
     )
     return {**p, "final": final_assets, "trades": trade_count}
 
 def optimize_jp_imperial(cache_path):
-    print(f"📡 Loading JP Mega-Data Cache: {cache_path}")
+    print(f"Loading JP Mega-Data Cache: {cache_path}")
     with open(cache_path, 'rb') as f:
         all_data = pickle.load(f)
 
@@ -66,25 +71,35 @@ def optimize_jp_imperial(cache_path):
     bundle_np['tickers'] = list(tickers)
     timeline = bundle['Close'].index
     
-    # --- [Overdrive Mode] Physics-Defying Alpha Sync ---
-    grid = []
+    # --- Aggressive Mean Reversion Search ---
     
-    breadth_range      = [0.2, 0.3]          # 地合い判定を極限まで緩和
-    sl_range           = [6.0, 8.0, 10.0]    # ノイズを完全に無視する超広域ストップ
-    tp_range           = [20.0, 30.0, 40.0]  # テンバガーを狙う超巨大利確
-    max_pos_range      = [3, 5, 7]           # 物理限界までの集中投資
-    exit_buffer_range  = [0.985]             # 計算効率のため固定
+    # --- Sovereign Optimization Grid (V132.1 Expanded) ---
+    param_grid = {
+        'breadth': [0.3, 0.4, 0.45, 0.5],             # ★Pinpoint Golden Area
+        'exit_buffer': [0.97, 0.975, 0.98, 0.985],    # ★Buffer Optimization
+        'sl_mult': [3.0, 5.0],
+        'tp_mult': [20.0, 40.0],
+        'max_pos': [3],                              # Focusing on Imperial Elite
+        'leverage_rate': [1.0, 2.0],
+        'max_hold_days': [30]
+    }
 
-    for b in breadth_range:           
-        for sl in sl_range:          
-            for tp in tp_range: 
-                for p_size in max_pos_range:          
-                    for eb in exit_buffer_range: 
-                        grid.append({
-                            "breadth": b, "sl": sl, "tp": tp, "max_pos": p_size, "exit_buffer": eb
-                        })
+    grid = []
+    for b in param_grid['breadth']:           
+        for ex_b in param_grid['exit_buffer']:
+            for sl in param_grid['sl_mult']:          
+                for tp in param_grid['tp_mult']: 
+                    for p_size in param_grid['max_pos']:
+                        for lev in param_grid['leverage_rate']:
+                            for mhd in param_grid['max_hold_days']: 
+                                grid.append({
+                                    "breadth": b, "exit_buffer": ex_b,
+                                    "sl": sl, "tp": tp, 
+                                    "max_pos": p_size, "leverage": lev, "max_hold_days": mhd
+                                })
     
-    print(f"🚀 [OVERDRIVE_OPT] Starting Grid Search ({len(grid)} combinations, Leverage 3.0x)...")
+    print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
+
     
     results = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
@@ -99,20 +114,26 @@ def optimize_jp_imperial(cache_path):
     # Sort by performance
     df_res = df_res.sort_values('return_pct', ascending=False)
     
+    # Save to CSV for reliability
+    df_res.to_csv("opt_results.csv", index=False)
+    
     print("\n" + "="*80)
-    print("🏆 IMPERIAL ORACLE Overdrive - [PHYSICS BREAKER] RESULTS")
+    print("SHORT SWING (MEAN REVERSION) RESULTS")
     print("="*80)
     print(df_res.head(30).to_string(index=False))
     print("="*80 + "\n")
     
     best = df_res.iloc[0]
-    print(f"🥇 BEST OVERDRIVE CONFIGURATION (LEVERAGE 3.0x):")
+    print(f"BEST SHORT SWING CONFIGURATION:")
     print(f" - Max Positions:     {best['max_pos']:.0f}")
     print(f" - Breadth Threshold: {best['breadth']:.2f}")
+    print(f" - SMA20 Exit Buffer: {best['exit_buffer']:.3f} (Synced)")
     print(f" - Stop Loss:         ATR * {best['sl']}")
     print(f" - Profit Target:     ATR * {best['tp']}")
-    print(f"📈 Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
+    print(f" - Max Hold Days:     {best['max_hold_days']:.0f}")
+    print(f"Estimated 5-Year Return: {best['return_pct']:+.2f}% ({best['trades']} trades)")
     print("="*80)
+
 
 if __name__ == "__main__":
     if not os.path.exists("data_cache"):
