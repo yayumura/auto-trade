@@ -227,6 +227,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
     sma200 = bundle['SMA200'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
     rs_alpha = bundle['RS_Alpha'].iloc[-1]
+    turnover = bundle['Turnover'].iloc[-1] if 'Turnover' in bundle else None
     
     candidates = []
     for t_with_t in [f"{t}.T" for t in targets]:
@@ -258,6 +259,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
                 "atr": atr[t_with_t],
                 "rs": rs,
                 "rsi2": r2,
+                "adv_yen": turnover[t_with_t] if turnover is not None else 0,
                 "score": rs # Pure momentum score
             })
 

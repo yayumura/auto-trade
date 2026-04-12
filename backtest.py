@@ -9,14 +9,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                initial_cash=1000000, max_pos=2, 
                                sl_mult=3.0, tp_mult=40.0, leverage_rate=2.5, breadth_threshold=0.3,
                                slippage=0.001, use_sma_exit=False, exit_buffer=0.985, max_hold_days=30,
+                               liquidity_limit=0.01,
                                verbose=False):
     """
-    V132.0 Imperial Apex (Aegis Sovereign Sync)
+    V150.0 Imperial Apex (Reality Sync)
     - Full parity with live logic: RSI2 Mean Reversion + RS Leader Selection
     - Aegis Shield: Monthly drawdown-based risk tightening
     - Dynamic Leverage: Integrated breadth-based scaling
     - Time Stop: 30-day limit
-    - Break-even Stop: ATR 5.0 Profit protection
+    - Liquidity Filter: Synced with config.py (Direct Parity)
     """
     T = len(timeline)
     cash = float(initial_cash)
@@ -189,14 +190,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 real_buy = t_close * (1.0 + slippage)
                 raw_value = (total_equity * dynamic_lev / max_pos)
                 
-                # --- Adaptive Liquidity Filter (V148.0 Reality Apex) ---
+                # --- Adaptive Liquidity Filter (V150.0 Reality Sync) ---
                 # Purpose: Ensure reality at scale.
-                if raw_value < 5_000_000:
-                    actual_value = raw_value # Small-cap growth phase
-                elif raw_value < 20_000_000:
-                    actual_value = min(raw_value, t_turnover * 0.20)
-                else:
-                    actual_value = min(raw_value, t_turnover * 0.05)
+                actual_value = min(raw_value, t_turnover * liquidity_limit)
                 
                 shares = int(actual_value / real_buy)
                 if shares > 0:
