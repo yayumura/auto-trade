@@ -50,6 +50,7 @@ from core.config import (
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS, MAX_RISK_PER_TRADE,
     USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT, BEAR_GAP_LIMIT,
+    SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     load_insider_exclusion_codes
 )
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
@@ -393,11 +394,11 @@ def _main_exec():
         print(f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} | MonthDD: {month_drawdown:+.2%}")
         
         # [V131.1 Aegis Sync] Position management with dynamic risk shield
-        sma20_map = {str(code): info.get('SMA20', 0) for code, info in jp_cache.items()}
+        sma_med_map = {str(code): info.get(f'SMA{SMA_MEDIUM_PERIOD}', 0) for code, info in jp_cache.items()}
         
         portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
-            realtime_buffers=realtime_buffers, sma20_map=sma20_map,
+            realtime_buffers=realtime_buffers, sma_med_map=sma_med_map,
             month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped
         )
         actions_taken.extend(sell_actions)
@@ -468,11 +469,11 @@ def _main_exec():
                     indicator_bundle = calculate_all_technicals_v12(data_df)
                     
                     close_data = indicator_bundle['Close']
-                    sma100_data = indicator_bundle['SMA100']
+                    sma_long_data = indicator_bundle[f'SMA{SMA_LONG_PERIOD}']
                     
                     elite_cols = [t for t in prime_ref if t in close_data.columns]
                     if elite_cols:
-                        breadth_matrix = (close_data[elite_cols].iloc[-1] > sma100_data[elite_cols].iloc[-1])
+                        breadth_matrix = (close_data[elite_cols].iloc[-1] > sma_long_data[elite_cols].iloc[-1])
                         breadth_val = breadth_matrix.mean()
                         print(f"📊 [Dynamic Risk] Market Breadth (Prime): {breadth_val:.1%}")
                     else:
@@ -648,8 +649,8 @@ def _main_exec():
                             if hasattr(broker, 'save_account'): broker.save_account(account)
                             if item['code'] in watchlist: watchlist.remove(item['code'])
                         else:
-                            reason = "資金不足" if ms_c < 100 else "リスク許容度オーバーまたは割当上限"
-                            print(f"⏭️ [Skip] {item['code']} は発注株数が単位未満（{ts}株）のため見送ります。理由: {reason} (必要株数: {min(is_sh, ms_a, ms_c):.0f})")
+                            reason = "資金不足" if ms_bp < 100 else "リスク許容度オーバーまたは割当上限"
+                            print(f"⏭️ [Skip] {item['code']} は発注株数が単位未満（{ts}株）のため見送ります。理由: {reason} (必要株数: {min(is_sh, ms_a, ms_bp):.0f})")
 
         summary_record = {
             "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),

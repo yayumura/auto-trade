@@ -7,10 +7,11 @@ from core.config import (
     MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
-    SMA20_EXIT_BUFFER, MAX_HOLD_DAYS
+    SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
+    SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD
 )
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma20_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
+def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
     V143.0 Adaptive Alpha Manager:
     - Growth Focus: 3.0 ATR base trail.
@@ -37,7 +38,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         highest_price = float(p.get('highest_price', 0))
         
         # 2. Adaptive Stop Multiplier
-        stop_mult = 3.0 # Base (High performance)
+        stop_mult = float(ATR_STOP_LOSS) # Base (High performance from config)
         
         # Protective triggers
         if market_breadth < BREADTH_THRESHOLD: stop_mult = 1.5 # Market rotation protection
@@ -54,15 +55,19 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
             
         # 3. Technical Trend Exit
         is_trend_broken = False
-        if sma20_map and code in sma20_map:
+        if sma_med_map and code in sma_med_map:
             # Buffer for optimized endurance (Synced with config)
-            if current_price < float(sma20_map[code]) * SMA20_EXIT_BUFFER: 
+            if current_price < float(sma_med_map[code]) * SMA20_EXIT_BUFFER: 
                 is_trend_broken = True
 
         # 4. Sell Decision
         exit_reason = None
+        target_price = buy_price + (atr * TARGET_PROFIT_MULT)
+
         if current_price <= tsl_price:
             exit_reason = f"Trail Stop ({stop_mult:.1f} ATR)"
+        elif current_price >= target_price:
+            exit_reason = f"Take Profit ({TARGET_PROFIT_MULT:.1f} ATR)"
         elif rsi2 > exit_threshold:
             exit_reason = f"Profit Peak ({rsi2:.1f})"
         elif is_trend_broken:
@@ -112,13 +117,13 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0
     else: base = 0.0
     return min(base, config_leverage) * shield_mult
 
-def check_entry_signal(regime, rsi2, price, open_p, sma20, sma200=0):
+def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
     """V140.0 Momentum Entry: Buy Strength"""
     if regime != "BULL": return False # Strictly Bull only for momentum
     
-    # Perfect Order Confirmation: Price > SMA20 > SMA200
-    if price < sma20: return False
-    if sma200 > 0 and price < sma200 * 1.05: return False 
+    # Perfect Order Confirmation: Price > SMA_MED > SMA_TREND
+    if price < sma_med: return False
+    if sma_trend > 0 and price < sma_trend * 1.05: return False 
     
     # Entry on strength (RSI2 indicates buying pressure, not oversold)
     if rsi2 > 40 and price > open_p:
@@ -141,11 +146,10 @@ def calculate_all_technicals_v12(data_df):
     bundle['Close'] = close
     bundle['Open'] = open_v
     bundle['Volume'] = vol
-    bundle['SMA5'] = close.rolling(5).mean()
-    bundle['SMA20'] = close.rolling(20).mean()
-    bundle['SMA50'] = close.rolling(50).mean()
-    bundle['SMA100'] = close.rolling(100).mean()
-    bundle['SMA200'] = close.rolling(200).mean()
+    bundle[f'SMA{SMA_SHORT_PERIOD}'] = close.rolling(SMA_SHORT_PERIOD).mean()
+    bundle[f'SMA{SMA_MEDIUM_PERIOD}'] = close.rolling(SMA_MEDIUM_PERIOD).mean()
+    bundle[f'SMA{SMA_LONG_PERIOD}'] = close.rolling(SMA_LONG_PERIOD).mean()
+    bundle[f'SMA{SMA_TREND_PERIOD}'] = close.rolling(SMA_TREND_PERIOD).mean()
     
     # RSI (2) Vectorized
     delta = close.diff()
@@ -193,20 +197,20 @@ def detect_market_regime(data_df=None, buffer=None):
             close_all = data_df.xs('Close', axis=1, level=1)
             if '1321.T' in close_all.columns:
                 c_1321 = close_all['1321.T']
-                sma200 = c_1321.rolling(200).mean()
-                sma5 = c_1321.rolling(5).mean()
+                sma_trend = c_1321.rolling(SMA_TREND_PERIOD).mean()
+                sma_short = c_1321.rolling(SMA_SHORT_PERIOD).mean()
                 
                 curr_p = c_1321.iloc[-1]
-                curr_sma200 = sma200.iloc[-1]
-                prev_sma200 = sma200.iloc[-5] # 1 week ago
-                slope = (curr_sma200 / prev_sma200 - 1.0) * 100
+                curr_sma_trend = sma_trend.iloc[-1]
+                prev_sma_trend = sma_trend.iloc[-5] # 1 week ago
+                slope = (curr_sma_trend / prev_sma_trend - 1.0) * 100
                 
-                if curr_p > curr_sma200 and slope > 0.02:
+                if curr_p > curr_sma_trend and slope > 0.02:
                     regime = "BULL"
-                elif curr_p < curr_sma200 * 0.98:
+                elif curr_p < curr_sma_trend * 0.98:
                     regime = "BEAR"
                 
-                if curr_p < sma5.iloc[-1]:
+                if curr_p < sma_short.iloc[-1]:
                     is_trend_snapped = True
         except: pass
 
@@ -223,8 +227,8 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
     close = bundle['Close'].iloc[-1]
     open_p = bundle['Open'].iloc[-1]
     rsi2 = bundle['RSI2'].iloc[-1]
-    sma20 = bundle['SMA20'].iloc[-1]
-    sma200 = bundle['SMA200'].iloc[-1]
+    sma_med = bundle[f'SMA{SMA_MEDIUM_PERIOD}'].iloc[-1]
+    sma_trend = bundle[f'SMA{SMA_TREND_PERIOD}'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
     rs_alpha = bundle['RS_Alpha'].iloc[-1]
     turnover = bundle['Turnover'].iloc[-1] if 'Turnover' in bundle else None
@@ -236,14 +240,14 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         p = close[t_with_t]
         o = open_p[t_with_t]
         r2 = rsi2[t_with_t]
-        s20 = sma20[t_with_t]
-        s200 = sma200[t_with_t]
+        s_med = sma_med[t_with_t]
+        s_trend = sma_trend[t_with_t]
         rs = rs_alpha[t_with_t]
         
         if pd.isna(p) or p <= 0 or pd.isna(rs): continue
         if rs < 25.0: continue # Momentum requirement
         
-        entry_signal = check_entry_signal(regime, r2, p, o, s20, s200)
+        entry_signal = check_entry_signal(regime, r2, p, o, s_med, s_trend)
                 
         if entry_signal:
             code_only = t_with_t.replace(".T", "")

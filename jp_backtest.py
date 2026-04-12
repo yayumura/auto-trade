@@ -11,7 +11,7 @@ from core.logic import calculate_all_technicals_v12
 from core.config import (
     INITIAL_CASH, MAX_POSITIONS, LEVERAGE_RATE, ATR_STOP_LOSS, TARGET_PROFIT_MULT, 
     BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD
 )
 
 def run_jp_broad_backtest(cache_path):
@@ -67,7 +67,7 @@ def run_jp_broad_backtest(cache_path):
     prime_ref = get_prime_tickers()
     elite_indices = [i for i, t in enumerate(all_tickers) if t in prime_ref]
     
-    breadth_matrix = bundle['Close'].values[:, elite_indices] > indicator_bundle['SMA100'].values[:, elite_indices]
+    breadth_matrix = bundle['Close'].values[:, elite_indices] > indicator_bundle[f'SMA{SMA_LONG_PERIOD}'].values[:, elite_indices]
     breadth_series = np.nanmean(breadth_matrix.astype(float), axis=1)
     timeline = bundle['Close'].index
     

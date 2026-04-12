@@ -12,7 +12,7 @@ from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
 from core.config import (
     INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD
 )
 
 def run_single_opt(params_pack):
@@ -67,7 +67,7 @@ def optimize_jp_imperial(cache_path):
     prime_ref = get_prime_tickers()
     elite_indices = [i for i, t in enumerate(tickers) if t in prime_ref]
     
-    breadth_matrix = bundle['Close'].values[:, elite_indices] > bundle['SMA100'].values[:, elite_indices]
+    breadth_matrix = bundle['Close'].values[:, elite_indices] > bundle[f'SMA{SMA_LONG_PERIOD}'].values[:, elite_indices]
     breadth_series = np.nanmean(breadth_matrix.astype(float), axis=1)
     
     univ_indices = np.array([i for i, t in enumerate(tickers) if t not in {'1306.T', '1321.T'}], dtype=int)

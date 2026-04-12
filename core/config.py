@@ -87,6 +87,7 @@ SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
+SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 BULL_GAP_LIMIT        = 0.13   # ★V152: Optimized Momentum Gap limit (13%)
