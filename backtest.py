@@ -3,17 +3,20 @@ import numpy as np
 from core.logic import (
     calculate_aegis_shield, get_exit_thresholds, 
     calculate_dynamic_leverage, check_entry_signal,
-    calculate_adaptive_stop_mult
+    calculate_position_stops
 )
 from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD,
-    MAX_RISK_PER_TRADE, MIN_ALLOCATION_AMOUNT, MAX_ALLOCATION_AMOUNT
+    MAX_RISK_PER_TRADE, MIN_ALLOCATION_AMOUNT, MAX_ALLOCATION_AMOUNT,
+    SLIPPAGE, MAX_HOLD_DAYS, COOLING_DAYS, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER,
+    RS_THRESHOLD
 )
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=1000000, max_pos=3,
                                sl_mult=3.0, tp_mult=20.0, leverage_rate=2.0, breadth_threshold=0.50,
-                               slippage=0.003, use_sma_exit=True, exit_buffer=0.975, max_hold_days=30,
+                               slippage=SLIPPAGE, use_sma_exit=EXIT_ON_SMA20_BREACH,
+                               exit_buffer=SMA20_EXIT_BUFFER, max_hold_days=MAX_HOLD_DAYS,
                                liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
                                verbose=False):
     """
@@ -104,29 +107,19 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             exit_p = None
             
             # --- Exit Conditions (V143.0 Adaptive) ---
-            
-            # A. Adaptive Stop (Breadth & DD Based)
-            curr_breadth = breadth_ratio[i]
-            stop_mult = calculate_adaptive_stop_mult(sl_mult, curr_breadth, breadth_threshold, month_drawdown)
-            
-            stop_dist = stop_mult * t_atr 
-            initial_stop_price = p['buy_price'] - stop_dist
-            
-            if t_close > p['buy_price']:
-                 tsl_price = max(initial_stop_price, p['max_price'] - stop_dist)
-            else:
-                 tsl_price = initial_stop_price
+            # Shared stop/target calculation (single source of truth in core/logic.py)
+            tsl_price, target_price, stop_mult = calculate_position_stops(
+                p['buy_price'], t_atr, p['max_price'], t_close,
+                breadth_ratio[i], breadth_threshold, month_drawdown,
+                sl_mult, tp_mult
+            )
 
             # B. RSI Overextension
             exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
-            
+
             # C. Trend Breach (Synced buffer)
-            is_trend_broken = False
-            if t_close < sma_med_np[i, tidx] * exit_buffer:
-                is_trend_broken = True
-            
-            target_price = p['buy_price'] + (p['buy_atr'] * tp_mult)
-            
+            is_trend_broken = t_close < sma_med_np[i, tidx] * exit_buffer
+
             if t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
             elif t_high >= target_price or t_open >= target_price:
@@ -144,7 +137,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 final_exit = exit_p * (1.0 - slippage)
                 trade_results.append((final_exit - p['buy_price']) * p['shares'])
                 cash += final_exit * p['shares']
-                cooling_days = 2
+                cooling_days = COOLING_DAYS
             else:
                 p['held_days'] = p.get('held_days', 0) + 1
                 new_portfolio.append(p)
@@ -191,7 +184,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 continue
 
             # Momentum Filters
-            if rs < 25.0: continue
+            if rs < RS_THRESHOLD: continue
             if t_close < t_sma_med: continue
             if t_close < t_sma_trend * 1.05: continue 
 

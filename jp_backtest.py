@@ -11,7 +11,8 @@ from core.logic import calculate_all_technicals_v12
 from core.config import (
     INITIAL_CASH, MAX_POSITIONS, LEVERAGE_RATE, ATR_STOP_LOSS, TARGET_PROFIT_MULT, 
     BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD,
+    SLIPPAGE, MAX_HOLD_DAYS
 )
 
 def run_jp_broad_backtest(cache_path):
@@ -86,8 +87,8 @@ def run_jp_broad_backtest(cache_path):
         tp_mult=TARGET_PROFIT_MULT, # Sync with config
         leverage_rate=LEVERAGE_RATE, # Sync with config
         breadth_threshold=BREADTH_THRESHOLD, # Sync with config
-        slippage=0.003,
-        max_hold_days=30,
+        slippage=SLIPPAGE,
+        max_hold_days=MAX_HOLD_DAYS,
         use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with config
         exit_buffer=SMA20_EXIT_BUFFER, # Sync with config
         liquidity_limit=LIQUIDITY_LIMIT_RATE, # Sync with config

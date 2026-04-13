@@ -8,7 +8,8 @@ from core.config import (
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
     SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
-    SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD
+    SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, RS_THRESHOLD
 )
 
 def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_drawdown):
@@ -17,6 +18,27 @@ def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_dr
     if breadth < breadth_threshold: stop_mult = 1.5
     if month_drawdown <= -0.07: stop_mult = 1.0
     return stop_mult
+
+def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
+                             breadth, breadth_threshold, month_drawdown,
+                             sl_mult, tp_mult):
+    """
+    V160.0 Shared Position Stop/Target Calculator.
+    Single source of truth for TSL and TP calculations.
+    Used by both backtest engine and live position manager.
+    Returns: (tsl_price, target_price, stop_mult)
+    """
+    stop_mult = calculate_adaptive_stop_mult(sl_mult, breadth, breadth_threshold, month_drawdown)
+    stop_dist = stop_mult * buy_atr
+    initial_stop = buy_price - stop_dist
+
+    if current_price > buy_price:
+        tsl_price = max(initial_stop, max_price - stop_dist)
+    else:
+        tsl_price = initial_stop
+
+    target_price = buy_price + (buy_atr * tp_mult)
+    return tsl_price, target_price, stop_mult
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
@@ -44,18 +66,13 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 2. Adaptive Stop Multiplier
-        stop_mult = calculate_adaptive_stop_mult(ATR_STOP_LOSS, market_breadth, BREADTH_THRESHOLD, month_drawdown)
-        
-        stop_dist = stop_mult * atr 
-        initial_stop = buy_price - stop_dist
-        
-        # Trailing
-        if current_price > buy_price:
-             tsl_price = max(initial_stop, highest_price - stop_dist)
-        else:
-             tsl_price = initial_stop
-            
+        # 2. Shared Stop/Target Calculation (Parity with backtest via calculate_position_stops)
+        tsl_price, target_price, stop_mult = calculate_position_stops(
+            buy_price, atr, highest_price, current_price,
+            market_breadth, BREADTH_THRESHOLD, month_drawdown,
+            ATR_STOP_LOSS, TARGET_PROFIT_MULT
+        )
+
         # 3. Technical Trend Exit
         is_trend_broken = False
         if sma_med_map and code in sma_med_map:
@@ -65,7 +82,6 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
 
         # 4. Sell Decision
         exit_reason = None
-        target_price = buy_price + (atr * TARGET_PROFIT_MULT)
 
         if current_price <= tsl_price:
             exit_reason = f"Trail Stop ({stop_mult:.1f} ATR)"
@@ -104,8 +120,8 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
 
 def calculate_aegis_shield(month_drawdown, regime="BULL"):
     """V140.0 Adaptive Exposure"""
-    if month_drawdown <= -0.05: return 0.5
-    if month_drawdown <= -0.10: return 0.0 # Shutdown entry
+    if month_drawdown <= -0.10: return 0.0  # Shutdown entry (must check first)
+    if month_drawdown <= -0.05: return 0.5  # Halve leverage
     return 1.0
 
 def get_exit_thresholds(regime, is_trend_snapped):
@@ -228,6 +244,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
+    prev_close = bundle['Close'].iloc[-2]  # 前日終値（ギャップ計算用）
     open_p = bundle['Open'].iloc[-1]
     rsi2 = bundle['RSI2'].iloc[-1]
     sma_med = bundle[f'SMA{SMA_MEDIUM_PERIOD}'].iloc[-1]
@@ -248,8 +265,16 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         rs = rs_alpha[t_with_t]
         
         if pd.isna(p) or p <= 0 or pd.isna(rs): continue
-        if rs < 25.0: continue # Momentum requirement
-        
+        if rs < RS_THRESHOLD: continue # Momentum requirement
+
+        # [V150.2 Gap Filter Parity] バックテストと同一ギャップフィルター
+        p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else None
+        if p_prev is not None and not pd.isna(p_prev) and p_prev > 0:
+            gap_pct = (o / p_prev - 1.0)
+            gap_limit = BULL_GAP_LIMIT if regime == "BULL" else BEAR_GAP_LIMIT
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_limit):
+                continue
+
         entry_signal = check_entry_signal(regime, r2, p, o, s_med, s_trend)
                 
         if entry_signal:

@@ -217,6 +217,7 @@ def _main_exec():
     has_morning_scanned = False
     canceled_orders = {}
     cooling_until = None # [V132] Over-trading prevention (Date based parity)
+    breadth_val = 0.5    # [Parity] Market breadth (updated each scan, default neutral)
     
     # --- [Aegis Protocol State] ---
     current_month_str = server_datetime.strftime('%Y-%m')
@@ -399,7 +400,8 @@ def _main_exec():
         portfolio, sell_actions = manage_positions_live(
             portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
             realtime_buffers=realtime_buffers, sma_med_map=sma_med_map,
-            month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped
+            month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped,
+            market_breadth=breadth_val  # [Parity] Pass actual breadth for adaptive stop
         )
         actions_taken.extend(sell_actions)
         if sell_actions:
@@ -412,6 +414,7 @@ def _main_exec():
 
         should_scan = True
         if regime == "BEAR": should_scan = False
+        elif month_drawdown <= -0.15: should_scan = False  # [Parity] Circuit breaker: block entries on -15% DD
         elif len(portfolio) >= MAX_POSITIONS: should_scan = False
         elif not should_scan_override: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
@@ -546,7 +549,7 @@ def _main_exec():
                 elif not top_candidates:
                     should_continue_scan = False
 
-            if should_continue_scan and regime in ["BULL", "RANGE"]:
+            if should_continue_scan and regime == "BULL":  # [Parity] Strictly BULL only (matches backtest)
                 print(f"\n--- AI Qualitative Filter Check ---")
                 scan_targets = top_candidates
                 num_filled = 0

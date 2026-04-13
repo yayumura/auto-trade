@@ -12,7 +12,8 @@ from backtest import run_backtest_v16_production
 from core.logic import get_prime_tickers
 from core.config import (
     INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD
+    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD,
+    SLIPPAGE
 )
 
 def run_single_opt(params_pack):
@@ -30,7 +31,7 @@ def run_single_opt(params_pack):
         leverage_rate=p['leverage'],
         breadth_threshold=p['breadth'],
         max_hold_days=p['max_hold_days'],
-        slippage=0.003, # ★Reality Sync (Consistent with jp_backtest.py)
+        slippage=SLIPPAGE, # ★Reality Sync (config reference)
         use_sma_exit=EXIT_ON_SMA20_BREACH, 
         exit_buffer=p['exit_buffer'],   # ★Optimized Buffer Sync
         liquidity_limit=LIQUIDITY_LIMIT_RATE, # ★Full Parity Sync
