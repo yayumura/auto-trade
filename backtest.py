@@ -2,9 +2,13 @@ import pandas as pd
 import numpy as np
 from core.logic import (
     calculate_aegis_shield, get_exit_thresholds, 
-    calculate_dynamic_leverage, check_entry_signal
+    calculate_dynamic_leverage, check_entry_signal,
+    calculate_adaptive_stop_mult
 )
-from core.config import SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD
+from core.config import (
+    SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD,
+    MAX_RISK_PER_TRADE, MIN_ALLOCATION_AMOUNT, MAX_ALLOCATION_AMOUNT
+)
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
                                initial_cash=1000000, max_pos=2, 
@@ -102,10 +106,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # --- Exit Conditions (V143.0 Adaptive) ---
             
             # A. Adaptive Stop (Breadth & DD Based)
-            stop_mult = 3.0 
             curr_breadth = breadth_ratio[i]
-            if curr_breadth < breadth_threshold: stop_mult = 1.5 
-            if month_drawdown <= -0.07: stop_mult = 1.0 
+            stop_mult = calculate_adaptive_stop_mult(sl_mult, curr_breadth, breadth_threshold, month_drawdown)
             
             stop_dist = stop_mult * t_atr 
             initial_stop_price = p['buy_price'] - stop_dist
@@ -123,8 +125,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             if t_close < sma_med_np[i, tidx] * exit_buffer:
                 is_trend_broken = True
             
+            target_price = p['buy_price'] + (p['buy_atr'] * tp_mult)
+            
             if t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
+            elif t_high >= target_price or t_open >= target_price:
+                exit_p = max(t_open, target_price)
             elif r2 > exit_threshold:
                 exit_p = t_close
             elif is_trend_broken:
@@ -151,7 +157,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         # 2. Entry (V143.0 Adaptive Alpha)
         if i + 1 >= T or month_done or cooling_days > 0 or regime != "BULL": continue 
         
-        # [V140] Moderate Dynamic Leverage
+        # [V159] Unlocked Static Leverage
         dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate, shield_mult=shield_mult)
         if dynamic_lev <= 0: continue
         
@@ -194,14 +200,27 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
-                raw_value = (total_equity * dynamic_lev / max_pos)
                 
-                # --- Adaptive Liquidity Filter (V150.0 Reality Sync) ---
-                # Purpose: Ensure reality at scale.
-                actual_value = min(raw_value, t_turnover * liquidity_limit)
+                # --- V155 Reality Sync: Sizing & Capital Control ---
+                current_exposure = total_equity - cash
+                buying_power = (total_equity * dynamic_lev) - current_exposure
                 
-                shares = int(actual_value / real_buy)
-                if shares > 0:
+                # Static Risk Allocation Limit (Balanced Optimal)
+                ra = total_equity * MAX_RISK_PER_TRADE
+                rps = atr_np[i, s_idx] * sl_mult
+                is_sh = int(ra // rps) if rps > 0 else 100
+                
+                # Allocation Bound & Capital
+                ma = min(max((total_equity * dynamic_lev / max_pos), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
+                actual_value = min(ma, t_turnover * liquidity_limit)
+                
+                ms_a = int(actual_value // real_buy)
+                ms_bp = int((buying_power / 1.0001) // real_buy)
+                
+                # 100-share unit parity
+                shares = (min(is_sh, ms_a, ms_bp) // 100) * 100
+                
+                if shares >= 100:
                     portfolio.append({
                         's_idx': s_idx, 'buy_price': real_buy,
                         'shares': shares, 'held_days': 0, 'max_price': real_buy,

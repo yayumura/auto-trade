@@ -68,21 +68,21 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 # --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   
 MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
-BREADTH_THRESHOLD     = 0.40   # ★FINAL SYNC: +1351% Growth Apex
-MAX_RISK_PER_TRADE    = 0.01   
-LEVERAGE_RATE         = 3.0    # ★V152: Optimized Profit Pursuit (3.0x Leverage)
+BREADTH_THRESHOLD     = 0.50   # ★V160 OPTIMIZED: Stricter Breadth Filter
+MAX_RISK_PER_TRADE    = 0.08   # ★V159: Optimal Balanced Risk (8% per trade = +215% Return)
+LEVERAGE_RATE         = 2.0    # ★V160 OPTIMIZED: Leverage 2.0 outperformed 3.0
 MAX_ALLOCATION_PCT    = 1.0    # (LEVERAGE 3.0 / 3 POS)
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  # ★RE-TUNED: Balanced Efficiency (2.5%)
 MIN_ALLOCATION_AMOUNT = 50000  
 ATR_STOP_LOSS         = 3.0    # ★V152: Precision SL (ATR * 3.0)
-TARGET_PROFIT_MULT    = 40.0   # ★V152: Extended Profit Run (ATR * 40.0)
+TARGET_PROFIT_MULT    = 20.0   # ★V160 OPTIMIZED: TP 20.0 to lock in massive wins early
 RS_THRESHOLD          = 10.0   # Minimum Relative Strength
 MIN_PRICE             = 200    # Minimum stock price
 MAX_PRICE             = 10000  # Maximum stock price
 ATR_TRAIL             = True   # Trailing stop enabled
 EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.980  # ★V152: Optimized Fast-Trend Exit (0.980)
+SMA20_EXIT_BUFFER     = 0.975  # ★V160 OPTIMIZED: Exit when price < SMA20 * 0.975
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100

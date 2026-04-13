@@ -11,6 +11,13 @@ from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD
 )
 
+def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_drawdown):
+    """V153.0 Shared Adaptive Stop Multiplier"""
+    stop_mult = float(base_mult)
+    if breadth < breadth_threshold: stop_mult = 1.5
+    if month_drawdown <= -0.07: stop_mult = 1.0
+    return stop_mult
+
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
     V143.0 Adaptive Alpha Manager:
@@ -38,11 +45,7 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         highest_price = float(p.get('highest_price', 0))
         
         # 2. Adaptive Stop Multiplier
-        stop_mult = float(ATR_STOP_LOSS) # Base (High performance from config)
-        
-        # Protective triggers
-        if market_breadth < BREADTH_THRESHOLD: stop_mult = 1.5 # Market rotation protection
-        if month_drawdown <= -0.07: stop_mult = 1.0 # Emergency lockdown
+        stop_mult = calculate_adaptive_stop_mult(ATR_STOP_LOSS, market_breadth, BREADTH_THRESHOLD, month_drawdown)
         
         stop_dist = stop_mult * atr 
         initial_stop = buy_price - stop_dist
@@ -111,11 +114,11 @@ def get_exit_thresholds(regime, is_trend_snapped):
     return 80
 
 def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0):
-    """V140.0 Breadth Scaling"""
-    if breadth_val >= 0.60: base = 2.0
-    elif breadth_val >= 0.40: base = 1.0
+    """V159.0 Breadth Scaling (Optimal Static Unlocked)"""
+    if breadth_val >= 0.60: base = config_leverage
+    elif breadth_val >= 0.40: base = config_leverage * 0.5
     else: base = 0.0
-    return min(base, config_leverage) * shield_mult
+    return base * shield_mult
 
 def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
     """V140.0 Momentum Entry: Buy Strength"""

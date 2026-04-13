@@ -481,6 +481,7 @@ def _main_exec():
                     
                     # Determine Current Leverage (Shared Logic V133)
                     shield_mult = calculate_aegis_shield(month_drawdown, regime)
+                    
                     if USE_DYNAMIC_LEVERAGE:
                         dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE, shield_mult=shield_mult)
                         if dynamic_lev <= 0:
