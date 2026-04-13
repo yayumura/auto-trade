@@ -11,10 +11,10 @@ from core.config import (
 )
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
-                               initial_cash=1000000, max_pos=2, 
-                               sl_mult=3.0, tp_mult=40.0, leverage_rate=2.5, breadth_threshold=0.3,
-                               slippage=0.001, use_sma_exit=False, exit_buffer=0.985, max_hold_days=30,
-                               liquidity_limit=0.01, bull_gap_limit=0.10, bear_gap_limit=0.02,
+                               initial_cash=1000000, max_pos=3,
+                               sl_mult=3.0, tp_mult=20.0, leverage_rate=2.0, breadth_threshold=0.50,
+                               slippage=0.003, use_sma_exit=True, exit_buffer=0.975, max_hold_days=30,
+                               liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
                                verbose=False):
     """
     V150.2 Imperial Apex (Full Logic Parity)
