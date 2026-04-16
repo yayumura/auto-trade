@@ -10,7 +10,7 @@ from core.config import (
     SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     BULL_GAP_LIMIT, BEAR_GAP_LIMIT, RS_THRESHOLD,
-    USE_COMPOUNDING, INITIAL_CASH
+    USE_COMPOUNDING, INITIAL_CASH, ATR_TRAIL_MULT, RSI_PB_THRESHOLD
 )
 
 def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_drawdown):
@@ -24,22 +24,25 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              breadth, breadth_threshold, month_drawdown,
                              sl_mult, tp_mult):
     """
-    V160.0 Shared Position Stop/Target Calculator.
-    Single source of truth for TSL and TP calculations.
-    Used by both backtest engine and live position manager.
-    Returns: (tsl_price, target_price, stop_mult)
+    V168.0 ATR Trailing Stop & Profit Locking.
+    1. 初期損切り (Initial Stop)
+    2. トレイリングストップ (ATR_TRAIL_MULT)
+    3. 利確ターゲット (Fixed Target)
     """
-    stop_mult = calculate_adaptive_stop_mult(sl_mult, breadth, breadth_threshold, month_drawdown)
-    stop_dist = stop_mult * buy_atr
-    initial_stop = buy_price - stop_dist
-
-    if current_price > buy_price:
-        tsl_price = max(initial_stop, max_price - stop_dist)
-    else:
-        tsl_price = initial_stop
-
+    # 初期損切り
+    initial_stop = buy_price - (buy_atr * sl_mult)
+    
+    # トレイリングストップ計算 (最高値から一定ATR下落で撤退)
+    trail_stop = max_price - (buy_atr * ATR_TRAIL_MULT)
+    
+    # 建値付近での保護（含み益が一定以上なら建値を下回る前に撤退するなどの拡張も可能だが、まずはシンプルに）
+    # 今回は trail_stop が initial_stop を上回った場合のみ更新
+    tsl_price = max(initial_stop, trail_stop)
+    
+    # 利確ターゲット
     target_price = buy_price + (buy_atr * tp_mult)
-    return tsl_price, target_price, stop_mult
+    
+    return tsl_price, target_price, sl_mult # sl_multは互換性のために返す
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
@@ -138,16 +141,24 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0
     return base * shield_mult
 
 def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
-    """V140.0 Momentum Entry: Buy Strength"""
-    if regime != "BULL": return False # Strictly Bull only for momentum
+    """
+    V168.0 Trend-Pullback Entry Logic.
+    1. BULLマーケット時のみエントリー許可
+    2. パーフェクトオーダーの確認 (Price > SMA100)
+    3. 短期的な「押し目」（RSI2 < RSI_PB_THRESHOLD）での反発を狙う
+    """
+    if regime != "BULL": return False 
     
-    # Perfect Order Confirmation: Price > SMA_MED > SMA_TREND
+    # 長期トレンドが上向きであること (SMA100以上を維持)
     if price < sma_med: return False
-    if sma_trend > 0 and price < sma_trend * 1.05: return False 
     
-    # Entry on strength (RSI2 indicates buying pressure, not oversold)
-    if rsi2 > 40 and price > open_p:
+    # 長期トレンド(SMA200)との乖離確認
+    if sma_trend > 0 and price < sma_trend: return False 
+    
+    # 押し目買い条件: 短期RSIが売られすぎ水準に達している
+    if rsi2 < RSI_PB_THRESHOLD:
         return True
+        
     return False
 
 def calculate_all_technicals_v12(data_df):
@@ -204,10 +215,9 @@ def calculate_all_technicals_v12(data_df):
 
 def detect_market_regime(data_df=None, buffer=None):
     """
-    V131.1 Aegis Regime Detection:
-    - BULL: Price > SMA200 and SMA200 Slope > 0.02%
-    - BEAR: Price < SMA200 * 0.98
-    - NEUTRAL: Else
+    V168.0 Strict Market Regime Filter:
+    - BULL: 価格が長期SMA200を上回り、かつ長期SMAが上昇傾向
+    - BEAR: 価格が長期SMA200を下回っている（この間は全エントリー停止）
     """
     regime = "NEUTRAL"
     is_trend_snapped = False
@@ -222,18 +232,19 @@ def detect_market_regime(data_df=None, buffer=None):
                 
                 curr_p = c_1321.iloc[-1]
                 curr_sma_trend = sma_trend.iloc[-1]
-                prev_sma_trend = sma_trend.iloc[-5] # 1 week ago
+                prev_sma_trend = sma_trend.iloc[-10] # 2 weeks ago
                 slope = (curr_sma_trend / prev_sma_trend - 1.0) * 100
                 
-                if curr_p > curr_sma_trend and slope > 0.02:
-                    regime = "BULL"
-                elif curr_p < curr_sma_trend * 0.98:
+                # ベア判定を厳格化: SMA200を下回ったら即座にBEAR（ブロック）
+                if curr_p < curr_sma_trend:
                     regime = "BEAR"
+                elif slope > 0.01: # 緩やかな上昇トレンド
+                    regime = "BULL"
                 
                 if curr_p < sma_short.iloc[-1]:
                     is_trend_snapped = True
         except: pass
-
+        
     return regime, is_trend_snapped
 
 def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
