@@ -94,7 +94,7 @@ def release_lock():
 from core.logic import (
     detect_market_regime, manage_positions_live, select_best_candidates, 
     load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
-    RealtimeBuffer, calculate_aegis_shield
+    RealtimeBuffer, calculate_aegis_shield, calculate_lot_size
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -599,24 +599,23 @@ def _main_exec():
                         # --- 複利・動的レバレッジ資金管理の改修 (V21 Optimization) ---
                         if dynamic_lev <= 0: continue # エントリー抑制
                         
+                        # --- 資金管理と株数計算 (V166.4 Centralized Sizing) ---
+                        if dynamic_lev <= 0: continue 
+
                         current_exposure = sum([float(px.get('current_price', px['buy_price'])) * int(px['shares']) for px in portfolio])
                         te = account['cash'] + current_exposure
                         buying_power = (te * dynamic_lev) - current_exposure
                         
-                        ra = te * MAX_RISK_PER_TRADE
-                        # ATRベースのリスク許容度に基づく株数計算 (V15.1 Oracle仕様)
-                        rps = a * ATR_STOP_LOSS 
-                        is_sh = int(ra // rps) if rps > 0 else 100
-                        
-                        # 1銘柄割当額も動的レバレッジに合わせて調整
-                        ma = min(max((te * dynamic_lev / MAX_POSITIONS), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
-                        adv = item.get('adv_yen', 0)
-                        if adv > 0:
-                            ma = min(ma, adv * LIQUIDITY_LIMIT_RATE)
-                        
-                        ms_a = int(ma // tp)
-                        ms_bp = int((buying_power / 1.0001) // tp) # 購買力から算出する株数に置き換え
-                        ts = (min(is_sh, ms_a, ms_bp) // 100) * 100
+                        ts = calculate_lot_size(
+                            current_equity=te,
+                            atr=a,
+                            sl_mult=ATR_STOP_LOSS,
+                            price=tp,
+                            dynamic_leverage=dynamic_lev,
+                            max_positions=MAX_POSITIONS,
+                            buying_power=buying_power,
+                            turnover=item.get('adv_yen')
+                        )
                         
                         if ts >= 100:
                             if is_sim:

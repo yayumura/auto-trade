@@ -3,7 +3,7 @@ import numpy as np
 from core.logic import (
     calculate_aegis_shield, get_exit_thresholds, 
     calculate_dynamic_leverage, check_entry_signal,
-    calculate_position_stops
+    calculate_position_stops, calculate_lot_size
 )
 from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD,
@@ -158,7 +158,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         rs_alphas = rs_alpha_np[i, :]
         rsis = rsi2_np[i, :]
         sma_trends = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, :]
-        turnover_np = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12) # Default huge if missing
+        turnover_vals = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12) 
 
         valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
         # Scoring: Top RS leaders
@@ -174,7 +174,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_open = open_np[i, s_idx]
             t_sma_med = sma_med_np[i, s_idx]
             t_sma_trend = sma_trends[s_idx]
-            t_turnover = turnover_np[i, s_idx]
+            t_turnover = turnover_vals[i, s_idx]
             
             # [V150.2 Reality Sync] Gap Filter Parity
             prev_close = close_np[i-1, s_idx]
@@ -198,20 +198,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 current_exposure = total_equity - cash
                 buying_power = (total_equity * dynamic_lev) - current_exposure
                 
-                # Static Risk Allocation Limit (Balanced Optimal)
-                ra = total_equity * MAX_RISK_PER_TRADE
-                rps = atr_np[i, s_idx] * sl_mult
-                is_sh = int(ra // rps) if rps > 0 else 100
-                
-                # Allocation Bound & Capital
-                ma = min(max((total_equity * dynamic_lev / max_pos), MIN_ALLOCATION_AMOUNT), MAX_ALLOCATION_AMOUNT)
-                actual_value = min(ma, t_turnover * liquidity_limit)
-                
-                ms_a = int(actual_value // real_buy)
-                ms_bp = int((buying_power / 1.0001) // real_buy)
-                
-                # 100-share unit parity
-                shares = (min(is_sh, ms_a, ms_bp) // 100) * 100
+                shares = calculate_lot_size(
+                    current_equity=total_equity,
+                    atr=atr_np[i, s_idx],
+                    sl_mult=sl_mult,
+                    price=real_buy,
+                    dynamic_leverage=dynamic_lev,
+                    max_positions=max_pos,
+                    buying_power=buying_power,
+                    turnover=t_turnover
+                )
                 
                 if shares >= 100:
                     portfolio.append({

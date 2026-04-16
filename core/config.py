@@ -65,12 +65,14 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V165.0 BEST STABILITY (Grid Search Optimized) ---
+# --- Imperial Oracle V166.0 COMPOUNDING & LEVERAGE (Performance Boost) ---
 USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 3      # ★BEST STABILITY: Restored Imperial 3-Elite
-BREADTH_THRESHOLD     = 0.60   # ★BEST STABILITY: Stricter Breadth Filter (0.60)
-MAX_RISK_PER_TRADE    = 0.08   # Optimal Balanced Risk (8% per trade)
-LEVERAGE_RATE         = 1.0    # ★BEST STABILITY: Conservative 1.0x for robustness
+USE_COMPOUNDING       = True   # ★NEW: Enable compounding based on current equity
+MAX_POSITIONS         = 3      
+BREADTH_THRESHOLD     = 0.60   
+RISK_PER_TRADE_PCT    = 0.02   # ★NEW: 2% risk per trade (compounding base)
+MAX_RISK_PER_TRADE    = 0.02   # Synced with RISK_PER_TRADE_PCT
+LEVERAGE_RATE         = 1.5    # ★NEW: Leverage 1.5x (Safe middle ground between 1.0 and 2.0)
 MAX_ALLOCATION_PCT    = 1.0    
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  
