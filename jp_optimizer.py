@@ -113,7 +113,9 @@ def run_single_opt(params_pack):
         bull_gap_limit=p['bgap'],
         bear_gap_limit=BEAR_GAP_LIMIT,
         atr_trail_mult=p['atr_trail'],
-        rsi_threshold=p['rsi_th']
+        rsi_threshold=p['rsi_th'],
+        use_trailing_stop=p['use_trail'],
+        individual_trend_sma=p['trend_sma']
     )
     
     # 安定性スコアの計算
@@ -159,13 +161,15 @@ def optimize_jp_imperial(cache_path):
     
     # --- Aggressive Mean Reversion Search ---
     
-    # --- Sovereign Optimization Grid (V168.5 Pullback Sync) ---
+    # --- Mean Reversion Survival Grid (V169.0 Knife Protection) ---
     param_grid = {
         'breadth': [0.5, 0.6],             
-        'sl_mult': [8.0], # Disaster backup
-        'atr_trail': [4.0, 6.0, 8.0],
-        'rsi_th': [30, 40, 50],
-        'tp_mult': [40.0],
+        'sl_mult': [5.0, 8.0],
+        'atr_trail': [3.0, 5.0],
+        'rsi_th': [25, 30, 40],
+        'trend_sma': [50, 100, 200],  # 【新】個別銘柄トレンドフィルター期間
+        'use_trail': [False],          # 【重要】まずはトレイルなしで優位性を検証
+        'tp_mult': [5.0, 10.0, 20.0], # トレイルなし時の固定利確幅
         'leverage_rate': [1.0],
         'bull_gap_limit': [0.11],
         'max_hold_days': [30]
@@ -176,14 +180,17 @@ def optimize_jp_imperial(cache_path):
         for sl in param_grid['sl_mult']:          
             for atr_t in param_grid['atr_trail']:
                 for rsi_th in param_grid['rsi_th']:
-                    for lev in param_grid['leverage_rate']:
-                        grid.append({
-                            "breadth": b, "exit_buffer": 0.975,
-                            "sl": sl, "tp": 40.0, 
-                            "atr_trail": atr_t, "rsi_th": rsi_th,
-                            "max_pos": 3, "leverage": lev, 
-                            "bgap": 0.11, "max_hold_days": 30
-                        })
+                    for t_sma in param_grid['trend_sma']:
+                        for tp in param_grid['tp_mult']:
+                            for u_trail in param_grid['use_trail']:
+                                grid.append({
+                                    "breadth": b, "exit_buffer": 0.975,
+                                    "sl": sl, "tp": tp, 
+                                    "atr_trail": atr_t, "rsi_th": rsi_th,
+                                    "trend_sma": t_sma, "use_trail": u_trail,
+                                    "max_pos": 3, "leverage": 1.0, 
+                                    "bgap": 0.11, "max_hold_days": 30
+                                })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 
@@ -204,7 +211,7 @@ def optimize_jp_imperial(cache_path):
     # 読みやすいように列を整理
     display_cols = [
         'score', 'return_pct', 'trades', 'win_rate', 'mwr', 'pf', 'sharpe', 'mdd',
-        'breadth', 'sl', 'atr_trail', 'rsi_th', 'leverage'
+        'sl', 'tp', 'rsi_th', 'trend_sma', 'use_trail'
     ]
     # 出力用の一時的なデータフレームを作成
     df_display = df_res[[c for c in display_cols if c in df_res.columns]].copy()

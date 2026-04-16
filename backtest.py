@@ -19,7 +19,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                exit_buffer=SMA20_EXIT_BUFFER, max_hold_days=MAX_HOLD_DAYS,
                                liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
                                atr_trail_mult=3.0, rsi_threshold=30.0,
-                               verbose=False):
+                               use_trailing_stop=True, individual_trend_sma=200, verbose=False):
     """
     V150.2 Imperial Apex (Full Logic Parity)
     - Replicates live logic: RSI2 Mean Reversion + RS Leader Selection
@@ -73,8 +73,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         # --- Shared Regime Parity ---
         # Note: In backtest we simulate the data_df row here
         p_1321 = close_np[i, idx_1321] if idx_1321 != -1 else 0
-        s_trend_1321 = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, idx_1321] if idx_1321 != -1 else 0
-        s_trend_prev = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i-10, idx_1321] if i > 10 and idx_1321 != -1 else s_trend_1321
+        s_trend_1321 = bundle_np[f'SMA{individual_trend_sma}'][i, idx_1321] if idx_1321 != -1 else 0
+        s_trend_prev = bundle_np[f'SMA{individual_trend_sma}'][i-10, idx_1321] if i > 10 and idx_1321 != -1 else s_trend_1321
         slope = (s_trend_1321 / s_trend_prev - 1.0) * 100 if s_trend_prev != 0 else 0
         
         regime = "NEUTRAL"
@@ -114,7 +114,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             tsl_price, target_price, stop_mult = calculate_position_stops(
                 p['buy_price'], p['buy_atr'], p['max_price'], t_close,
                 breadth_ratio[i], breadth_threshold, month_drawdown,
-                sl_mult, tp_mult, atr_trail_mult=atr_trail_mult
+                sl_mult, tp_mult, atr_trail_mult=atr_trail_mult, 
+                use_trailing_stop=use_trailing_stop
             )
 
             # B. RSI Overextension
@@ -160,7 +161,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         # Selection: Pure RS_Alpha Top Leaders
         rs_alphas = rs_alpha_np[i, :]
         rsis = rsi2_np[i, :]
-        sma_trends = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, :]
+        sma_trends = bundle_np[f'SMA{individual_trend_sma}'][i, :]
         turnover_vals = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12) 
 
         valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
@@ -188,7 +189,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             # Momentum Filters
             if rs < RS_THRESHOLD: continue
-            # 重複フィルターを削除し、check_entry_signal の判断に任せる
+            # 重褁E��ィルターを削除し、check_entry_signal の判断に任せる
 
             # Entry Signal
             entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, 
