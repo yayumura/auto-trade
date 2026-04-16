@@ -4,13 +4,13 @@ import numpy as np
 from datetime import datetime as dt
 from core.config import (
     ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
-    MAX_POSITIONS, MAX_RISK_PER_TRADE, MAX_ALLOCATION_PCT,
+    MAX_POSITIONS, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
     SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     BULL_GAP_LIMIT, BEAR_GAP_LIMIT, RS_THRESHOLD,
-    USE_COMPOUNDING, RISK_PER_TRADE_PCT, INITIAL_CASH
+    USE_COMPOUNDING, INITIAL_CASH
 )
 
 def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_drawdown):
@@ -358,39 +358,33 @@ def get_prime_tickers():
 def calculate_lot_size(current_equity, atr, sl_mult, price, dynamic_leverage, 
                        max_positions, buying_power=None, turnover=None):
     """
-    V166.4 Imperial Sizing Logic (Compound + Risk-Adjusted)
-    1. リスク許容度(RISK_PER_TRADE_PCT)に基づく株数
-    2. 資産割当(Equity Allocation)に基づく株数
-    3. 購買力(Buying Power)および流動性(Liquidity)制約
+    V167.5 Imperial Sizing Logic (Simple Equity Allocation)
+    1. 資産ベースの決定（複利 vs 単利）
+    2. 1銘柄あたりの割当資金の計算 (Target Allocation)
+    3. 割当額を価格で割り、100株単位に切り捨てる
+    4. 購買力および流動性による安全制約
     """
-    # 資産ベースの決定（複利 vs 単利）
+    # 資産ベースの決定（複利 = 現在資産, 単利 = 初期資金）
     base_equity = current_equity if USE_COMPOUNDING else INITIAL_CASH
     
-    # A. 許容リスク額（固定比率手法）
-    # リスク額 = 資産 * リスク率（例: 2%）
-    # 株数 = リスク額 / (ATR * SL倍率)
-    risk_amount = base_equity * RISK_PER_TRADE_PCT
-    risk_per_share = atr * sl_mult
-    shares_risk = int(risk_amount // risk_per_share) if risk_per_share > 0 else 100
+    # 1銘柄あたりの割当資金 = (資産 * レバレッジ) / 最大ポジション数
+    # これにより、常に資金を最大数で等分して運用する
+    target_allocation = (base_equity * dynamic_leverage) / max_positions
     
-    # B. 資産配分上限（レバレッジ込）
-    # 1銘柄あたりの投資上限額 = (資産 * レバレッジ) / 最大ポジション数
-    alloc_cap = (base_equity * dynamic_leverage) / max_positions
-    
-    # 流動性制約 (turnoverの2.5%等)
+    # 流動性制約 (直近出来高等の 2.5% を上限とする)
     if turnover and turnover > 0:
-        alloc_cap = min(alloc_cap, turnover * LIQUIDITY_LIMIT_RATE)
+        target_allocation = min(target_allocation, turnover * LIQUIDITY_LIMIT_RATE)
     
     # 割当額に基づく株数
-    shares_alloc = int(alloc_cap // price)
+    shares_alloc = int(target_allocation // price)
     
-    # C. 全体購買力による制約
+    # 全体購買力による制約 (実際の注文可能額を超えないようにする)
     shares_bp = 1e9
     if buying_power is not None:
-        shares_bp = int((buying_power * 0.99) // price) # 余裕を持って 99%
+        shares_bp = int((buying_power * 0.98) // price) # 余裕を持って 98%
         
-    # 最小値の採用と100株単位への丸め
-    final_shares = min(shares_risk, shares_alloc, shares_bp)
+    # 最小値の採用と100株単位への丸め (単元株制度への適合)
+    final_shares = min(shares_alloc, shares_bp)
     final_shares = (final_shares // 100) * 100
     
     return max(final_shares, 0)

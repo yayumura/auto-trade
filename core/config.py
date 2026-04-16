@@ -65,14 +65,12 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V166.0 COMPOUNDING & LEVERAGE (Performance Boost) ---
+# --- Imperial Oracle V167.0 SIMPLE COMPOUNDING (Equity Allocation Sync) ---
 USE_DYNAMIC_LEVERAGE  = True   
-USE_COMPOUNDING       = True   # ★NEW: Enable compounding based on current equity
-MAX_POSITIONS         = 3      
+USE_COMPOUNDING       = True   # ★STABLE: Enable compounding based on current equity
+MAX_POSITIONS         = 3      # ★STABLE: 3-Elite Allocation
 BREADTH_THRESHOLD     = 0.60   
-RISK_PER_TRADE_PCT    = 0.02   # ★NEW: 2% risk per trade (compounding base)
-MAX_RISK_PER_TRADE    = 0.02   # Synced with RISK_PER_TRADE_PCT
-LEVERAGE_RATE         = 1.5    # ★NEW: Leverage 1.5x (Safe middle ground between 1.0 and 2.0)
+LEVERAGE_RATE         = 1.0    # ★STABLE: 1.0x for reliable baseline
 MAX_ALLOCATION_PCT    = 1.0    
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  
