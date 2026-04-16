@@ -65,24 +65,24 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
+# --- Imperial Oracle V165.0 BEST STABILITY (Grid Search Optimized) ---
 USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
-BREADTH_THRESHOLD     = 0.50   # ★V160 OPTIMIZED: Stricter Breadth Filter
-MAX_RISK_PER_TRADE    = 0.08   # ★V159: Optimal Balanced Risk (8% per trade = +215% Return)
-LEVERAGE_RATE         = 2.0    # ★V160 OPTIMIZED: Leverage 2.0 outperformed 3.0
-MAX_ALLOCATION_PCT    = 1.0    # (LEVERAGE 3.0 / 3 POS)
+MAX_POSITIONS         = 3      # ★BEST STABILITY: Restored Imperial 3-Elite
+BREADTH_THRESHOLD     = 0.60   # ★BEST STABILITY: Stricter Breadth Filter (0.60)
+MAX_RISK_PER_TRADE    = 0.08   # Optimal Balanced Risk (8% per trade)
+LEVERAGE_RATE         = 1.0    # ★BEST STABILITY: Conservative 1.0x for robustness
+MAX_ALLOCATION_PCT    = 1.0    
 MAX_ALLOCATION_AMOUNT = 10000000 
-LIQUIDITY_LIMIT_RATE  = 0.025  # ★RE-TUNED: Balanced Efficiency (2.5%)
+LIQUIDITY_LIMIT_RATE  = 0.025  
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 3.0    # ★V152: Precision SL (ATR * 3.0)
-TARGET_PROFIT_MULT    = 20.0   # ★V160 OPTIMIZED: TP 20.0 to lock in massive wins early
-RS_THRESHOLD          = 25.0   # Minimum RS_Alpha for momentum entry
-MIN_PRICE             = 200    # Minimum stock price
-MAX_PRICE             = 10000  # Maximum stock price
-ATR_TRAIL             = True   # Trailing stop enabled
-EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.975  # ★V160 OPTIMIZED: Exit when price < SMA20 * 0.975
+ATR_STOP_LOSS         = 5.0    # ★BEST STABILITY: Wider SL for Trend Riding (ATR * 5.0)
+TARGET_PROFIT_MULT    = 40.0   # ★BEST STABILITY: Massive TP to capture big trends (ATR * 40.0)
+RS_THRESHOLD          = 25.0   
+MIN_PRICE             = 200    
+MAX_PRICE             = 10000  
+ATR_TRAIL             = True   
+EXIT_ON_SMA20_BREACH  = True   
+SMA20_EXIT_BUFFER     = 0.975  # Sync with Best Plateau
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
@@ -91,8 +91,8 @@ SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 SLIPPAGE              = 0.003  # Round-trip slippage rate (buy: +0.3%, sell: -0.3%)
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
-BULL_GAP_LIMIT        = 0.13   # ★V152: Optimized Momentum Gap limit (13%)
-BEAR_GAP_LIMIT        = 0.02   # ★V151: Defensive Gap limit (2%)
+BULL_GAP_LIMIT        = 0.11   # ★BEST STABILITY: Optimized Momentum Gap (11%)
+BEAR_GAP_LIMIT        = 0.02   
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():
