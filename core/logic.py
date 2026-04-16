@@ -22,27 +22,31 @@ def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_dr
 
 def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              breadth, breadth_threshold, month_drawdown,
-                             sl_mult, tp_mult):
+                             sl_mult, tp_mult, atr_trail_mult=None):
     """
-    V168.0 ATR Trailing Stop & Profit Locking.
-    1. 初期損切り (Initial Stop)
-    2. トレイリングストップ (ATR_TRAIL_MULT)
-    3. 利確ターゲット (Fixed Target)
+    V168.2 Robust ATR Trailing Stop.
+    1. 初期損切り (Initial Stop): 固定の sl_mult でゆったり守る
+    2. トレイリングストップ: 最高値からの距離。
     """
-    # 初期損切り
+    # グローバルな ATR_TRAIL_MULT をバックアップとして使用
+    effective_trail_mult = atr_trail_mult if atr_trail_mult is not None else ATR_TRAIL_MULT
+    
+    # 初期損切り (Initial/Floor Stop)
     initial_stop = buy_price - (buy_atr * sl_mult)
     
-    # トレイリングストップ計算 (最高値から一定ATR下落で撤退)
-    trail_stop = max_price - (buy_atr * ATR_TRAIL_MULT)
+    # トレイリングストップ計算
+    trail_stop = max_price - (buy_atr * effective_trail_mult)
     
-    # 建値付近での保護（含み益が一定以上なら建値を下回る前に撤退するなどの拡張も可能だが、まずはシンプルに）
-    # 今回は trail_stop が initial_stop を上回った場合のみ更新
+    # 【ロジック修正】初期損切りライン（Floor）を常に確保。
+    # sl_mult(例:5.0) はノイズ耐性、effective_trail_mult(例:3.0) は利益確定の速さを決める。
+    # エントリー直後は max(Initial, Trail) により、よりタイトな（高い方の）価格が採用される。
+    # ノイズで狩られないためには、sl_mult は常に effective_trail_mult 以上の値である必要がある。
     tsl_price = max(initial_stop, trail_stop)
     
     # 利確ターゲット
     target_price = buy_price + (buy_atr * tp_mult)
     
-    return tsl_price, target_price, sl_mult # sl_multは互換性のために返す
+    return tsl_price, target_price, sl_mult 
 
 def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
     """
@@ -129,9 +133,10 @@ def calculate_aegis_shield(month_drawdown, regime="BULL"):
     return 1.0
 
 def get_exit_thresholds(regime, is_trend_snapped):
-    """V140.0 Profit Locking (Ride to 90+ in Bulls)"""
-    if regime == "BULL": return 92
-    return 80
+    """V168.5 Mean Reversion Profit Locking (Pullback targeted)"""
+    # 押し目買い戦略では、過熱感が出る前に早めに利確する (70前後)
+    if regime == "BULL": return 75
+    return 65
 
 def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0):
     """V159.0 Breadth Scaling (Optimal Static Unlocked)"""
@@ -140,23 +145,26 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0
     else: base = 0.0
     return base * shield_mult
 
-def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
+def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0, rsi_threshold=None):
     """
-    V168.0 Trend-Pullback Entry Logic.
+    V168.1 Trend-Pullback Entry Logic.
     1. BULLマーケット時のみエントリー許可
     2. パーフェクトオーダーの確認 (Price > SMA100)
-    3. 短期的な「押し目」（RSI2 < RSI_PB_THRESHOLD）での反発を狙う
+    3. 短期的な「押し目」（RSI2 < rsi_threshold）での反発を狙う
     """
+    # グローバル設定をデフォルト値として使用
+    eff_rsi_threshold = rsi_threshold if rsi_threshold is not None else RSI_PB_THRESHOLD
+    
     if regime != "BULL": return False 
     
-    # 長期トレンドが上向きであること (SMA100以上を維持)
-    if price < sma_med: return False
+    # 乖離の激しすぎる高値掴みを防ぐ (SMA200の15%上まで)
+    if sma_trend > 0 and price > sma_trend * 1.15: return False
     
-    # 長期トレンド(SMA200)との乖離確認
+    # 長期トレンド(SMA200)の上にあることは必須条件
     if sma_trend > 0 and price < sma_trend: return False 
     
     # 押し目買い条件: 短期RSIが売られすぎ水準に達している
-    if rsi2 < RSI_PB_THRESHOLD:
+    if rsi2 < eff_rsi_threshold:
         return True
         
     return False

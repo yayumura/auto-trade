@@ -3,7 +3,7 @@ import numpy as np
 from core.logic import (
     calculate_aegis_shield, get_exit_thresholds, 
     calculate_dynamic_leverage, check_entry_signal,
-    calculate_position_stops, calculate_lot_size
+    calculate_position_stops, calculate_lot_size, detect_market_regime
 )
 from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD,
@@ -18,6 +18,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                slippage=SLIPPAGE, use_sma_exit=EXIT_ON_SMA20_BREACH,
                                exit_buffer=SMA20_EXIT_BUFFER, max_hold_days=MAX_HOLD_DAYS,
                                liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
+                               atr_trail_mult=3.0, rsi_threshold=30.0,
                                verbose=False):
     """
     V150.2 Imperial Apex (Full Logic Parity)
@@ -69,20 +70,21 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         total_equity = cash + sum(np.nan_to_num(close_np[i, p['s_idx']]) * p['shares'] for p in portfolio)
         month_drawdown = (total_equity / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         
-        # Regime Detection (Aegis Standard)
+        # --- Shared Regime Parity ---
+        # Note: In backtest we simulate the data_df row here
+        p_1321 = close_np[i, idx_1321] if idx_1321 != -1 else 0
+        s_trend_1321 = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, idx_1321] if idx_1321 != -1 else 0
+        s_trend_prev = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i-10, idx_1321] if i > 10 and idx_1321 != -1 else s_trend_1321
+        slope = (s_trend_1321 / s_trend_prev - 1.0) * 100 if s_trend_prev != 0 else 0
+        
         regime = "NEUTRAL"
-        is_trend_snapped = False
-        if idx_1321 != -1:
-            p_1321 = close_np[i, idx_1321]
-            s_trend_1321 = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, idx_1321]
-            s_trend_prev = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i-5, idx_1321] if i > 5 else s_trend_1321
-            slope = (s_trend_1321 / s_trend_prev - 1.0) * 100 if s_trend_prev != 0 else 0
+        if p_1321 < s_trend_1321:
+            regime = "BEAR"
+        elif slope > 0.01:
+            regime = "BULL"
             
-            if p_1321 > s_trend_1321 and slope > 0.02: regime = "BULL"
-            elif p_1321 < s_trend_1321 * 0.98: regime = "BEAR"
-            
-            s_short_1321 = bundle_np[f'SMA{SMA_SHORT_PERIOD}'][i, idx_1321]
-            if p_1321 < s_short_1321: is_trend_snapped = True
+        s_short_1321 = bundle_np[f'SMA{SMA_SHORT_PERIOD}'][i, idx_1321] if idx_1321 != -1 else 0
+        is_trend_snapped = p_1321 < s_short_1321 if idx_1321 != -1 else False
 
         # --- Imperial Sovereign Protocol (V143 Adaptive) ---
         shield_mult = calculate_aegis_shield(month_drawdown, regime)
@@ -103,15 +105,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 new_portfolio.append(p)
                 continue
             
-            p['max_price'] = max(p.get('max_price', t_close), t_close)
+            # 最高値の更新 (Highを使用)
+            p['max_price'] = max(p.get('max_price', t_high), t_high)
             exit_p = None
             
             # --- Exit Conditions (V143.0 Adaptive) ---
             # Shared stop/target calculation (single source of truth in core/logic.py)
             tsl_price, target_price, stop_mult = calculate_position_stops(
-                p['buy_price'], t_atr, p['max_price'], t_close,
+                p['buy_price'], p['buy_atr'], p['max_price'], t_close,
                 breadth_ratio[i], breadth_threshold, month_drawdown,
-                sl_mult, tp_mult
+                sl_mult, tp_mult, atr_trail_mult=atr_trail_mult
             )
 
             # B. RSI Overextension
@@ -185,11 +188,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             # Momentum Filters
             if rs < RS_THRESHOLD: continue
-            if t_close < t_sma_med: continue
-            if t_close < t_sma_trend * 1.05: continue 
+            # 重複フィルターを削除し、check_entry_signal の判断に任せる
 
             # Entry Signal
-            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, sma_trend=t_sma_trend)
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, 
+                                              sma_trend=t_sma_trend, rsi_threshold=rsi_threshold)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
