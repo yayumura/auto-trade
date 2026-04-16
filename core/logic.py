@@ -22,26 +22,26 @@ def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_dr
 
 def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              breadth, breadth_threshold, month_drawdown,
-                             sl_mult, tp_mult, atr_trail_mult=None, use_trailing_stop=True):
+                             sl_mult, tp_mult, atr_trail_mult=None, use_trailing_stop=False):
     """
-    V169.0 Flexible Exit Strategy.
-    1. 初期損切り (Initial Stop): 固定の sl_mult
-    2. トレイリングストップ (オプション: use_trailing_stop=True の時)
+    V17.0 Shared Position Exit Calculator (Fixed TP/SL Focus).
+    - sl_mult: 固定損切り
+    - tp_mult: 固定利確
+    - use_trailing_stop: 基本はFalse。
     """
     effective_trail_mult = atr_trail_mult if atr_trail_mult is not None else ATR_TRAIL_MULT
     
-    # 初期損切り (Floor Stop)
+    # 初期損切り (Fixed Stop)
     initial_stop = buy_price - (buy_atr * sl_mult)
     
     if use_trailing_stop:
-        # トレイリングストップ計算
         trail_stop = max_price - (buy_atr * effective_trail_mult)
         tsl_price = max(initial_stop, trail_stop)
     else:
-        # トレイリング無効時は初期損切りを維持
+        # V17 Standard: Fixed Stop-Loss
         tsl_price = initial_stop
     
-    # 利確ターゲット
+    # 利確ターゲット (Fixed Target)
     target_price = buy_price + (buy_atr * tp_mult)
     
     return tsl_price, target_price, sl_mult 
@@ -143,31 +143,29 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0
     else: base = 0.0
     return base * shield_mult
 
-def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0, rsi_threshold=None):
+def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0, rsi_threshold=None, market_curr=0, market_sma=0):
     """
-    V169.0 Strict Trend-Pullback Entry Logic.
-    【落ちるナイフ対策】
-    - 個別銘柄が長期SMA(200日)の上に存在することを確認。
-    - 指数全体がBULLであることに加え、個別も上昇トレンドであることを必須とする。
+    V17.2 Sovereign Trend-Follower (Momentum Hybrid)
+    1. 市場全体が上昇トレンド（Market > MarketSMA）
+    2. 個別銘柄が長期SMA(200日)の上（順張り）
+    3. RSI2がある程度高い（勢いがある）
     """
-    eff_rsi_threshold = rsi_threshold if rsi_threshold is not None else RSI_PB_THRESHOLD
-    
+    # 市場全体フィルター (Market Index SMA Filter)
+    if market_sma > 0 and market_curr < market_sma:
+        return False
+
     if regime != "BULL": return False 
     
-    # 【最重要】個別銘柄の長期トレンドフィルター
-    # sma_trend (通常200日線) を下回っている銘柄は「落ちるナイフ」として除外
+    # 個別銘柄トレンドフィルター
     if sma_trend > 0 and price < sma_trend: 
         return False
         
-    # 乖離の激しすぎる高値掴みを防ぐ (SMA200の15%上まで)
-    if sma_trend > 0 and price > sma_trend * 1.15: 
+    # V17 Momentum Filter: 勢いがある時（RSI2が一定以上、例: 50）にのみエントリー
+    eff_threshold = rsi_threshold if rsi_threshold is not None else 50.0
+    if rsi2 < eff_threshold:
         return False
-    
-    # 押し目買い条件: 短期RSIが売られすぎ水準に達している
-    if rsi2 < eff_rsi_threshold:
-        return True
         
-    return False
+    return True
 
 def calculate_all_technicals_v12(data_df):
     """

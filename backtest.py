@@ -19,7 +19,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                exit_buffer=SMA20_EXIT_BUFFER, max_hold_days=MAX_HOLD_DAYS,
                                liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
                                atr_trail_mult=3.0, rsi_threshold=30.0,
-                               use_trailing_stop=True, individual_trend_sma=200, verbose=False):
+                               use_trailing_stop=True, individual_trend_sma=200, market_trend_sma_period=100, verbose=False):
     """
     V150.2 Imperial Apex (Full Logic Parity)
     - Replicates live logic: RSI2 Mean Reversion + RS Leader Selection
@@ -192,8 +192,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # 重褁E��ィルターを削除し、check_entry_signal の判断に任せる
 
             # Entry Signal
+            # [V17.2] Market Filter calculation for 1321.T
+            m_curr = close_np[i, idx_1321] if idx_1321 != -1 else 0
+            m_sma = bundle_np[f'SMA{market_trend_sma_period}'][i, idx_1321] if idx_1321 != -1 else 0
             entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, 
-                                              sma_trend=t_sma_trend, rsi_threshold=rsi_threshold)
+                                              sma_trend=t_sma_trend, rsi_threshold=rsi_threshold, market_curr=m_curr, market_sma=m_sma)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
