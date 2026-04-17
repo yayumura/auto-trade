@@ -16,16 +16,18 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              sl_mult, tp_mult):
     """
     V17.0 Golden Exit Calculator.
-    - Pure Fixed ATR TP/SL.
+    - Trailing Stop based on max_price (NOT fixed at entry).
+    - Fixed Take Profit based on Entry.
     - Simple, robust, trend-following capture.
     """
-    # 初期損切り (Fixed SL)
-    initial_stop = buy_price - (buy_atr * sl_mult)
+    # 損切り (Trailing Stop using max_price)
+    # これにより、利益が乗るほど損切りラインが上がり、利益を保護します。
+    tsl_price = max_price - (buy_atr * sl_mult)
     
     # 利確ターゲット (Fixed TP)
     target_price = buy_price + (buy_atr * tp_mult)
     
-    return initial_stop, target_price
+    return tsl_price, target_price
 
 def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_buffers=None, sma_med_map=None):
     """
