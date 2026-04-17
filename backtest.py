@@ -176,10 +176,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             if rs < RS_THRESHOLD: continue
 
-            # Entry Signal (V17.0 Golden Sync)
-            entry_signal = check_entry_signal(
-                regime, t_close, t_open, prev_close, t_sma_med, high20_np[i, s_idx], breadth_ratio[i]
-            )
+            # Entry Signal (V17.0 Reversion Sync)
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)

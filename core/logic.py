@@ -102,24 +102,16 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
         return config_leverage
     return 0.0
 
-def check_entry_signal(regime, price, open_p, prev_close, sma_med, high20, breadth_val):
+def check_entry_signal(regime, rsi2, price, open_p, sma_med):
     """
-    V17.0 Golden Entry Protocol (Strict AND conditions)
+    V17.0 Premium Reversion Sync (Classic Parity)
     1. Regime: BULL (Nikkei 225 > SMA200)
-    2. Breadth: >= BREADTH_THRESHOLD (0.60)
-    3. Breakout: Price > 20-day High
-    4. Gap: Within BULL_GAP_LIMIT (11%)
+    2. Reversion: RSI2 < 30.0 (Buy the dip in bull trend)
     """
     if regime != "BULL": return False 
-    if breadth_val < BREADTH_THRESHOLD: return False
     
-    # [Donchian Breakout] 20日間最高値更新
-    if high20 > 0 and price < high20: return False
-    
-    # [Gap Filter] 
-    if prev_close > 0:
-        gap_pct = (open_p / prev_close - 1.0)
-        if gap_pct < -0.02 or gap_pct > BULL_GAP_LIMIT: return False
+    # [V17 Original] RSI2 Oversold Check
+    if rsi2 > 30.0: return False
     
     return True
 
@@ -172,9 +164,6 @@ def calculate_all_technicals_v12(data_df):
     # RS_Alpha (Absolute Momentum: 3-month performance ratio)
     bundle['RS_Alpha'] = (close / close.shift(60) - 1.0) * 100
 
-    # [V17 Original] Donchian Breakout: 20-day High
-    bundle['High20'] = high.shift(1).rolling(20).max()
-
     # Turnover (Value) calculation for liquidity filtering
     if vol is not None:
         turnover = close * vol
@@ -216,15 +205,12 @@ def detect_market_regime(data_df=None, buffer=None):
         
     return regime, is_trend_snapped
 
-def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0):
+def select_best_candidates(data_df, targets, symbols_df, regime):
     """
     V140.0 Momentum Leader Selection:
     - Universe: Stocks with RS_Alpha > 25.
     - Sorting: RS_Alpha Descending.
-    - Breadth Filter: Only active if breadth_val >= BREADTH_THRESHOLD (V17 Golden).
     """
-    if breadth_val < BREADTH_THRESHOLD: return []
-    
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
@@ -252,11 +238,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
         if rs < RS_THRESHOLD: continue # Momentum requirement
 
         p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else 0
-        h20 = bundle['High20'].iloc[-1][t_with_t] if 'High20' in bundle else 0
-        
-        entry_signal = check_entry_signal(
-            regime, p, o, p_prev, s_med, h20, breadth_val
-        )
+        if p_prev and p_prev > 0:
+            gap_pct = (o/p_prev - 1.0)
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > BULL_GAP_LIMIT):
+                continue
+                
+        entry_signal = check_entry_signal(regime, r2, p, o, s_med)
                 
         if entry_signal:
             code_only = t_with_t.replace(".T", "")

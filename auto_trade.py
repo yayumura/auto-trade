@@ -512,7 +512,7 @@ def _main_exec():
                 except: pass
 
             if should_continue_scan:
-                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime, breadth_val=breadth_val)
+                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
                 
                 if is_morning_scan:
                     max_watchlist = max(5, 50 - len(portfolio) - 2) 
