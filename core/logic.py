@@ -16,15 +16,13 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              sl_mult, tp_mult):
     """
     V17.0 Golden Exit Calculator.
-    - Trailing Stop based on max_price (NOT fixed at entry).
+    - Fixed Stop Loss based on Entry (PROTECTED by SMA20 Exit).
     - Fixed Take Profit based on Entry.
-    - Simple, robust, trend-following capture.
     """
-    # 損切り (Trailing Stop using max_price)
-    # これにより、利益が乗るほど損切りラインが上がり、利益を保護します。
-    tsl_price = max_price - (buy_atr * sl_mult)
+    # 損切り (Fixed Stop Loss from Entry)
+    tsl_price = buy_price - (buy_atr * sl_mult)
     
-    # 利確ターゲット (Fixed TP)
+    # 利確ターゲット (Fixed Take Profit from Entry)
     target_price = buy_price + (buy_atr * tp_mult)
     
     return tsl_price, target_price
@@ -64,14 +62,14 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             if current_price < float(sma_med_map[code]) * SMA20_EXIT_BUFFER: 
                 is_trend_broken = True
 
-        # 4. Sell Decision
+        # 4. Sell Decision (Golden Logic Priority Sequence)
         exit_reason = None
 
         if is_trend_broken:
             exit_reason = "Trend Breach (SMA20)"
-        elif current_price <= tsl_price:
+        elif current_price <= buy_price - (atr * ATR_STOP_LOSS):
             exit_reason = f"Stop Loss ({ATR_STOP_LOSS} ATR)"
-        elif current_price >= target_price:
+        elif current_price >= buy_price + (atr * TARGET_PROFIT_MULT):
             exit_reason = f"Take Profit ({TARGET_PROFIT_MULT} ATR)"
             
         # 5. Time Stop (V17.0 Parity)
@@ -104,16 +102,24 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
         return config_leverage
     return 0.0
 
-def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
+def check_entry_signal(regime, price, open_p, prev_close, sma_med, high20, breadth_val):
     """
-    V17.0 Golden Entry Logic.
-    - Pure Momentum/Trend Follower.
-    - High RS leaders in BULL regime.
+    V17.0 Golden Entry Protocol (Strict AND conditions)
+    1. Regime: BULL (Nikkei 225 > SMA200)
+    2. Breadth: >= BREADTH_THRESHOLD (0.60)
+    3. Breakout: Price > 20-day High
+    4. Gap: Within BULL_GAP_LIMIT (11%)
     """
     if regime != "BULL": return False 
+    if breadth_val < BREADTH_THRESHOLD: return False
     
-    # [Breakout Condition] 個別銘柄がSMA20を上回っていること（V17ゴールデン）
-    if sma_med > 0 and price < sma_med: return False
+    # [Donchian Breakout] 20日間最高値更新
+    if high20 > 0 and price < high20: return False
+    
+    # [Gap Filter] 
+    if prev_close > 0:
+        gap_pct = (open_p / prev_close - 1.0)
+        if gap_pct < -0.02 or gap_pct > BULL_GAP_LIMIT: return False
     
     return True
 
@@ -166,6 +172,9 @@ def calculate_all_technicals_v12(data_df):
     # RS_Alpha (Absolute Momentum: 3-month performance ratio)
     bundle['RS_Alpha'] = (close / close.shift(60) - 1.0) * 100
 
+    # [V17 Original] Donchian Breakout: 20-day High
+    bundle['High20'] = high.shift(1).rolling(20).max()
+
     # Turnover (Value) calculation for liquidity filtering
     if vol is not None:
         turnover = close * vol
@@ -207,12 +216,15 @@ def detect_market_regime(data_df=None, buffer=None):
         
     return regime, is_trend_snapped
 
-def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffers=None):
+def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0):
     """
     V140.0 Momentum Leader Selection:
     - Universe: Stocks with RS_Alpha > 25.
     - Sorting: RS_Alpha Descending.
+    - Breadth Filter: Only active if breadth_val >= BREADTH_THRESHOLD (V17 Golden).
     """
+    if breadth_val < BREADTH_THRESHOLD: return []
+    
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
@@ -239,14 +251,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         if pd.isna(p) or p <= 0 or pd.isna(rs): continue
         if rs < RS_THRESHOLD: continue # Momentum requirement
 
-        # [V150.2 Gap Filter Parity] バックテストと同一ギャップフィルター
-        p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else None
-        if p_prev is not None and not pd.isna(p_prev) and p_prev > 0:
-            gap_pct = (o / p_prev - 1.0)
-            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > BULL_GAP_LIMIT):
-                continue
-
-        entry_signal = check_entry_signal(regime, r2, p, o, s_med, s_trend)
+        p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else 0
+        h20 = bundle['High20'].iloc[-1][t_with_t] if 'High20' in bundle else 0
+        
+        entry_signal = check_entry_signal(
+            regime, p, o, p_prev, s_med, h20, breadth_val
+        )
                 
         if entry_signal:
             code_only = t_with_t.replace(".T", "")

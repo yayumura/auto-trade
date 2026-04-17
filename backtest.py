@@ -41,6 +41,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     atr_np = bundle_np['ATR']
     rs_alpha_np = bundle_np.get('RS_Alpha', np.zeros_like(close_np))
     sma_med_np = bundle_np.get(f'SMA{SMA_MEDIUM_PERIOD}', np.zeros_like(close_np))
+    high20_np = bundle_np.get('High20', np.zeros_like(close_np))
     
     cooling_days = 0
     current_month = ""
@@ -175,8 +176,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             if rs < RS_THRESHOLD: continue
 
-            # Entry Signal
-            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, sma_trend=t_sma_trend)
+            # Entry Signal (V17.0 Golden Sync)
+            entry_signal = check_entry_signal(
+                regime, t_close, t_open, prev_close, t_sma_med, high20_np[i, s_idx], breadth_ratio[i]
+            )
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)
