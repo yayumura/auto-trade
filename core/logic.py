@@ -57,22 +57,22 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             ATR_STOP_LOSS, TARGET_PROFIT_MULT
         )
 
-        # 3. Technical Trend Exit (SMA20)
+        # 3. Technical Trend Exit (SMA20) ★V17 ORIGINAL
         is_trend_broken = False
         if sma_med_map and code in sma_med_map:
-            # Buffer for optimized endurance (Synced with config)
+            # Setting: SMA20_EXIT_BUFFER (0.975)
             if current_price < float(sma_med_map[code]) * SMA20_EXIT_BUFFER: 
                 is_trend_broken = True
 
         # 4. Sell Decision
         exit_reason = None
 
-        if current_price <= tsl_price:
+        if is_trend_broken:
+            exit_reason = "Trend Breach (SMA20)"
+        elif current_price <= tsl_price:
             exit_reason = f"Stop Loss ({ATR_STOP_LOSS} ATR)"
         elif current_price >= target_price:
             exit_reason = f"Take Profit ({TARGET_PROFIT_MULT} ATR)"
-        elif is_trend_broken:
-            exit_reason = "Trend Breach (SMA20)"
             
         # 5. Time Stop (V17.0 Parity)
         buy_time_str = p.get('buy_time')
@@ -112,7 +112,9 @@ def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
     """
     if regime != "BULL": return False 
     
-    # Selectionで上位RSに絞られているため、ここではregimeチェックのみで充分
+    # [Breakout Condition] 個別銘柄がSMA20を上回っていること（V17ゴールデン）
+    if sma_med > 0 and price < sma_med: return False
+    
     return True
 
 def calculate_all_technicals_v12(data_df):
@@ -346,10 +348,10 @@ def calculate_lot_size(current_equity, atr, sl_mult, price, dynamic_leverage,
     # 割当額に基づく株数
     shares_alloc = int(target_allocation // price)
     
-    # 全体購買力による制約 (実際の注文可能額を超えないようにする)
+    # 全体購買力による制約 (95% Safety Margin to avoid margin errors)
     shares_bp = 1e9
     if buying_power is not None:
-        shares_bp = int((buying_power * 0.98) // price) # 余裕を持って 98%
+        shares_bp = int((buying_power * 0.95) // price) 
         
     # 最小値の採用と100株単位への丸め (単元株制度への適合)
     final_shares = min(shares_alloc, shares_bp)

@@ -114,12 +114,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # Trend Breach (Synced buffer)
             is_trend_broken = t_close < sma_med_np[i, tidx] * exit_buffer
 
-            if t_low <= tsl_price or t_open <= tsl_price:
+            if is_trend_broken:
+                exit_p = t_close
+            elif t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
             elif t_high >= target_price or t_open >= target_price:
                 exit_p = max(t_open, target_price)
-            elif is_trend_broken:
-                exit_p = t_close
             elif p.get('held_days', 0) >= max_hold_days:
                 exit_p = t_close
             elif month_done:
