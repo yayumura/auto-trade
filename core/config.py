@@ -65,26 +65,29 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V167.0 SIMPLE COMPOUNDING (Equity Allocation Sync) ---
-USE_DYNAMIC_LEVERAGE  = True   
-USE_COMPOUNDING       = True   # ★STABLE: Enable compounding based on current equity
-MAX_POSITIONS         = 3      # ★STABLE: 3-Elite Allocation
-BREADTH_THRESHOLD     = 0.60   
-LEVERAGE_RATE         = 1.5    # ★BOOST: 1.5x for accelerated growth
-MAX_ALLOCATION_PCT    = 1.0    
+# --- Imperial Oracle V17.0 FINAL (V17 Golden Logic) ---
+USE_COMPOUNDING       = True   # ★ENABLED: Equity-based sizing
+MAX_POSITIONS         = 3      # ★GOLDEN: Concentration
+LEVERAGE_RATE         = 1.5    # ★STABLE: 1.5x Leverage
+INITIAL_CASH          = 1000000
+
+# Strategy Core (V17 Golden Plateau)
+BREADTH_THRESHOLD     = 0.60   # ★CRITICAL: Market Defense Defense
+SMA20_EXIT_BUFFER     = 0.975  # ★STABLE: Trend Endurance (Exit if < SMA20 * Buffer)
+ATR_STOP_LOSS         = 5.0    # ★WIDE: Noise Protection
+TARGET_PROFIT_MULT    = 40.0   # ★DEEP: Trend Capture
+BULL_GAP_LIMIT        = 0.11   # ★SYNC: Gap Protection (Momentum)
+BEAR_GAP_LIMIT        = 0.02
+RS_THRESHOLD          = 25.0
+
+MAX_ALLOCATION_PCT    = 1.0  
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 5.0    # ★Initial SL (ATR * 5.0)
-TARGET_PROFIT_MULT    = 40.0   # ★Final TP (ATR * 40.0)
-ATR_TRAIL_MULT        = 3.0    # ★Trailing Stop (ATR * 3.0 from Highest High)
-RSI_PB_THRESHOLD      = 30.0   # ★Pullback RSI Threshold (Buy if RSI2 < 30)
-RS_THRESHOLD          = 25.0   
 MIN_PRICE             = 200    
 MAX_PRICE             = 10000  
-ATR_TRAIL             = True   
+
 EXIT_ON_SMA20_BREACH  = True   
-SMA20_EXIT_BUFFER     = 0.975  # Sync with Best Plateau
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
@@ -93,8 +96,6 @@ SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 SLIPPAGE              = 0.003  # Round-trip slippage rate (buy: +0.3%, sell: -0.3%)
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
-BULL_GAP_LIMIT        = 0.11   # ★BEST STABILITY: Optimized Momentum Gap (11%)
-BEAR_GAP_LIMIT        = 0.02   
 
 # --- Insider Exclusion ---
 def load_insider_exclusion_codes():

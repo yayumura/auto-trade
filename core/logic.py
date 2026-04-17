@@ -6,80 +6,56 @@ from core.config import (
     ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
     MAX_POSITIONS, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    EXCLUSION_CACHE_FILE, PROJECT_ROOT, DATA_ROOT, ATR_TRAIL, EXIT_ON_SMA20_BREACH,
-    SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
+    EXCLUSION_CACHE_FILE, SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, RS_THRESHOLD,
-    USE_COMPOUNDING, INITIAL_CASH, ATR_TRAIL_MULT, RSI_PB_THRESHOLD
+    BULL_GAP_LIMIT, RS_THRESHOLD,
+    USE_COMPOUNDING, INITIAL_CASH
 )
 
-def calculate_adaptive_stop_mult(base_mult, breadth, breadth_threshold, month_drawdown):
-    """V153.0 Shared Adaptive Stop Multiplier"""
-    stop_mult = float(base_mult)
-    if breadth < breadth_threshold: stop_mult = 1.5
-    if month_drawdown <= -0.07: stop_mult = 1.0
-    return stop_mult
-
 def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
-                             breadth, breadth_threshold, month_drawdown,
-                             sl_mult, tp_mult, atr_trail_mult=None, use_trailing_stop=False):
+                             sl_mult, tp_mult):
     """
-    V17.0 Shared Position Exit Calculator (Fixed TP/SL Focus).
-    - sl_mult: 固定損切り
-    - tp_mult: 固定利確
-    - use_trailing_stop: 基本はFalse。
+    V17.0 Golden Exit Calculator.
+    - Pure Fixed ATR TP/SL.
+    - Simple, robust, trend-following capture.
     """
-    effective_trail_mult = atr_trail_mult if atr_trail_mult is not None else ATR_TRAIL_MULT
-    
-    # 初期損切り (Fixed Stop)
+    # 初期損切り (Fixed SL)
     initial_stop = buy_price - (buy_atr * sl_mult)
     
-    if use_trailing_stop:
-        trail_stop = max_price - (buy_atr * effective_trail_mult)
-        tsl_price = max(initial_stop, trail_stop)
-    else:
-        # V17 Standard: Fixed Stop-Loss
-        tsl_price = initial_stop
-    
-    # 利確ターゲット (Fixed Target)
+    # 利確ターゲット (Fixed TP)
     target_price = buy_price + (buy_atr * tp_mult)
     
-    return tsl_price, target_price, sl_mult 
+    return initial_stop, target_price
 
-def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_simulation=True, realtime_buffers=None, today_ohlc=None, sma_med_map=None, month_drawdown=0.0, is_trend_snapped=False, market_breadth=0.5):
+def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_buffers=None, sma_med_map=None):
     """
-    V143.0 Adaptive Alpha Manager:
-    - Growth Focus: 3.0 ATR base trail.
-    - Market Shield: Tightens to 1.5 ATR if Breadth < 0.45.
-    - Safe Mode: Tightens to 1.0 ATR if Month DD > 7%.
+    V17.0 Golden Manager:
+    - Fixed ATR TP/SL.
+    - SMA20 Trend Breach protection.
+    - Time-based Exit (MAX_HOLD_DAYS).
     """
     remaining = []
     sell_actions = []
     
-    exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
-
     for p in portfolio:
         code = str(p['code'])
         # 1. Price Acquisition
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
-            rsi2 = realtime_buffers[code].get_current_rsi2() if hasattr(realtime_buffers[code], 'get_current_rsi2') else 50
         else:
             current_price = float(p.get('current_price', p['buy_price']))
-            rsi2 = 50 
             
         buy_price = float(p['buy_price'])
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 2. Shared Stop/Target Calculation (Parity with backtest via calculate_position_stops)
-        tsl_price, target_price, stop_mult = calculate_position_stops(
+        # 2. Shared Stop/Target Calculation
+        tsl_price, target_price = calculate_position_stops(
             buy_price, atr, highest_price, current_price,
-            market_breadth, BREADTH_THRESHOLD, month_drawdown,
             ATR_STOP_LOSS, TARGET_PROFIT_MULT
         )
 
-        # 3. Technical Trend Exit
+        # 3. Technical Trend Exit (SMA20)
         is_trend_broken = False
         if sma_med_map and code in sma_med_map:
             # Buffer for optimized endurance (Synced with config)
@@ -90,15 +66,11 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
         exit_reason = None
 
         if current_price <= tsl_price:
-            exit_reason = f"Trail Stop ({stop_mult:.1f} ATR)"
+            exit_reason = f"Stop Loss ({ATR_STOP_LOSS} ATR)"
         elif current_price >= target_price:
-            exit_reason = f"Take Profit ({TARGET_PROFIT_MULT:.1f} ATR)"
-        elif rsi2 > exit_threshold:
-            exit_reason = f"Profit Peak ({rsi2:.1f})"
+            exit_reason = f"Take Profit ({TARGET_PROFIT_MULT} ATR)"
         elif is_trend_broken:
             exit_reason = "Trend Breach (SMA20)"
-        elif month_drawdown <= -0.15: # Doomsday
-            exit_reason = "System Circuit Breaker"
             
         # 5. Time Stop (V17.0 Parity)
         buy_time_str = p.get('buy_time')
@@ -124,47 +96,21 @@ def manage_positions_live(portfolio, account, broker=None, regime="BULL", is_sim
 
     return remaining, sell_actions
 
-def calculate_aegis_shield(month_drawdown, regime="BULL"):
-    """V140.0 Adaptive Exposure"""
-    if month_drawdown <= -0.10: return 0.0  # Shutdown entry (must check first)
-    if month_drawdown <= -0.05: return 0.5  # Halve leverage
-    return 1.0
+def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
+    """V17.0 Fixed Breadth Scaling: On if >= Threshold, else Off."""
+    if breadth_val >= BREADTH_THRESHOLD:
+        return config_leverage
+    return 0.0
 
-def get_exit_thresholds(regime, is_trend_snapped):
-    """V168.5 Mean Reversion Profit Locking (Pullback targeted)"""
-    # 押し目買い戦略では、過熱感が出る前に早めに利確する (70前後)
-    if regime == "BULL": return 75
-    return 65
-
-def calculate_dynamic_leverage(breadth_val, config_leverage=1.5, shield_mult=1.0):
-    """V159.0 Breadth Scaling (Optimal Static Unlocked)"""
-    if breadth_val >= 0.60: base = config_leverage
-    elif breadth_val >= 0.40: base = config_leverage * 0.5
-    else: base = 0.0
-    return base * shield_mult
-
-def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0, rsi_threshold=None, market_curr=0, market_sma=0):
+def check_entry_signal(regime, rsi2, price, open_p, sma_med, sma_trend=0):
     """
-    V17.2 Sovereign Trend-Follower (Momentum Hybrid)
-    1. 市場全体が上昇トレンド（Market > MarketSMA）
-    2. 個別銘柄が長期SMA(200日)の上（順張り）
-    3. RSI2がある程度高い（勢いがある）
+    V17.0 Golden Entry Logic.
+    - Pure Momentum/Trend Follower.
+    - High RS leaders in BULL regime.
     """
-    # 市場全体フィルター (Market Index SMA Filter)
-    if market_sma > 0 and market_curr < market_sma:
-        return False
-
     if regime != "BULL": return False 
     
-    # 個別銘柄トレンドフィルター
-    if sma_trend > 0 and price < sma_trend: 
-        return False
-        
-    # V17 Momentum Filter: 勢いがある時（RSI2が一定以上、例: 50）にのみエントリー
-    eff_threshold = rsi_threshold if rsi_threshold is not None else 50.0
-    if rsi2 < eff_threshold:
-        return False
-        
+    # Selectionで上位RSに絞られているため、ここではregimeチェックのみで充分
     return True
 
 def calculate_all_technicals_v12(data_df):
@@ -293,8 +239,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, realtime_buffer
         p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else None
         if p_prev is not None and not pd.isna(p_prev) and p_prev > 0:
             gap_pct = (o / p_prev - 1.0)
-            gap_limit = BULL_GAP_LIMIT if regime == "BULL" else BEAR_GAP_LIMIT
-            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_limit):
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > BULL_GAP_LIMIT):
                 continue
 
         entry_signal = check_entry_signal(regime, r2, p, o, s_med, s_trend)

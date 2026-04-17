@@ -114,9 +114,7 @@ def run_single_opt(params_pack):
         bear_gap_limit=BEAR_GAP_LIMIT,
         atr_trail_mult=p['atr_trail'],
         rsi_threshold=p['rsi_th'],
-        use_trailing_stop=p['use_trail'],
-        individual_trend_sma=p['trend_sma'],
-        market_trend_sma_period=p['mkt_trend_sma']
+        verbose=False
     )
     
     # 安定性スコアの計算
@@ -180,17 +178,14 @@ def optimize_jp_imperial(cache_path):
     for sl in param_grid['sl_mult']:          
         for tp in param_grid['tp_mult']:
             for rsi_th in param_grid['rsi_th']:
-                for m_sma in param_grid['mkt_trend_sma']:
-                    for u_trail in param_grid['use_trail']:
-                        grid.append({
-                            "breadth": 0.5, "exit_buffer": 0.975,
-                            "sl": sl, "tp": tp, 
-                            "atr_trail": 5.0, "rsi_th": rsi_th,
-                            "trend_sma": 200, "mkt_trend_sma": m_sma,
-                            "use_trail": u_trail,
-                            "max_pos": 3, "leverage": 1.0, 
-                            "bgap": 0.11, "max_hold_days": 30
-                        })
+                for atr_t in param_grid['atr_trail']:
+                    grid.append({
+                        "breadth": 0.60, "exit_buffer": 0.975,
+                        "sl": sl, "tp": tp, 
+                        "atr_trail": atr_t, "rsi_th": rsi_th,
+                        "max_pos": 3, "leverage": 1.5, 
+                        "bgap": 0.11, "max_hold_days": 30
+                    })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 
@@ -211,7 +206,7 @@ def optimize_jp_imperial(cache_path):
     # 読みやすいように列を整理
     display_cols = [
         'score', 'return_pct', 'trades', 'win_rate', 'mwr', 'pf', 'sharpe', 'mdd',
-        'sl', 'tp', 'rsi_th', 'mkt_trend_sma', 'use_trail'
+        'sl', 'tp', 'rsi_th', 'atr_trail'
     ]
     # 出力用の一時的なデータフレームを作成
     df_display = df_res[[c for c in display_cols if c in df_res.columns]].copy()

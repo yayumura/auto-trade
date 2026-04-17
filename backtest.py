@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 from core.logic import (
-    calculate_aegis_shield, get_exit_thresholds, 
     calculate_dynamic_leverage, check_entry_signal,
     calculate_position_stops, calculate_lot_size, detect_market_regime
 )
@@ -18,13 +17,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                slippage=SLIPPAGE, use_sma_exit=EXIT_ON_SMA20_BREACH,
                                exit_buffer=SMA20_EXIT_BUFFER, max_hold_days=MAX_HOLD_DAYS,
                                liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
-                               atr_trail_mult=3.0, rsi_threshold=30.0,
-                               use_trailing_stop=True, individual_trend_sma=200, market_trend_sma_period=100, verbose=False):
+                                atr_trail_mult=3.0, rsi_threshold=30.0,
+                                verbose=False):
     """
-    V150.2 Imperial Apex (Full Logic Parity)
-    - Replicates live logic: RSI2 Mean Reversion + RS Leader Selection
-    - Aegis Shield & Dynamic Leverage: Verified Sync
-    - Gap Filter: Synced with BULL_GAP_LIMIT / BEAR_GAP_LIMIT
+    V17.0 Imperial Apex (Golden Logic Sync)
+    - Replicates live logic: Pure Trend Following
+    - Fixed ATR TP/SL & SMA20 Exit
+    - Gap Filter: Synced with BULL_GAP_LIMIT
     - Liquidity Filter: Synced with LIQUIDITY_LIMIT_RATE
     """
     T = len(timeline)
@@ -58,7 +57,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     for i in range(1, T):
         curr_time = timeline[i]
         
-        # 0. Monthly Tracking & Aegis Initialization
+        # 0. Monthly Tracking
         if cooling_days > 0: cooling_days -= 1
         
         if curr_time.strftime('%Y-%m') != current_month:
@@ -71,10 +70,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         month_drawdown = (total_equity / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         
         # --- Shared Regime Parity ---
-        # Note: In backtest we simulate the data_df row here
         p_1321 = close_np[i, idx_1321] if idx_1321 != -1 else 0
-        s_trend_1321 = bundle_np[f'SMA{individual_trend_sma}'][i, idx_1321] if idx_1321 != -1 else 0
-        s_trend_prev = bundle_np[f'SMA{individual_trend_sma}'][i-10, idx_1321] if i > 10 and idx_1321 != -1 else s_trend_1321
+        s_trend_1321 = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, idx_1321] if idx_1321 != -1 else 0
+        s_trend_prev = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i-10, idx_1321] if i > 10 and idx_1321 != -1 else s_trend_1321
         slope = (s_trend_1321 / s_trend_prev - 1.0) * 100 if s_trend_prev != 0 else 0
         
         regime = "NEUTRAL"
@@ -86,8 +84,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         s_short_1321 = bundle_np[f'SMA{SMA_SHORT_PERIOD}'][i, idx_1321] if idx_1321 != -1 else 0
         is_trend_snapped = p_1321 < s_short_1321 if idx_1321 != -1 else False
 
-        # --- Imperial Sovereign Protocol (V143 Adaptive) ---
-        shield_mult = calculate_aegis_shield(month_drawdown, regime)
+        # --- Imperial Sovereign Protocol (V17.0 Golden) ---
         if month_drawdown <= -0.15: month_done = True 
 
         # 1. Management
@@ -99,37 +96,28 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_low = low_np[i, tidx]
             t_close = close_np[i, tidx]
             t_atr = atr_np[i, tidx]
-            r2 = rsi2_np[i, tidx]
             
             if np.isnan(t_close):
                 new_portfolio.append(p)
                 continue
             
-            # 最高値の更新 (Highを使用)
+            # 最高値の更新
             p['max_price'] = max(p.get('max_price', t_high), t_high)
             exit_p = None
             
-            # --- Exit Conditions (V143.0 Adaptive) ---
-            # Shared stop/target calculation (single source of truth in core/logic.py)
-            tsl_price, target_price, stop_mult = calculate_position_stops(
+            # --- Exit Conditions (V17.0 Golden) ---
+            tsl_price, target_price = calculate_position_stops(
                 p['buy_price'], p['buy_atr'], p['max_price'], t_close,
-                breadth_ratio[i], breadth_threshold, month_drawdown,
-                sl_mult, tp_mult, atr_trail_mult=atr_trail_mult, 
-                use_trailing_stop=use_trailing_stop
+                sl_mult, tp_mult
             )
 
-            # B. RSI Overextension
-            exit_threshold = get_exit_thresholds(regime, is_trend_snapped)
-
-            # C. Trend Breach (Synced buffer)
+            # Trend Breach (Synced buffer)
             is_trend_broken = t_close < sma_med_np[i, tidx] * exit_buffer
 
             if t_low <= tsl_price or t_open <= tsl_price:
                 exit_p = max(t_open, tsl_price)
             elif t_high >= target_price or t_open >= target_price:
                 exit_p = max(t_open, target_price)
-            elif r2 > exit_threshold:
-                exit_p = t_close
             elif is_trend_broken:
                 exit_p = t_close
             elif p.get('held_days', 0) >= max_hold_days:
@@ -151,17 +139,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         total_equity = cash + sum(np.nan_to_num(close_np[i, pos['s_idx']]) * pos['shares'] for pos in portfolio)
         monthly_assets[current_month] = float(total_equity)
 
-        # 2. Entry (V143.0 Adaptive Alpha)
+        # 2. Entry (V17.0 Golden)
         if i + 1 >= T or month_done or cooling_days > 0 or regime != "BULL": continue 
         
-        # [V159] Unlocked Static Leverage
-        dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate, shield_mult=shield_mult)
+        dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
         if dynamic_lev <= 0: continue
         
         # Selection: Pure RS_Alpha Top Leaders
         rs_alphas = rs_alpha_np[i, :]
         rsis = rsi2_np[i, :]
-        sma_trends = bundle_np[f'SMA{individual_trend_sma}'][i, :]
+        sma_trends = bundle_np[f'SMA{SMA_TREND_PERIOD}'][i, :]
         turnover_vals = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12) 
 
         valid_indices = [idx for idx in univ_indices if not np.isnan(rs_alphas[idx])]
@@ -183,20 +170,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             # [V150.2 Reality Sync] Gap Filter Parity
             prev_close = close_np[i-1, s_idx]
             gap_pct = (t_open / prev_close - 1.0) if prev_close > 0 else 0
-            gap_limit = bull_gap_limit if regime == "BULL" else bear_gap_limit
-            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_limit):
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > bull_gap_limit):
                 continue
 
-            # Momentum Filters
             if rs < RS_THRESHOLD: continue
-            # 重褁E��ィルターを削除し、check_entry_signal の判断に任せる
 
             # Entry Signal
-            # [V17.2] Market Filter calculation for 1321.T
-            m_curr = close_np[i, idx_1321] if idx_1321 != -1 else 0
-            m_sma = bundle_np[f'SMA{market_trend_sma_period}'][i, idx_1321] if idx_1321 != -1 else 0
-            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, 
-                                              sma_trend=t_sma_trend, rsi_threshold=rsi_threshold, market_curr=m_curr, market_sma=m_sma)
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med, sma_trend=t_sma_trend)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)

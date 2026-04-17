@@ -48,8 +48,8 @@ from core.config import (
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS,
-    USE_DYNAMIC_LEVERAGE, LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, ATR_TRAIL, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT, BEAR_GAP_LIMIT,
+    LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
+    ATR_STOP_LOSS, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT,
     SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     load_insider_exclusion_codes
 )
@@ -94,7 +94,7 @@ def release_lock():
 from core.logic import (
     detect_market_regime, manage_positions_live, select_best_candidates, 
     load_invalid_tickers, save_invalid_tickers, normalize_tick_size,
-    RealtimeBuffer, calculate_aegis_shield, calculate_lot_size
+    RealtimeBuffer, calculate_dynamic_leverage, calculate_lot_size
 )
 from core.ai_filter import ai_qualitative_filter, get_recent_news
 
@@ -398,10 +398,8 @@ def _main_exec():
         sma_med_map = {str(code): info.get(f'SMA{SMA_MEDIUM_PERIOD}', 0) for code, info in jp_cache.items()}
         
         portfolio, sell_actions = manage_positions_live(
-            portfolio, account, broker=broker, regime=regime, is_simulation=is_sim,
-            realtime_buffers=realtime_buffers, sma_med_map=sma_med_map,
-            month_drawdown=month_drawdown, is_trend_snapped=is_trend_snapped,
-            market_breadth=breadth_val  # [Parity] Pass actual breadth for adaptive stop
+            portfolio, broker=broker, is_simulation=is_sim,
+            realtime_buffers=realtime_buffers, sma_med_map=sma_med_map
         )
         actions_taken.extend(sell_actions)
         if sell_actions:
@@ -482,15 +480,10 @@ def _main_exec():
                     else:
                         breadth_val = 0.5 # Fallback
                     
-                    # Determine Current Leverage (Shared Logic V133)
-                    shield_mult = calculate_aegis_shield(month_drawdown, regime)
-                    
-                    if USE_DYNAMIC_LEVERAGE:
-                        dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE, shield_mult=shield_mult)
-                        if dynamic_lev <= 0:
-                            print("🛡️ [Safeguard] Breadth or Shield below threshold. Suppressing new entries.")
-                    else:
-                        dynamic_lev = LEVERAGE_RATE * shield_mult
+                    # Determine Current Leverage (V17.0 Golden)
+                    dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
+                    if dynamic_lev <= 0:
+                        print("🛡️ [Safeguard] Breadth below threshold. Suppressing new entries.")
                     
                     print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
                 else:
@@ -574,7 +567,7 @@ def _main_exec():
                                         special_quote_watchlist[str(item['code'])] = item
                                         continue
                                     gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
-                                    gap_threshold = BULL_GAP_LIMIT if regime == "BULL" else BEAR_GAP_LIMIT
+                                    gap_threshold = BULL_GAP_LIMIT
                                     if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > gap_threshold):
                                         print(f"[Skip] {item['code']} Gap check failed: {gap_pct:.2%}")
                                         continue
