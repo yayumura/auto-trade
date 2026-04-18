@@ -38,12 +38,27 @@ class SimulationBroker(BaseBroker):
         self.save_positions(portfolio)
 
     def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
-        """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
+        """ 
+        シミュレーションでは常に即時成功とみなし、ダミーIDを返す。
+        V18.1: スリッページを反映した実行価格のシミュレーション。
+        """
+        from core.config import SLIPPAGE_RATE
+        exec_price = price
+        if price > 0:
+            if side == "1": # Buy
+                exec_price = price * (1.0 + SLIPPAGE_RATE)
+            else: # Sell
+                exec_price = price * (1.0 - SLIPPAGE_RATE)
+                
+            if os.getenv("DEBUG_MODE", "false").lower() == "true":
+                print(f"[SIM_EXEC] {code} {side} @ {exec_price:,.1f} (Slipped from {price:,.1f})")
+
         import time
         return f"SIM-{int(time.time())}"
 
     def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> str:
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
+        # 成行注文としてスリッページを適用
         return self.execute_market_order(code, shares, side)
 
     def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:

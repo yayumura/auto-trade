@@ -160,32 +160,32 @@ def optimize_jp_imperial(cache_path):
     
     # --- Aggressive Mean Reversion Search ---
     
-    # --- V17 Sovereign Trend Grid (Momentum Persistence) ---
+    # --- Sovereign Optimization Grid (V18.1 Multi-Position Search) ---
     param_grid = {
+        'breadth': [0.5, 0.6],             # 市場環境閾値
+        'exit_buffer': [0.975, 0.98],    
         'sl_mult': [3.0, 5.0],
-        'tp_mult': [20.0, 40.0],
-        'rsi_th': [30, 50, 70],
-        'trend_sma': [200],         # 個別銘柄長期線
-        'mkt_trend_sma': [50, 100], # 【新】市場環境線
-        'use_trail': [False, True],
-        'atr_trail': [3.0, 5.0],
-        'leverage_rate': [1.0],
-        'bull_gap_limit': [0.11],
+        'tp_mult': [40.0],
+        'max_pos': [3, 5, 10],               # ★集中 vs 分散
+        'leverage_rate': [1.0, 1.5, 2.0],
+        'bull_gap_limit': [0.10, 0.12],
         'max_hold_days': [30]
     }
 
     grid = []
-    for sl in param_grid['sl_mult']:          
-        for tp in param_grid['tp_mult']:
-            for rsi_th in param_grid['rsi_th']:
-                for atr_t in param_grid['atr_trail']:
-                    grid.append({
-                        "breadth": 0.60, "exit_buffer": 0.975,
-                        "sl": sl, "tp": tp, 
-                        "atr_trail": atr_t, "rsi_th": rsi_th,
-                        "max_pos": 3, "leverage": 1.5, 
-                        "bgap": 0.11, "max_hold_days": 30
-                    })
+    for b in param_grid['breadth']:           
+        for ex_b in param_grid['exit_buffer']:
+            for sl in param_grid['sl_mult']:          
+                for tp in param_grid['tp_mult']: 
+                    for mp in param_grid['max_pos']:
+                        for lev in param_grid['leverage_rate']:
+                            for bgap in param_grid['bull_gap_limit']:
+                                grid.append({
+                                    "breadth": b, "exit_buffer": ex_b,
+                                    "sl": sl, "tp": tp, 
+                                    "max_pos": mp, "leverage": lev, 
+                                    "bgap": bgap, "max_hold_days": 30
+                                })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 

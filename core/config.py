@@ -100,6 +100,7 @@ SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
 SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 SLIPPAGE              = 0.003  # Round-trip slippage rate (buy: +0.3%, sell: -0.3%)
+SLIPPAGE_RATE         = 0.002  # ★REALISM: One-way slippage rate (0.2%)
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 
 # --- Insider Exclusion ---
