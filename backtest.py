@@ -120,24 +120,30 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             from core.config import SLIPPAGE_RATE
             
             if t_open <= tsl_price:
-                # Gap down: Exit at Open (worse price)
+                # [V18.2 Strict] Gap down: Exit at Open (worse price)
                 exit_p = t_open
+                exit_reason = "Gap Down Stop Loss"
             elif t_low <= tsl_price:
                 # Intraday hit: Exit at Stop price
                 exit_p = tsl_price
+                exit_reason = "Stop Loss"
             elif t_open >= target_price:
                 # Gap up: Exit at Open (better price)
                 exit_p = t_open
+                exit_reason = "Gap Up Take Profit"
             elif t_high >= target_price:
                 # Intraday hit: Exit at Target price
                 exit_p = target_price
+                exit_reason = "Take Profit"
             elif p.get('held_days', 0) >= max_hold_days:
                 exit_p = t_close
+                exit_reason = "Time Stop"
             elif month_done:
                 exit_p = t_close
+                exit_reason = "Aegis Circuit Breaker"
             
             if exit_p is not None:
-                final_exit = exit_p * (1.0 - SLIPPAGE_RATE)
+                final_exit = exit_p * (1.0 - slippage) # Use the passed slippage param
                 trade_results.append((final_exit - p['buy_price']) * p['shares'])
                 cash += final_exit * p['shares']
                 cooling_days = COOLING_DAYS
@@ -190,8 +196,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med)
                     
             if entry_signal:
-                from core.config import SLIPPAGE_RATE
-                real_buy = t_close * (1.0 + SLIPPAGE_RATE)
+                real_buy = t_close * (1.0 + slippage) # Use the passed slippage param
                 
                 # --- V155 Reality Sync: Sizing & Capital Control ---
                 current_exposure = total_equity - cash

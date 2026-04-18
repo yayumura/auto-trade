@@ -61,10 +61,32 @@ class SimulationBroker(BaseBroker):
         # 成行注文としてスリッページを適用
         return self.execute_market_order(code, shares, side)
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
-        """ 逆指値（ストップロス）のダミー関数（Brokerインターフェース互換性用） """
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, current_open: float = None) -> dict:
+        """ 
+        [V18.2 Strictness] 逆指値（ストップロス）のシミュレーション実行。
+        - 始値がトリガー価格を下回っている（ギャップダウン）場合、始値で約定させる。
+        """
+        from core.config import SLIPPAGE_RATE
+        exec_price = trigger_price
+        
+        # 始値がすでにストップ価格を割り込んでいた場合（ギャップダウン）
+        if current_open is not None and side == "1": # Sell Stop (Stop Loss)
+            if current_open <= trigger_price:
+                exec_price = current_open # より不利な始値で約定
+        
+        # スリッページ適用
+        if side == "1": # Sell
+            final_price = exec_price * (1.0 - SLIPPAGE_RATE)
+        else: # Buy (Stop Buy)
+            final_price = exec_price * (1.0 + SLIPPAGE_RATE)
+            
         import time
-        return f"SIM-STOP-{int(time.time())}"
+        return {
+            "ID": f"SIM-STOP-{int(time.time())}",
+            "State": 7, # Simulated Execution
+            "Price": final_price,
+            "Qty": shares
+        }
 
     def cancel_order(self, order_id: str) -> bool:
         """ シミュレーションでは即キャンセル成功とする """

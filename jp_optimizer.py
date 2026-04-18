@@ -13,7 +13,7 @@ from core.logic import get_prime_tickers
 from core.config import (
     INITIAL_CASH, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
     BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD,
-    SLIPPAGE
+    SLIPPAGE_RATE
 )
 
 def calculate_stability_metrics(final_assets, trade_results, monthly_assets, initial_cash):
@@ -106,7 +106,7 @@ def run_single_opt(params_pack):
         leverage_rate=p['leverage'],
         breadth_threshold=p['breadth'],
         max_hold_days=p['max_hold_days'],
-        slippage=SLIPPAGE,
+        slippage=SLIPPAGE_RATE,
         use_sma_exit=EXIT_ON_SMA20_BREACH, 
         exit_buffer=p['exit_buffer'],
         liquidity_limit=LIQUIDITY_LIMIT_RATE,
@@ -158,32 +158,31 @@ def optimize_jp_imperial(cache_path):
     
     # --- Aggressive Mean Reversion Search ---
     
-    # --- Sovereign Optimization Grid (V18.1 Multi-Position Search) ---
+    # --- Sovereign Optimization Grid (V18.2 Strict Environment Resilience) ---
     param_grid = {
-        'breadth': [0.5, 0.6],             # 市場環境閾値
-        'exit_buffer': [0.975, 0.98],    
-        'sl_mult': [3.0, 5.0],
-        'tp_mult': [40.0],
-        'max_pos': [3, 5, 10],               # ★集中 vs 分散
-        'leverage_rate': [1.0, 1.5, 2.0],
-        'bull_gap_limit': [0.10, 0.12],
+        'breadth': [0.5, 0.6],
+        'sl_mult': [3.0, 5.0, 7.0, 10.0],     # ★SEARCH: Wider SL to survive gaps
+        'tp_mult': [30.0, 40.0, 50.0, 60.0],  # ★SEARCH: Huge TP to absorb slippage
+        'max_pos': [3, 5, 10],               # ★SEARCH: Diversification check
+        'leverage_rate': [1.0, 1.5],          # ★SEARCH: Limit leverage to 1.5x
+        'bull_gap_limit': [0.11],             # 固定 (V17.0 Golden)
+        'exit_buffer': [0.975],               # 固定 (V17.0 Golden)
         'max_hold_days': [30]
     }
 
     grid = []
+    # Grid search for resilience
     for b in param_grid['breadth']:           
-        for ex_b in param_grid['exit_buffer']:
-            for sl in param_grid['sl_mult']:          
-                for tp in param_grid['tp_mult']: 
-                    for mp in param_grid['max_pos']:
-                        for lev in param_grid['leverage_rate']:
-                            for bgap in param_grid['bull_gap_limit']:
-                                grid.append({
-                                    "breadth": b, "exit_buffer": ex_b,
-                                    "sl": sl, "tp": tp, 
-                                    "max_pos": mp, "leverage": lev, 
-                                    "bgap": bgap, "max_hold_days": 30
-                                })
+        for sl in param_grid['sl_mult']:          
+            for tp in param_grid['tp_mult']: 
+                for mp in param_grid['max_pos']:
+                    for lev in param_grid['leverage_rate']:
+                        grid.append({
+                            "breadth": b, "exit_buffer": 0.975,
+                            "sl": sl, "tp": tp, 
+                            "max_pos": mp, "leverage": lev, 
+                            "bgap": 0.11, "max_hold_days": 30
+                        })
     
     print(f"[CONCENTRATED_OPT] Starting Grid Search ({len(grid)} combinations)...")
 
