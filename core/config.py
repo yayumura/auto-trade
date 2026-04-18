@@ -66,17 +66,17 @@ INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
 # --- Imperial Oracle V17.0 FINAL (V17 Golden Logic) ---
-USE_COMPOUNDING       = True   # ★ENABLED: Equity-based sizing
+USE_COMPOUNDING       = True   # ★GOLDEN: Compounding on
 MAX_POSITIONS         = 3      # ★GOLDEN: Concentration
-LEVERAGE_RATE         = 1.5    # ★STABLE: 1.5x Leverage
+LEVERAGE              = 1.5    # ★GOLDEN: 1.5x Leverage
 INITIAL_CASH          = 1000000
 
 # Strategy Core (V17 Golden Plateau)
-BREADTH_THRESHOLD     = 0.60   # ★CRITICAL: Market Defense Defense
-SMA20_EXIT_BUFFER     = 0.975  # ★STABLE: Trend Endurance (Exit if < SMA20 * Buffer)
-ATR_STOP_LOSS         = 5.0    # ★WIDE: Noise Protection
-TARGET_PROFIT_MULT    = 40.0   # ★DEEP: Trend Capture
-BULL_GAP_LIMIT        = 0.11   # ★SYNC: Gap Protection (Momentum)
+BREADTH_THRESHOLD     = 0.60   # ★GOLDEN: Market Breadth
+SMA20_EXIT_BUFFER     = 0.975  # ★GOLDEN: Trend Exit Buffer
+STOP_LOSS_ATR         = 5.0    # ★GOLDEN: Stop Loss Mult
+TAKE_PROFIT_ATR       = 40.0   # ★GOLDEN: Take Profit Mult
+BULL_GAP_LIMIT        = 0.11   # ★GOLDEN: Gap Limit
 BEAR_GAP_LIMIT        = 0.02
 RS_THRESHOLD          = 25.0
 

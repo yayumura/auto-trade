@@ -48,8 +48,8 @@ from core.config import (
     EXECUTION_LOG_FILE, EXCLUSION_CACHE_FILE, TARGET_MARKETS,
     GEMINI_API_KEY, DISCORD_WEBHOOK_URL, GEMINI_MODEL,
     DEBUG_MODE, TRADE_MODE, INITIAL_CASH, MAX_POSITIONS,
-    LEVERAGE_RATE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
-    ATR_STOP_LOSS, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT,
+    LEVERAGE, MAX_ALLOCATION_PCT, MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
+    STOP_LOSS_ATR, TAX_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT,
     SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     load_insider_exclusion_codes
 )
@@ -481,7 +481,7 @@ def _main_exec():
                         breadth_val = 0.5 # Fallback
                     
                     # Determine Current Leverage (V17.0 Golden)
-                    dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
+                    dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE)
                     if dynamic_lev <= 0:
                         print("🛡️ [Safeguard] Breadth below threshold. Suppressing new entries.")
                     
@@ -512,7 +512,7 @@ def _main_exec():
                 except: pass
 
             if should_continue_scan:
-                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime)
+                top_candidates = select_best_candidates(data_df, targets, df_symbols, regime, breadth_val=breadth_val)
                 
                 if is_morning_scan:
                     max_watchlist = max(5, 50 - len(portfolio) - 2) 
@@ -602,7 +602,7 @@ def _main_exec():
                         ts = calculate_lot_size(
                             current_equity=te,
                             atr=a,
-                            sl_mult=ATR_STOP_LOSS,
+                            sl_mult=STOP_LOSS_ATR,
                             price=tp,
                             dynamic_leverage=dynamic_lev,
                             max_positions=MAX_POSITIONS,
@@ -631,7 +631,7 @@ def _main_exec():
 
                                     # --- [Hard Stop] 約定直後の逆指値（ストップロス）発注 ---
                                     try:
-                                        stop_price = normalize_tick_size(exec_p - (a * ATR_STOP_LOSS), is_buy=False)
+                                        stop_price = normalize_tick_size(exec_p - (a * STOP_LOSS_ATR), is_buy=False)
                                         # 最新の建玉IDを取得するために一度 get_positions を叩く（返済指定に必要）
                                         api_p = broker.get_positions()
                                         match = [p for p in api_p if p['code'] == str(item['code'])]

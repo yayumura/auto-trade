@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime as dt
 from core.config import (
-    ATR_STOP_LOSS, TARGET_PROFIT_MULT, JST, BREADTH_THRESHOLD,
+    STOP_LOSS_ATR, TAKE_PROFIT_ATR, JST, BREADTH_THRESHOLD,
     MAX_POSITIONS, MAX_ALLOCATION_PCT,
     MAX_ALLOCATION_AMOUNT, LIQUIDITY_LIMIT_RATE, MIN_ALLOCATION_AMOUNT,
     EXCLUSION_CACHE_FILE, SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     BULL_GAP_LIMIT, RS_THRESHOLD,
-    USE_COMPOUNDING, INITIAL_CASH
+    USE_COMPOUNDING, INITIAL_CASH, LEVERAGE
 )
 
 def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
@@ -49,10 +49,9 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
         atr = float(p.get('buy_atr', 0))
         highest_price = float(p.get('highest_price', 0))
         
-        # 2. Shared Stop/Target Calculation
         tsl_price, target_price = calculate_position_stops(
             buy_price, atr, highest_price, current_price,
-            ATR_STOP_LOSS, TARGET_PROFIT_MULT
+            STOP_LOSS_ATR, TAKE_PROFIT_ATR
         )
 
         # 3. Technical Trend Exit (SMA20) ★V17 ORIGINAL
@@ -67,10 +66,10 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
 
         if is_trend_broken:
             exit_reason = "Trend Breach (SMA20)"
-        elif current_price <= buy_price - (atr * ATR_STOP_LOSS):
-            exit_reason = f"Stop Loss ({ATR_STOP_LOSS} ATR)"
-        elif current_price >= buy_price + (atr * TARGET_PROFIT_MULT):
-            exit_reason = f"Take Profit ({TARGET_PROFIT_MULT} ATR)"
+        elif current_price <= buy_price - (atr * STOP_LOSS_ATR):
+            exit_reason = f"Stop Loss ({STOP_LOSS_ATR} ATR)"
+        elif current_price >= buy_price + (atr * TAKE_PROFIT_ATR):
+            exit_reason = f"Take Profit ({TAKE_PROFIT_ATR} ATR)"
             
         # 5. Time Stop (V17.0 Parity)
         buy_time_str = p.get('buy_time')
@@ -102,16 +101,26 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
         return config_leverage
     return 0.0
 
-def check_entry_signal(regime, rsi2, price, open_p, sma_med):
+def check_entry_signal(regime, price, open_p, prev_close, sma_med, breadth_val):
     """
-    V17.0 Premium Reversion Sync (Classic Parity)
-    1. Regime: BULL (Nikkei 225 > SMA200)
-    2. Reversion: RSI2 < 30.0 (Buy the dip in bull trend)
+    V17.0 Golden Entry Protocol (Pure Trend Following - Hardcoded)
+    1. Breadth: >= 0.60
+    2. Gap: (Open / Prev Close) - 1.0 <= BULL_GAP_LIMIT (11%)
+    3. Trend: Close > SMA20
     """
-    if regime != "BULL": return False 
+    # 1. Breadth Condition
+    if breadth_val < BREADTH_THRESHOLD:
+        return False
     
-    # [V17 Original] RSI2 Oversold Check
-    if rsi2 > 30.0: return False
+    # 2. Gap Condition
+    if prev_close > 0:
+        gap_pct = (open_p / prev_close) - 1.0
+        if gap_pct > BULL_GAP_LIMIT:
+            return False
+    
+    # 3. Trend Condition (SMA20)
+    if sma_med <= 0 or price <= sma_med:
+        return False
     
     return True
 
@@ -205,12 +214,15 @@ def detect_market_regime(data_df=None, buffer=None):
         
     return regime, is_trend_snapped
 
-def select_best_candidates(data_df, targets, symbols_df, regime):
+def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0):
     """
     V140.0 Momentum Leader Selection:
     - Universe: Stocks with RS_Alpha > 25.
     - Sorting: RS_Alpha Descending.
+    - Breadth Filter: Activated if breadth_val >= 0.60 (V17 Golden).
     """
+    if breadth_val < BREADTH_THRESHOLD: return []
+    
     bundle = calculate_all_technicals_v12(data_df)
     
     close = bundle['Close'].iloc[-1]
@@ -238,12 +250,11 @@ def select_best_candidates(data_df, targets, symbols_df, regime):
         if rs < RS_THRESHOLD: continue # Momentum requirement
 
         p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else 0
-        if p_prev and p_prev > 0:
-            gap_pct = (o/p_prev - 1.0)
-            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > BULL_GAP_LIMIT):
-                continue
-                
-        entry_signal = check_entry_signal(regime, r2, p, o, s_med)
+        
+        # Current Market Breadth passed from caller
+        entry_signal = check_entry_signal(
+            regime, p, o, p_prev, s_med, breadth_val
+        )
                 
         if entry_signal:
             code_only = t_with_t.replace(".T", "")
@@ -325,34 +336,26 @@ def get_prime_tickers():
 def calculate_lot_size(current_equity, atr, sl_mult, price, dynamic_leverage, 
                        max_positions, buying_power=None, turnover=None):
     """
-    V167.5 Imperial Sizing Logic (Simple Equity Allocation)
-    1. 資産ベースの決定（複利 vs 単利）
-    2. 1銘柄あたりの割当資金の計算 (Target Allocation)
-    3. 割当額を価格で割り、100株単位に切り捨てる
-    4. 購買力および流動性による安全制約
+    V17.0 Imperial Sizing Logic (Hardcoded Golden Rules)
+    1. Target Allocation = (Current Equity * LEVERAGE) / MAX_POSITIONS
+    2. Shares = floor(Target Allocation / Close, unit=100)
+    3. Minimum: 100 shares (skipped if less)
     """
-    # 資産ベースの決定（複利 = 現在資産, 単利 = 初期資金）
-    base_equity = current_equity if USE_COMPOUNDING else INITIAL_CASH
+    # 総資産の決定 (USE_COMPOUNDINGの場合は現在資産、そうでない場合は初期資金)
+    total_assets = current_equity if USE_COMPOUNDING else INITIAL_CASH
     
-    # 1銘柄あたりの割当資金 = (資産 * レバレッジ) / 最大ポジション数
-    # これにより、常に資金を最大数で等分して運用する
-    target_allocation = (base_equity * dynamic_leverage) / max_positions
+    # 1. Target Allocation = (現在の総資産 * LEVERAGE) / MAX_POSITIONS
+    target_allocation = (total_assets * LEVERAGE) / max_positions
     
-    # 流動性制約 (直近出来高等の 2.5% を上限とする)
-    if turnover and turnover > 0:
-        target_allocation = min(target_allocation, turnover * LIQUIDITY_LIMIT_RATE)
+    # 2. Shares = (Target Allocation / Close) -> 100株単位に切り捨て
+    shares = int(target_allocation // price)
+    final_shares = (shares // 100) * 100
     
-    # 割当額に基づく株数
-    shares_alloc = int(target_allocation // price)
-    
-    # 全体購買力による制約 (95% Safety Margin to avoid margin errors)
-    shares_bp = 1e9
+    # 安全装置: 実際の購買力を超えないようにする
     if buying_power is not None:
-        shares_bp = int((buying_power * 0.95) // price) 
-        
-    # 最小値の採用と100株単位への丸め (単元株制度への適合)
-    final_shares = min(shares_alloc, shares_bp)
-    final_shares = (final_shares // 100) * 100
-    
-    return max(final_shares, 0)
+        max_bp_shares = int((buying_power * 0.95) // price)
+        max_bp_shares = (max_bp_shares // 100) * 100
+        final_shares = min(final_shares, max_bp_shares)
+
+    return final_shares
 
