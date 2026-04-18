@@ -112,8 +112,6 @@ def run_single_opt(params_pack):
         liquidity_limit=LIQUIDITY_LIMIT_RATE,
         bull_gap_limit=p['bgap'],
         bear_gap_limit=BEAR_GAP_LIMIT,
-        atr_trail_mult=p['atr_trail'],
-        rsi_threshold=p['rsi_th'],
         verbose=False
     )
     
