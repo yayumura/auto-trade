@@ -80,11 +80,6 @@ BULL_GAP_LIMIT        = 0.11   # ★GOLDEN: Gap Limit
 BEAR_GAP_LIMIT        = 0.02
 RS_THRESHOLD          = 25.0
 
-# Aliases for compatibility with restored V17 code
-ATR_STOP_LOSS         = STOP_LOSS_ATR
-TARGET_PROFIT_MULT    = TAKE_PROFIT_ATR
-LEVERAGE_RATE         = LEVERAGE
-
 MAX_ALLOCATION_PCT    = 1.0  
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  
@@ -99,7 +94,7 @@ SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
 SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
-SLIPPAGE              = 0.003  # Round-trip slippage rate (buy: +0.3%, sell: -0.3%)
+SLIPPAGE              = 0.004  # Round-trip (buy: +0.2%, sell: -0.2%)
 SLIPPAGE_RATE         = 0.002  # ★REALISM: One-way slippage rate (0.2%)
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 

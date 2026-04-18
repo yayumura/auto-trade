@@ -117,33 +117,27 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             if is_trend_broken:
                 exit_p = t_close
-            from core.config import SLIPPAGE_RATE
-            
-            if t_open <= tsl_price:
+                exit_reason = "Trend Breach (SMA20)"
+            elif t_open <= tsl_price:
                 # [V18.2 Strict] Gap down: Exit at Open (worse price)
                 exit_p = t_open
                 exit_reason = "Gap Down Stop Loss"
             elif t_low <= tsl_price:
-                # Intraday hit: Exit at Stop price
+                # Intraday breach: Exit at target Stop Loss price
                 exit_p = tsl_price
                 exit_reason = "Stop Loss"
-            elif t_open >= target_price:
-                # Gap up: Exit at Open (better price)
-                exit_p = t_open
-                exit_reason = "Gap Up Take Profit"
-            elif t_high >= target_price:
-                # Intraday hit: Exit at Target price
-                exit_p = target_price
+            elif t_high >= target_price or t_open >= target_price:
+                exit_p = max(t_open, target_price) # If Open is higher than TP, take Open
                 exit_reason = "Take Profit"
             elif p.get('held_days', 0) >= max_hold_days:
                 exit_p = t_close
                 exit_reason = "Time Stop"
             elif month_done:
                 exit_p = t_close
-                exit_reason = "Aegis Circuit Breaker"
+                exit_reason = "Monthly Safeguard"
             
             if exit_p is not None:
-                final_exit = exit_p * (1.0 - slippage) # Use the passed slippage param
+                final_exit = exit_p * (1.0 - slippage)
                 trade_results.append((final_exit - p['buy_price']) * p['shares'])
                 cash += final_exit * p['shares']
                 cooling_days = COOLING_DAYS
@@ -157,7 +151,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         monthly_assets[current_month] = float(total_equity)
 
         # 2. Entry (V17.0 Golden)
-        if i + 1 >= T or month_done or cooling_days > 0 or regime != "BULL": continue 
+        if i + 1 >= T or month_done or cooling_days > 0: continue 
         
         dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
         if dynamic_lev <= 0: continue
@@ -184,19 +178,17 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_sma_trend = sma_trends[s_idx]
             t_turnover = turnover_vals[i, s_idx]
             
-            # [V150.2 Reality Sync] Gap Filter Parity
-            prev_close = close_np[i-1, s_idx]
-            gap_pct = (t_open / prev_close - 1.0) if prev_close > 0 else 0
-            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > bull_gap_limit):
-                continue
-
+            # 1. Momentum Filter (Golden simple breakout)
             if rs < RS_THRESHOLD: continue
 
-            # Entry Signal (V17.0 Reversion Sync)
-            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med)
+            # 2. Entry Signal (V17.0 Golden Synchronized)
+            prev_close = close_np[i-1, s_idx] if i > 0 else t_open
+            entry_signal = check_entry_signal(
+                regime, t_close, t_open, prev_close, t_sma_med, breadth_ratio[i]
+            )
                     
             if entry_signal:
-                real_buy = t_close * (1.0 + slippage) # Use the passed slippage param
+                real_buy = t_close * (1.0 + slippage)
                 
                 # --- V155 Reality Sync: Sizing & Capital Control ---
                 current_exposure = total_equity - cash
