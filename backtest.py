@@ -141,7 +141,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         monthly_assets[current_month] = float(total_equity)
 
         # 2. Entry (V17.0 Golden)
-        if i + 1 >= T or month_done or cooling_days > 0: continue 
+        if i + 1 >= T or month_done or cooling_days > 0 or regime != "BULL": continue 
         
         dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
         if dynamic_lev <= 0: continue
@@ -168,14 +168,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_sma_trend = sma_trends[s_idx]
             t_turnover = turnover_vals[i, s_idx]
             
-            # 1. Momentum Filter (Golden simple breakout)
+            # [V150.2 Reality Sync] Gap Filter Parity
+            prev_close = close_np[i-1, s_idx]
+            gap_pct = (t_open / prev_close - 1.0) if prev_close > 0 else 0
+            if (regime == "BULL" and gap_pct < -0.02) or (abs(gap_pct) > bull_gap_limit):
+                continue
+
             if rs < RS_THRESHOLD: continue
 
-            # 2. Entry Signal (V17.0 Golden Synchronized)
-            prev_close = close_np[i-1, s_idx] if i > 0 else t_open
-            entry_signal = check_entry_signal(
-                regime, t_close, t_open, prev_close, t_sma_med, breadth_ratio[i]
-            )
+            # Entry Signal (V17.0 Reversion Sync)
+            entry_signal = check_entry_signal(regime, r2, t_close, t_open, t_sma_med)
                     
             if entry_signal:
                 real_buy = t_close * (1.0 + slippage)

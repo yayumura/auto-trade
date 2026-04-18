@@ -16,16 +16,6 @@ class SimulationBroker(BaseBroker):
         account = safe_read_json(ACCOUNT_FILE)
         return account if account is not None else {"cash": INITIAL_CASH}
 
-    def calculate_lot(self, total_assets, price):
-        """
-        V17.0 Imperial Oracle Golden Lot Calculation (Hardcoded)
-        """
-        from core.config import LEVERAGE, MAX_POSITIONS
-        target_allocation = (total_assets * LEVERAGE) / MAX_POSITIONS
-        shares = int(target_allocation // price)
-        final_shares = (shares // 100) * 100
-        return final_shares
-
     def save_account(self, account_data: dict):
         atomic_write_json(ACCOUNT_FILE, account_data)
 
