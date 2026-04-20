@@ -35,7 +35,9 @@ def main():
         
         # 1. ALWAYS ensure we have the latest EOD data for the scanner
         print("📡 STEP 1: DATA SYNC (JQuants)")
-        run_script("jp_jquants_fetcher_v2.py")
+        if not run_script("jp_jquants_fetcher_v2.py"):
+             print("❌ [CRITICAL ERROR] J-Quants Data Sync failed. Aborting cycle for safety.")
+             sys.exit(1)
         
         # 2. Start the autonomous trading bot (This will block & run infinitely until 15:30)
         print("🤖 STEP 2: LIVE TRADING SESSION")

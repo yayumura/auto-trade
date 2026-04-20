@@ -65,29 +65,37 @@ EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 
-# --- Imperial Oracle V131.0 Optimized (Grid Search Sync) ---
-USE_DYNAMIC_LEVERAGE  = True   
-MAX_POSITIONS         = 3      # ★V146: Restored Imperial 3-Elite
-BREADTH_THRESHOLD     = 0.40   # ★FINAL SYNC: +1351% Growth Apex
-MAX_RISK_PER_TRADE    = 0.01   
-LEVERAGE_RATE         = 1.0    # ★V149: Optimizer Golden Ratio (Lower Lev = Higher Trend Endurance)
-MAX_ALLOCATION_PCT    = 0.833  # (LEVERAGE 2.5 / 3 POS)
+# --- Imperial Oracle V17.0 FINAL (V17 Golden Logic) ---
+USE_COMPOUNDING       = True   # ★GOLDEN: Compounding on
+MAX_POSITIONS         = 3      # ★GOLDEN: Concentration
+LEVERAGE              = 1.5    # ★GOLDEN: 1.5x Leverage
+INITIAL_CASH          = 1000000
+
+# Strategy Core (V17 Golden Plateau)
+BREADTH_THRESHOLD     = 0.60   # ★GOLDEN: Market Breadth
+SMA20_EXIT_BUFFER     = 0.975  # ★GOLDEN: Trend Exit Buffer
+STOP_LOSS_ATR         = 5.0    # ★GOLDEN: Stop Loss Mult
+TAKE_PROFIT_ATR       = 40.0   # ★GOLDEN: Take Profit Mult
+BULL_GAP_LIMIT        = 0.11   # ★GOLDEN: Gap Limit
+BEAR_GAP_LIMIT        = 0.02
+RS_THRESHOLD          = 25.0
+
+MAX_ALLOCATION_PCT    = 1.0  
 MAX_ALLOCATION_AMOUNT = 10000000 
-LIQUIDITY_LIMIT_RATE  = 0.01   
+LIQUIDITY_LIMIT_RATE  = 0.025  
 MIN_ALLOCATION_AMOUNT = 50000  
-ATR_STOP_LOSS         = 3.0    
-TARGET_PROFIT_MULT    = 20.0   # ★V140: Large-cap Momentum Capture
-RS_THRESHOLD          = 10.0   # Minimum Relative Strength
-MIN_PRICE             = 200    # Minimum stock price
-MAX_PRICE             = 10000  # Maximum stock price
-ATR_TRAIL             = True   # Trailing stop enabled
-EXIT_ON_SMA20_BREACH  = True   # [V17.3] Technical Exit: Close < SMA20
-SMA20_EXIT_BUFFER     = 0.975  # ★SYNC: 0.975 (2.5% Buffer for Alpha endurance)
+MIN_PRICE             = 200    
+MAX_PRICE             = 10000  
+
+EXIT_ON_SMA20_BREACH  = True   
 SMA_SHORT_PERIOD      = 5
 SMA_MEDIUM_PERIOD     = 20
 SMA_LONG_PERIOD       = 100
 SMA_BREADTH_PERIOD    = 100    # Breadth calculation base
+SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
+SLIPPAGE              = 0.004  # Round-trip (buy: +0.2%, sell: -0.2%)
+SLIPPAGE_RATE         = 0.002  # ★REALISM: One-way slippage rate (0.2%)
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 
 # --- Insider Exclusion ---

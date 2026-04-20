@@ -12,6 +12,9 @@ execution_log.csv
 .bot_sim.lock
 logs/
 data_cache/
+opt_results.csv
+data/simulation/
+data/kabucom_test/
 
 # Python
 __pycache__/

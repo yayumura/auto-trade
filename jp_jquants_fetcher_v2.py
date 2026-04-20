@@ -72,7 +72,7 @@ def fetch_jquants_v2_turbo_revelation(output_path='data_cache/jp_broad/jp_mega_c
 
     if not api_key:
         print("❌ Error: No JQuants Token (JQUANTS_REFRESH_TOKEN). Check .env file.")
-        return
+        sys.exit(1)
     
     api_key = api_key.strip()
     
@@ -82,7 +82,7 @@ def fetch_jquants_v2_turbo_revelation(output_path='data_cache/jp_broad/jp_mega_c
         info = cli.get_list()
     except Exception as e:
         print(f"❌ Failed to fetch list: {e}")
-        return
+        sys.exit(1)
         
     ticker_codes = info['Code'].unique()
     
@@ -134,7 +134,7 @@ def fetch_jquants_v2_turbo_revelation(output_path='data_cache/jp_broad/jp_mega_c
 
     if not all_quotes:
         print("⚠️ No data available to compile.")
-        return
+        sys.exit(1)
 
     print(f"🧩 Stitching {len(all_quotes)} market fragments...")
     full_df = pd.concat(all_quotes, ignore_index=True)

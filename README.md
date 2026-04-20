@@ -1,134 +1,163 @@
-# 🚀 Auto-Trade — V131.0 Aegis Sovereign (盾の王道)
+# Auto-Trade
 
-日本株市場を対象とした、**高期待値・逆張り（Mean Reversion）特化型の自律投資システム**です。
-「最強のリーダー銘柄だけが、一時的に売られすぎた瞬間を狩る」というソブリン（主権者）の投資哲学を具現化しています。
+日本株向けの自動売買・バックテスト用リポジトリです。  
+現在の主戦略は、`月次ローテーション型の順張り戦略` です。
 
-荒れた相場環境においても資産を守り抜く「Aegis（エッジス）防御システム」を搭載し、**5年間で +279.87%（勝率 59.63%）** の極めて安定したパフォーマンスを記録しました。
+このリポジトリでは、バックテストは本番戦略を検証するためのものとして扱い、戦略判断はできるだけ本番ロジックと共有する方針を採っています。詳細な原則は [AGENTS.md](/C:/Users/yayum/git_work/auto-trade/AGENTS.md:1) を参照してください。
 
----
+## 現在の戦略概要
 
-## 🌟 システムの主な機能 (Features)
+- 主戦略: 月次ローテーション
+- 対象: 日本株プライム中心
+- 判断軸: 市場 breadth、長期トレンド、相対強度、流動性、ATR、モメンタム
+- 執行思想: 月末に判定し、翌営業日寄り付きベースで売買
 
-*   **Sovereign Selection (リーダー選別)**: 100日間の絶対騰落率をベースに、市場平均を凌駕する「真のリーダー銘柄」4社のみを厳選。
-*   **High-Conviction Mean Reversion**: RSI(2) を極限まで研ぎ澄まし、暴落時の「恐怖の底」を精密に狙い撃ちます。
-*   **Aegis 防御システム**: 月間ドローダウンに応じて損切りラインを自動調整。-5%（注意）/-10%（危険）ゾーンで防御力を動的に高めます。
-*   **Trend Snap プロトコル**: インデックスが短期的な崩れを見せた際、瞬時に「逃げ」の決済しきい値を調整し、利益を確保。
-*   **完全自律自動運用**: `run_imperial_oracle.bat` により、データの取得から Kabucom API を通じた盤石な執行まで一気通貫で完結。
+共有戦略ロジックの中心は [core/monthly_rotation_strategy.py](/C:/Users/yayum/git_work/auto-trade/core/monthly_rotation_strategy.py:1) にあります。
 
----
+## 現在のバックテスト前提
 
-## 💎 バックテスト実績 (V131.0 Aegis / 2021.04〜2026.04)
+`jp_backtest.py` の月次ローテーション検証では、次の前提を反映しています。
 
-| Aegis Sovereign V131.0 (Opt) | 投資実績 |
-|:---|---:|
-| **総利益率** | **+470.98%** |
-| **最終資産** | **5,709,772 円** |
-| **勝率** | **59.63%** |
-| **総取引回数** | 155 回 (精鋭集中投資) |
-| 初期資産 | 1,000,000 円 |
-| 期間 | 2021年4月5日 〜 2026年4月3日 |
+- 月末終値でシグナル判定
+- 翌営業日寄り付きで約定
+- スリッページあり
+- 税金あり
+- 信用買方金利あり
+- 流動性制約あり
 
----
+一方で、次の点はまだ完全には再現していません。
 
-## 🏗️ リポジトリ主要構成
+- 特別気配や寄り付き不成立
+- 部分約定の詳細モデル
+- 証券会社独自の信用規制
+- broker 固有の信用建て可否
 
-```
+## 最新の参考バックテスト結果
+
+`python jp_backtest.py` 実行時の直近確認結果:
+
+- DATA WINDOW: 2021-04-05 to 2026-04-03
+- ACTIVE TEST: 2022-01 to 2026-04-03
+- FINAL EQUITY: Y5,763,432
+- TOTAL RETURN: +476.34%
+- CLOSED TRADES: 55
+
+この数値は将来の成績を保証するものではありません。  
+また、データ更新やロジック変更により変動します。
+
+## リポジトリ主要構成
+
+```text
 auto-trade/
+├── AGENTS.md
+├── auto_trade.py
+├── backtest.py
+├── jp_backtest.py
+├── jp_jquants_fetcher_v2.py
+├── jp_jquants_margin_fetcher.py
+├── jp_optimizer.py
 ├── core/
-│   ├── config.py         # パラメータ (ATR係数、ポジション数等) の管理
-│   ├── logic.py          # V131.0 コアロジック (RSI逆張り & 絶対力 RS)
-│   ├── kabucom_broker.py # auカブコム証券 API 執行エンジン
-│   └── sim_broker.py     # デバッグ用シミュレーター
-├── backtest.py           # 核心シミュレーションエンジン (Sovereign Logic)
-├── jp_backtest.py        # パフォーマンス検証・レポート出力
-├── jp_optimizer.py       # パラメータ最適化 (グリッドサーチ)
-├── auto_trade.py         # リアルタイム執行ボット
-└── run_imperial_oracle.bat # 運用スタートアップスイッチ
+│   ├── config.py
+│   ├── jquants_margin_cache.py
+│   ├── logic.py
+│   ├── monthly_rotation_strategy.py
+│   ├── kabucom_broker.py
+│   └── sim_broker.py
+└── tests/
+    ├── test_backtest.py
+    └── test_logic.py
 ```
 
----
+## セットアップ
 
-## 🛠️ デプロイ・セットアップ手順
+### 1. 依存ライブラリ
 
-### 1. 動作環境とライブラリのインストール
-Python 3.10以上が必要です。
+Python 3.10 以上を想定しています。
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 環境変数 (.env) の完全な設定
-プロジェクトのルートディレクトリに `.env` という名前のファイルを作成し、以下の全項目を設定してください。
+### 2. `.env` の設定
+
+最低限、次の項目を設定してください。
 
 ```ini
-# ==== auカブコム証券 API設定 ====
-TRADE_MODE=KABUCOM_TEST         # SIM (仮想資金), KABUCOM_TEST (検証API), KABUCOM_LIVE (本番API)
-KABUCOM_API_PASSWORD=xxxxxxxx   # Kabuステーションの「API設定」で自身で決めたパスワード
-KABUCOM_LOGIN_PASSWORD=yyyyyyyy # Kabuステーション自体のログインパスワード
-KABUCOM_ACCOUNT_TYPE=4          # 口座種別 (2: 一般, 4: 特定口座)
+# auカブコム証券 API
+TRADE_MODE=KABUCOM_TEST
+KABUCOM_API_PASSWORD=xxxxxxxx
+KABUCOM_LOGIN_PASSWORD=yyyyyyyy
+KABUCOM_ACCOUNT_TYPE=4
 
-# ==== JQuants (JPX公式データ) 設定 ====
-JQUANTS_REFRESH_TOKEN=zzz...    # JQuants APIから取得したリフレッシュトークン
+# J-Quants
+JQUANTS_REFRESH_TOKEN=zzz...
 
-# ==== AI ニュース定性監査用 APIキー ====
-GEMINI_API_KEY=AIzaSy...        # Google Gemini APIキー (メイン監査用)
-GEMINI_MODEL=gemini-2.5-flash   # 推奨モデル
-GROQ_API_KEY=gsk_xxx...         # Groq APIキー (フェイルオーバー/予備用)
+# AIフィルタ
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-2.5-flash
+GROQ_API_KEY=...
 GROQ_MODEL=llama-3.3-70b-versatile
 
-# ==== 通知・デバッグ機能 ====
-DISCORD_WEBHOOK_URL=https://... # 注文発生時やエラー時のDiscord通知用URL
-DEBUG_MODE=true                 # trueにすると詳細なログを出力
+# 通知・デバッグ
+DISCORD_WEBHOOK_URL=https://...
+DEBUG_MODE=true
 ```
 
-### 3. 初期データの構築 (初回のみ)
-株価データのキャッシュを初めて構築するため、以下のコマンドを手動で実行します。
+## データ構築
+
+### 株価キャッシュ作成
+
 ```bash
 python jp_jquants_fetcher_v2.py
 ```
 
----
+### 信用銘柄キャッシュ作成
 
-## 📅 本番運用 (オーケストレーター実行)
+```bash
+python jp_jquants_margin_fetcher.py
+```
 
-日々の運用は、コマンドを個別に叩く必要はありません。
-**`run_imperial_oracle.bat`** をダブルクリックするだけで、1日の全フローがシームレスに連続実行されます。
+注意:
 
-### 🔄 BATの実行フロー (シリアル実行)
-1. **🌞 STEP 1: データ更新** (`jp_jquants_fetcher_v2.py`)
-2. **🤖 STEP 2: 自律トレード監視** (`auto_trade.py`)
-   - 独自の超高速スキャンで銘柄を抽出し、**15:30の市場終了時間まで** リアルタイムの相場監視・自動売買注文・利確損切のトレイリングを継続します。
-3. **📊 STEP 3: オフマーケット監査** (`jp_backtest.py`)
-   - 15:30にボットが安全に終了した直後、直近5年のバックテストが自動で走ります。
+- `J-Quants Light` では `listed/info` の `MarginCode` が利用できないため、信用銘柄キャッシュに信用区分が入らない場合があります
+- その場合、現在の実装では信用銘柄フィルタは自動的に無効化されます
+- `MarginCode` を使いたい場合は `Standard` 以上のプランが必要です
 
-### ⏰ Windows タスクスケジューラでの完全自動化設定
-毎日手動で起動する手間を省くため、Windowsタスクスケジューラを利用して全自動化します。
-1. タスクスケジューラを開き、「基本タスクの作成」をクリック。
-2. 名前: `Imperial Oracle Auto-Trade`
-3. トリガー: **「毎日」** 時間を **「午前 8:30」** に設定。（※8:30〜9:00 の間に起動させれば間に合います）
-4. 操作: **「プログラムの開始」**
-5. プログラム/スクリプト: `C:\Users\yayum\git_work\auto-trade\run_imperial_oracle.bat` を参照して指定。
-   - **(重要)** 「開始（オプション）」に作業ディレクトリ（例: `C:\Users\yayum\git_work\auto-trade`）を必ず指定してください。
-6. 設定完了。PCとKabuステーションが起動していれば、毎朝8:30に自動で発進します。
+## 実行方法
 
----
+### バックテスト
 
-## 📊 開発・テスト用スクリプトの実行方法
-
-ご自身でロジックをカスタマイズしたり、バックテストの数値をチューニングしたい場合は、以下のスクリプトを直接実行可能です。
-
-### 1. バックテストの実行 (`jp_backtest.py`)
-現在のロジックとパラメータが、過去5年間でいかに機能するかを数秒で再現し、最終資産額と勝率をグラフ/コンソールに出力します。
 ```bash
 python jp_backtest.py
 ```
 
-### 2. パラメータのオプティマイザ (`jp_optimizer.py`)
-さらなるアルファ（超過収益）を求めて、「SMA期間」や「ATR利確倍率」などを自動で総当たり探索し、最もリターンの高いパラメータの組み合わせを発見します。
+### 最適化
+
 ```bash
 python jp_optimizer.py
 ```
-> 見つかった最適なパラメータは `core/config.py` 内の変数（`TARGET_PROFIT_MULT` や `ATR_STOP_LOSS` 等）に反映させてください。
 
----
-*Last updated: 2026-04-08 — Aegis Sovereign V131.0 (Optimized)*  
-*Profit Magnitude: +470.98% (Diamond Standard V131.1)*
+### 自動売買
+
+```bash
+python auto_trade.py
+```
+
+### 日次オーケストレーション
+
+```bash
+run_imperial_oracle.bat
+```
+
+## テスト
+
+```bash
+python -m pytest tests\test_backtest.py tests\test_logic.py
+```
+
+## 補足
+
+- 現在の README は、古い逆張り戦略の説明ではなく、現行の月次ローテーション戦略に合わせて更新しています
+- 戦略変更時は、まず共有戦略ロジックを修正し、その後にバックテストや本番実行側を参照させる構成を維持してください
+
+Last updated: 2026-04-20

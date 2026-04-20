@@ -9,8 +9,11 @@ from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, sa
 class SimulationBroker(BaseBroker):
     """
     CSV/JSONファイルを使用して仮想売買を行うシミュレーション用Broker。
-    既存の auto_trade.py からファイル入出力部分のみを抽出して実装されています。
+    Supports persistent positions for swing / rotation strategies.
     """
+
+    def __init__(self):
+        pass
     
     def get_account_balance(self) -> dict:
         account = safe_read_json(ACCOUNT_FILE)
@@ -21,16 +24,10 @@ class SimulationBroker(BaseBroker):
 
     def get_positions(self) -> list:
         df = safe_read_csv(PORTFOLIO_FILE)
-        return df.to_dict('records') if not df.empty else []
+        return df.to_dict(orient="records") if not df.empty else []
 
     def save_positions(self, portfolio: list):
-        if not portfolio:
-            df = pd.DataFrame(columns=[
-                'code', 'name', 'buy_time', 'buy_price', 
-                'highest_price', 'current_price', 'shares'
-            ])
-        else:
-            df = pd.DataFrame(portfolio)
+        df = pd.DataFrame(portfolio)
         atomic_write_csv(PORTFOLIO_FILE, df)
 
     def save_portfolio(self, portfolio: list):
@@ -38,18 +35,97 @@ class SimulationBroker(BaseBroker):
         self.save_positions(portfolio)
 
     def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
-        """ シミュレーションでは常に即時成功とみなし、ダミーIDを返す """
+        """ 
+        シミュレーションでは常に即時成功とみなし、ダミーIDを返す。
+        V18.1: スリッページを反映した実行価格のシミュレーション。
+        """
+        from core.config import SLIPPAGE_RATE
+        exec_price = price
+        if price > 0:
+            if side == "1": # Buy
+                exec_price = price * (1.0 + SLIPPAGE_RATE)
+            else: # Sell
+                exec_price = price * (1.0 - SLIPPAGE_RATE)
+                
+            if os.getenv("DEBUG_MODE", "false").lower() == "true":
+                print(f"[SIM_EXEC] {code} {side} @ {exec_price:,.1f} (Slipped from {price:,.1f})")
+
         import time
         return f"SIM-{int(time.time())}"
 
+    def execute_day_trade(self, code: str, shares: int, entry_open: float, exit_close: float, name: str = "") -> dict:
+        """
+        Simulate a full day-trade lifecycle.
+        - Entry: next-day Open + 0.2% slippage
+        - Exit: same-day Close - 0.2% slippage
+        - Persist trade history only; no position remains after execution
+        """
+        from core.config import SLIPPAGE_RATE
+
+        buy_price = float(entry_open) * (1.0 + SLIPPAGE_RATE)
+        sell_price = float(exit_close) * (1.0 - SLIPPAGE_RATE)
+        gross_pnl = (sell_price - buy_price) * int(shares)
+
+        trade_record = {
+            "time": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "code": code,
+            "name": name or code,
+            "side": "DAYTRADE",
+            "shares": int(shares),
+            "entry_open": round(float(entry_open), 4),
+            "buy_price": round(buy_price, 4),
+            "exit_close": round(float(exit_close), 4),
+            "sell_price": round(sell_price, 4),
+            "pnl": round(gross_pnl, 4),
+            "holding_days": 0,
+            "note": "next_open_entry_same_close_exit"
+        }
+        self.log_trade(trade_record)
+
+        account = self.get_account_balance()
+        account["cash"] = round(float(account.get("cash", INITIAL_CASH)) + gross_pnl, 4)
+        self.save_account(account)
+        self.save_positions([])
+
+        return {
+            "code": code,
+            "shares": int(shares),
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "pnl": gross_pnl
+        }
+
     def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> str:
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
+        # 成行注文としてスリッページを適用
         return self.execute_market_order(code, shares, side)
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
-        """ 逆指値（ストップロス）のダミー関数（Brokerインターフェース互換性用） """
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, current_open: float = None) -> dict:
+        """ 
+        [V18.2 Strictness] 逆指値（ストップロス）のシミュレーション実行。
+        - 始値がトリガー価格を下回っている（ギャップダウン）場合、始値で約定させる。
+        """
+        from core.config import SLIPPAGE_RATE
+        exec_price = trigger_price
+        
+        # 始値がすでにストップ価格を割り込んでいた場合（ギャップダウン）
+        if current_open is not None and side == "1": # Sell Stop (Stop Loss)
+            if current_open <= trigger_price:
+                exec_price = current_open # より不利な始値で約定
+        
+        # スリッページ適用
+        if side == "1": # Sell
+            final_price = exec_price * (1.0 - SLIPPAGE_RATE)
+        else: # Buy (Stop Buy)
+            final_price = exec_price * (1.0 + SLIPPAGE_RATE)
+            
         import time
-        return f"SIM-STOP-{int(time.time())}"
+        return {
+            "ID": f"SIM-STOP-{int(time.time())}",
+            "State": 7, # Simulated Execution
+            "Price": final_price,
+            "Qty": shares
+        }
 
     def cancel_order(self, order_id: str) -> bool:
         """ シミュレーションでは即キャンセル成功とする """
