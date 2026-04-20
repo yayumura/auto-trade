@@ -6,14 +6,14 @@ import pickle
 
 # Append current directory to sys.path
 sys.path.append(os.getcwd())
-from core.logic import calculate_all_technicals_v12
 
-from core.config import (
-    INITIAL_CASH, MAX_POSITIONS, LEVERAGE, STOP_LOSS_ATR, TAKE_PROFIT_ATR, 
-    BREADTH_THRESHOLD, EXIT_ON_SMA20_BREACH, SMA20_EXIT_BUFFER, LIQUIDITY_LIMIT_RATE,
-    BULL_GAP_LIMIT, BEAR_GAP_LIMIT, SMA_LONG_PERIOD,
-    SLIPPAGE, MAX_HOLD_DAYS
+from core.config import INITIAL_CASH, SLIPPAGE_RATE
+from core.monthly_rotation_strategy import (
+    PROD_MONTHLY_ROTATION_CONFIG,
+    build_rotation_backtest_inputs_from_cache,
+    get_prod_monthly_rotation_backtest_params,
 )
+from core.jquants_margin_cache import load_margin_cache
 
 def run_jp_broad_backtest(cache_path):
     if not os.path.exists(cache_path):
@@ -25,24 +25,13 @@ def run_jp_broad_backtest(cache_path):
     with open(cache_path, 'rb') as f:
         data = pickle.load(f)
 
-    # REPAIR DATA: Flatten MultiIndex columns if necessary
-    # Example columns: ('3836.T', 'Open') or ('1321.T', ('Open', '1321.T'))
-    new_cols = []
-    for col in data.columns:
-        ticker, field = col[0], col[1]
-        if isinstance(field, tuple): # Handle the ('Open', '1321.T') case
-            field = field[0]
-        new_cols.append((ticker, field))
-    data.columns = pd.MultiIndex.from_tuples(new_cols)
-
-    # Extract clean bundle
-    bundle = {
-        'Open': data.xs('Open', axis=1, level=1),
-        'High': data.xs('High', axis=1, level=1),
-        'Low': data.xs('Low', axis=1, level=1),
-        'Close': data.xs('Close', axis=1, level=1),
-        'Volume': data.xs('Volume', axis=1, level=1),
-    }
+    prepared = build_rotation_backtest_inputs_from_cache(data)
+    bundle = prepared["bundle"]
+    bundle_np = prepared["bundle_np"]
+    timeline = prepared["timeline"]
+    univ_indices = prepared["univ_indices"]
+    breadth_series = prepared["breadth_series"]
+    margin_cache = load_margin_cache()
 
     # Verify 1321.T inclusion
     if '1321.T' in bundle['Close'].columns:
@@ -50,62 +39,35 @@ def run_jp_broad_backtest(cache_path):
     else:
         print("1321.T not found in primary close columns!")
 
-    # Universe Selection
-    all_tickers = bundle['Close'].columns
-    univ_indices = np.array([i for i, t in enumerate(all_tickers) if t not in {'1306.T', '1321.T'}], dtype=int)
-    
-    # Bundle Tickers for Index Lookup in engine
-    bundle_np = {k: v.values for k, v in bundle.items()}
-    bundle_np['tickers'] = list(all_tickers)
-
-    # Indicators
     print("Calculating Technical Indicators for JP Universe...")
-    indicator_bundle = calculate_all_technicals_v12(data) # Pass full dataframe
-    bundle_np.update({k: v.values for k, v in indicator_bundle.items()})
-
-    # Breadth (Prime-Exclusive SMA100 Sync V17.0)
-    from core.logic import get_prime_tickers
-    prime_ref = get_prime_tickers()
-    elite_indices = [i for i, t in enumerate(all_tickers) if t in prime_ref]
-    
-    breadth_matrix = bundle['Close'].values[:, elite_indices] > indicator_bundle[f'SMA{SMA_LONG_PERIOD}'].values[:, elite_indices]
-    breadth_series = np.nanmean(breadth_matrix.astype(float), axis=1)
-    timeline = bundle['Close'].index
     
     # RUN BACKTEST (V17.0 IMPERIAL ORACLE SYNC)
-    from backtest import run_backtest_v16_production
+    from backtest import run_backtest_v19_monthly_rotation
     
-    print("\nStarting Japan IMPERIAL ORACLE Backtest (V20.1 Premium Reversion Sync)...")
-    final_assets, trade_count, monthly_assets, trade_results = run_backtest_v16_production(
+    print(f"\nStarting Japan IMPERIAL ORACLE Backtest ({PROD_MONTHLY_ROTATION_CONFIG.version_label})...")
+    final_assets, trade_count, monthly_assets, trade_results = run_backtest_v19_monthly_rotation(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
         timeline=timeline,
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
-        max_pos=MAX_POSITIONS, # Sync with config
-        sl_mult=STOP_LOSS_ATR, # Sync with config
-        tp_mult=TAKE_PROFIT_ATR, # Sync with config
-        leverage_rate=LEVERAGE, # Sync with config
-        breadth_threshold=BREADTH_THRESHOLD, # Sync with config
-        slippage=SLIPPAGE,
-        max_hold_days=MAX_HOLD_DAYS,
-        use_sma_exit=EXIT_ON_SMA20_BREACH, # Sync with config
-        exit_buffer=SMA20_EXIT_BUFFER, # Sync with config
-        liquidity_limit=LIQUIDITY_LIMIT_RATE, # Sync with config
-        bull_gap_limit=BULL_GAP_LIMIT,       # Sync with config
-        bear_gap_limit=BEAR_GAP_LIMIT,       # Sync with config
+        slippage=SLIPPAGE_RATE,
+        eligible_codes_by_date=margin_cache,
+        **get_prod_monthly_rotation_backtest_params(),
         verbose=False
     )
 
     # Report
     print("="*50)
-    print("JAPAN IMPERIAL ORACLE PERFORMANCE (V17.0)")
+    print(f"JAPAN IMPERIAL ORACLE PERFORMANCE ({PROD_MONTHLY_ROTATION_CONFIG.version_label.upper()})")
     print("="*50)
-    print(f"PERIOD:        {timeline[0].date()} to {timeline[-1].date()}")
+    active_start = sorted(monthly_assets.keys())[0] if monthly_assets else str(timeline[0].date())
+    print(f"DATA WINDOW:   {timeline[0].date()} to {timeline[-1].date()}")
+    print(f"ACTIVE TEST:   {active_start} to {timeline[-1].date()}")
     print(f"INITIAL CASH:  Y{INITIAL_CASH:,.0f}")
     print(f"FINAL EQUITY:  Y{final_assets:,.0f}")
     print(f"TOTAL RETURN:  {((final_assets/INITIAL_CASH)-1)*100:+.2f}%")
-    print(f"TOTAL TRADES:  {trade_count}")
+    print(f"CLOSED TRADES: {trade_count}")
     
     if trade_count > 0:
         wins = [r for r in trade_results if r > 0]

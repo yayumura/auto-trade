@@ -12,6 +12,188 @@ from core.config import (
     USE_COMPOUNDING, INITIAL_CASH, LEVERAGE
 )
 
+DAYTRADE_MIN_GAP_UP = 0.002
+DAYTRADE_MAX_GAP_UP = 0.03
+DAYTRADE_MAX_PREV_BODY_ATR = -0.35
+DAYTRADE_MIN_INTRADAY_RECOVERY_ATR = 0.20
+DAYTRADE_MAX_OPEN_FROM_PREV_CLOSE_ATR = 0.75
+DAYTRADE_MIN_RANGE_ATR = 0.80
+DAYTRADE_MAX_OPEN_POSITION_ATR = 0.25
+
+
+def _is_invalid_number(value):
+    return value is None or pd.isna(value) or np.isinf(value)
+
+
+def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
+                            prev_open=None, prev_atr=None, prev_low=None):
+    """
+    Evaluate a same-day mean-reversion setup using prior-day ATR and candle state.
+    Returns a metric dict when valid, otherwise None.
+    """
+    values = [price, open_p, prev_close, breadth_val, prev_open, prev_atr]
+    if any(_is_invalid_number(v) for v in values):
+        return None
+
+    prev_atr = float(prev_atr)
+    if prev_close <= 0 or open_p <= 0 or price <= 0 or prev_open <= 0 or prev_atr <= 0:
+        return None
+
+    gap_pct = (open_p / prev_close) - 1.0
+    prev_body_atr = (prev_close - prev_open) / prev_atr
+    intraday_recovery_atr = (price - open_p) / prev_atr
+    prev_range_atr = abs(prev_open - prev_close) / prev_atr
+
+    if breadth_val < BREADTH_THRESHOLD:
+        return None
+    if gap_pct < DAYTRADE_MIN_GAP_UP or gap_pct > DAYTRADE_MAX_GAP_UP:
+        return None
+    if prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
+        return None
+    if intraday_recovery_atr < DAYTRADE_MIN_INTRADAY_RECOVERY_ATR:
+        return None
+    if prev_range_atr < DAYTRADE_MIN_RANGE_ATR:
+        return None
+
+    open_from_prev_low_atr = None
+    if not _is_invalid_number(prev_low):
+        open_from_prev_low_atr = (open_p - prev_low) / prev_atr
+        if open_from_prev_low_atr > DAYTRADE_MAX_OPEN_FROM_PREV_CLOSE_ATR:
+            return None
+
+    open_vs_sma_atr = None
+    if not _is_invalid_number(sma_med) and sma_med > 0:
+        open_vs_sma_atr = abs(open_p - sma_med) / prev_atr
+        if open_vs_sma_atr > DAYTRADE_MAX_OPEN_POSITION_ATR:
+            return None
+
+    return {
+        "gap_pct": gap_pct,
+        "prev_body_atr": prev_body_atr,
+        "intraday_recovery_atr": intraday_recovery_atr,
+        "prev_range_atr": prev_range_atr,
+        "open_from_prev_low_atr": open_from_prev_low_atr,
+        "open_vs_sma_atr": open_vs_sma_atr,
+    }
+
+
+def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
+                                 prev_open=None, prev_atr=None, prev_low=None, prev_rsi2=None):
+    """
+    Pre-open / opening-bell evaluation using only information available at the open.
+    """
+    values = [open_p, prev_close, breadth_val, prev_open, prev_atr]
+    if any(_is_invalid_number(v) for v in values):
+        return None
+
+    prev_atr = float(prev_atr)
+    if open_p <= 0 or prev_close <= 0 or prev_open <= 0 or prev_atr <= 0:
+        return None
+
+    gap_pct = (open_p / prev_close) - 1.0
+    prev_body_atr = (prev_close - prev_open) / prev_atr
+    prev_range_atr = abs(prev_open - prev_close) / prev_atr
+
+    if breadth_val < BREADTH_THRESHOLD:
+        return None
+    if gap_pct < DAYTRADE_MIN_GAP_UP or gap_pct > DAYTRADE_MAX_GAP_UP:
+        return None
+    if prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
+        return None
+    if prev_range_atr < DAYTRADE_MIN_RANGE_ATR:
+        return None
+
+    if not _is_invalid_number(prev_rsi2) and float(prev_rsi2) > 55.0:
+        return None
+
+    open_from_prev_low_atr = None
+    if not _is_invalid_number(prev_low):
+        open_from_prev_low_atr = (open_p - prev_low) / prev_atr
+        if open_from_prev_low_atr > (DAYTRADE_MAX_OPEN_FROM_PREV_CLOSE_ATR + 0.35):
+            return None
+
+    open_vs_sma_atr = None
+    if not _is_invalid_number(sma_med) and sma_med > 0:
+        open_vs_sma_atr = abs(open_p - sma_med) / prev_atr
+        if open_vs_sma_atr > (DAYTRADE_MAX_OPEN_POSITION_ATR + 0.35):
+            return None
+
+    return {
+        "gap_pct": gap_pct,
+        "prev_body_atr": prev_body_atr,
+        "prev_range_atr": prev_range_atr,
+        "open_from_prev_low_atr": open_from_prev_low_atr,
+        "open_vs_sma_atr": open_vs_sma_atr,
+    }
+
+
+def score_daytrade_setup(metrics, rsi2=None, rs_alpha=None, prev_close=None, prev_prev_close=None, prev_atr=None):
+    """
+    Rank same-day rebound candidates. Higher is better.
+    """
+    if metrics is None:
+        return -np.inf
+
+    oversold_bonus = 0.0
+    if not _is_invalid_number(rsi2):
+        oversold_bonus = max(0.0, (55.0 - float(rsi2)) / 25.0)
+
+    rs_penalty = 0.0
+    if not _is_invalid_number(rs_alpha):
+        rs_penalty = min(max(float(rs_alpha), -30.0), 60.0) / 100.0
+
+    reversal_bonus = 0.0
+    if not any(_is_invalid_number(v) for v in [prev_close, prev_prev_close, prev_atr]) and prev_atr > 0:
+        reversal_bonus = max(0.0, (float(prev_prev_close) - float(prev_close)) / float(prev_atr))
+
+    score = (
+        abs(metrics["prev_body_atr"]) * 2.5 +
+        metrics["intraday_recovery_atr"] * 5.0 +
+        metrics["prev_range_atr"] * 1.5 +
+        reversal_bonus * 1.5 +
+        oversold_bonus -
+        max(metrics["gap_pct"], 0.0) * 8.0 -
+        rs_penalty
+    )
+
+    if metrics.get("open_vs_sma_atr") is not None:
+        score -= metrics["open_vs_sma_atr"] * 0.5
+
+    return float(score)
+
+
+def score_daytrade_open_setup(metrics, prev_rsi2=None, prev_close=None, prev_prev_close=None, prev_atr=None, rs_alpha=None):
+    if metrics is None:
+        return -np.inf
+
+    oversold_bonus = 0.0
+    if not _is_invalid_number(prev_rsi2):
+        oversold_bonus = max(0.0, (55.0 - float(prev_rsi2)) / 20.0)
+
+    reversal_bonus = 0.0
+    if not any(_is_invalid_number(v) for v in [prev_close, prev_prev_close, prev_atr]) and prev_atr > 0:
+        reversal_bonus = max(0.0, (float(prev_prev_close) - float(prev_close)) / float(prev_atr))
+
+    rs_penalty = 0.0
+    if not _is_invalid_number(rs_alpha):
+        rs_penalty = max(float(rs_alpha), 0.0) / 120.0
+
+    score = (
+        abs(metrics["prev_body_atr"]) * 3.0 +
+        metrics["prev_range_atr"] * 1.5 +
+        reversal_bonus * 1.2 +
+        oversold_bonus -
+        max(metrics["gap_pct"], 0.0) * 12.0 -
+        rs_penalty
+    )
+
+    if metrics.get("open_from_prev_low_atr") is not None:
+        score -= metrics["open_from_prev_low_atr"] * 0.35
+    if metrics.get("open_vs_sma_atr") is not None:
+        score -= metrics["open_vs_sma_atr"] * 0.25
+
+    return float(score)
+
 def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
                              sl_mult, tp_mult):
     """
@@ -29,71 +211,29 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
 
 def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_buffers=None, sma_med_map=None):
     """
-    V17.0 Golden Manager:
-    - Fixed ATR TP/SL.
-    - SMA20 Trend Breach protection.
-    - Time-based Exit (MAX_HOLD_DAYS).
+    Day-trade manager:
+    - No multi-day hold.
+    - Any residual position is considered invalid and should be flattened immediately.
     """
-    remaining = []
     sell_actions = []
-    
+
+    if not portfolio:
+        return [], sell_actions
+
     for p in portfolio:
         code = str(p['code'])
-        # 1. Price Acquisition
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
         else:
             current_price = float(p.get('current_price', p['buy_price']))
-            
-        buy_price = float(p['buy_price'])
-        atr = float(p.get('buy_atr', 0))
-        highest_price = float(p.get('highest_price', 0))
-        
-        tsl_price, target_price = calculate_position_stops(
-            buy_price, atr, highest_price, current_price,
-            STOP_LOSS_ATR, TAKE_PROFIT_ATR
-        )
-
-        # 3. Technical Trend Exit (SMA20) ★V17 ORIGINAL
-        is_trend_broken = False
-        if sma_med_map and code in sma_med_map:
-            # Setting: SMA20_EXIT_BUFFER (0.975)
-            if current_price < float(sma_med_map[code]) * SMA20_EXIT_BUFFER: 
-                is_trend_broken = True
-
-        # 4. Sell Decision (Golden Logic Priority Sequence)
-        exit_reason = None
-
-        if is_trend_broken:
-            exit_reason = "Trend Breach (SMA20)"
-        elif current_price <= buy_price - (atr * STOP_LOSS_ATR):
-            exit_reason = f"Stop Loss ({STOP_LOSS_ATR} ATR)"
-        elif current_price >= buy_price + (atr * TAKE_PROFIT_ATR):
-            exit_reason = f"Take Profit ({TAKE_PROFIT_ATR} ATR)"
-            
-        # 5. Time Stop (V17.0 Parity)
-        buy_time_str = p.get('buy_time')
-        if buy_time_str:
+        sell_actions.append(f"SELL {code} - Day Trade Flatten (@{current_price:,.1f})")
+        if not is_simulation and broker:
             try:
-                bt = dt.strptime(buy_time_str, '%Y-%m-%d %H:%M:%S')
-                days_held = (dt.now() - bt).days
-                if days_held >= MAX_HOLD_DAYS:
-                    exit_reason = f"Time Stop ({days_held} days)"
-            except: pass
+                broker.execute_chase_order(code, p['shares'], side="1")
+            except:
+                pass
 
-        if exit_reason:
-            sell_actions.append(f"SELL {code} - {exit_reason} (@{current_price:,.1f})")
-            if not is_simulation and broker:
-                try: broker.execute_chase_order(code, p['shares'], side="1")
-                except: pass
-            continue
-            
-        p['current_price'] = round(current_price, 1)
-        if current_price > float(p.get('highest_price', 0)):
-            p['highest_price'] = round(current_price, 1)
-        remaining.append(p)
-
-    return remaining, sell_actions
+    return [], sell_actions
 
 def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
     """V17.0 Fixed Breadth Scaling: On if >= Threshold, else Off."""
@@ -101,28 +241,18 @@ def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
         return config_leverage
     return 0.0
 
-def check_entry_signal(regime, price, open_p, prev_close, sma_med, breadth_val):
+def check_entry_signal(regime, price, open_p, prev_close, sma_med, breadth_val, prev_open=None, prev_atr=None, prev_low=None):
     """
-    V17.0 Golden Entry Protocol (Pure Trend Following - Hardcoded)
-    1. Breadth: >= 0.60
-    2. Gap: (Open / Prev Close) - 1.0 <= BULL_GAP_LIMIT (11%)
-    3. Trend: Close > SMA20
+    Day-trade entry signal:
+    - Market breadth must not be risk-off.
+    - Previous day should show downside expansion / bearish exhaustion.
+    - Today should gap up moderately and hold an intraday rebound.
     """
-    # 1. Breadth Condition
-    if breadth_val < BREADTH_THRESHOLD:
-        return False
-    
-    # 2. Gap Condition
-    if prev_close > 0:
-        gap_pct = (open_p / prev_close) - 1.0
-        if gap_pct > BULL_GAP_LIMIT:
-            return False
-    
-    # 3. Trend Condition (SMA20)
-    if sma_med <= 0 or price <= sma_med:
-        return False
-    
-    return True
+    metrics = evaluate_daytrade_setup(
+        price, open_p, prev_close, sma_med, breadth_val,
+        prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low
+    )
+    return metrics is not None
 
 def calculate_all_technicals_v12(data_df):
     """
@@ -158,6 +288,11 @@ def calculate_all_technicals_v12(data_df):
     ma_down = down.rolling(2).mean()
     rs_rsi = ma_up / (ma_down + 1e-9)
     bundle['RSI2'] = 100 - (100 / (1 + rs_rsi))
+    
+    # Bollinger Bands (20, 2sigma) for legacy compatibility and diagnostics
+    bb_basis = close.rolling(20).mean()
+    bb_std = close.rolling(20).std(ddof=0)
+    bundle['BB_LOWER_2'] = bb_basis - (bb_std * 2.0)
     
     # ATR (20) Vectorized
     prev_close = close.shift(1)
@@ -216,10 +351,9 @@ def detect_market_regime(data_df=None, buffer=None):
 
 def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0):
     """
-    V140.0 Momentum Leader Selection:
-    - Universe: Stocks with RS_Alpha > 25.
-    - Sorting: RS_Alpha Descending.
-    - Breadth Filter: Activated if breadth_val >= 0.60 (V17 Golden).
+    Day-trade candidate selection:
+    - Prioritize oversold rebound setups instead of trend breakouts.
+    - Use previous ATR and previous bearish candle for gap-up continuation.
     """
     if breadth_val < BREADTH_THRESHOLD: return []
     
@@ -227,11 +361,15 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
     
     close = bundle['Close'].iloc[-1]
     prev_close = bundle['Close'].iloc[-2]  # 前日終値（ギャップ計算用）
+    prev_prev_close = bundle['Close'].iloc[-3] if len(bundle['Close']) >= 3 else bundle['Close'].iloc[-2]
     open_p = bundle['Open'].iloc[-1]
+    prev_open = bundle['Open'].iloc[-2]
+    prev_low = data_df.xs('Low', axis=1, level=1).iloc[-2]
     rsi2 = bundle['RSI2'].iloc[-1]
     sma_med = bundle[f'SMA{SMA_MEDIUM_PERIOD}'].iloc[-1]
     sma_trend = bundle[f'SMA{SMA_TREND_PERIOD}'].iloc[-1]
     atr = bundle['ATR'].iloc[-1]
+    prev_atr = bundle['ATR'].iloc[-2]
     rs_alpha = bundle['RS_Alpha'].iloc[-1]
     turnover = bundle['Turnover'].iloc[-1] if 'Turnover' in bundle else None
     
@@ -243,38 +381,55 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
         o = open_p[t_with_t]
         r2 = rsi2[t_with_t]
         s_med = sma_med[t_with_t]
-        s_trend = sma_trend[t_with_t]
         rs = rs_alpha[t_with_t]
+        pa = prev_atr[t_with_t] if t_with_t in prev_atr.index else np.nan
+        po = prev_open[t_with_t] if t_with_t in prev_open.index else np.nan
+        pl = prev_low[t_with_t] if t_with_t in prev_low.index else np.nan
+        p_prev_prev = prev_prev_close[t_with_t] if t_with_t in prev_prev_close.index else np.nan
         
-        if pd.isna(p) or p <= 0 or pd.isna(rs): continue
-        if rs < RS_THRESHOLD: continue # Momentum requirement
+        if pd.isna(p) or p <= 0 or pd.isna(pa) or pa <= 0:
+            continue
 
         p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else 0
-        
-        # Current Market Breadth passed from caller
-        entry_signal = check_entry_signal(
-            regime, p, o, p_prev, s_med, breadth_val
+        if p_prev <= 0:
+            continue
+
+        metrics = evaluate_daytrade_setup(
+            p, o, p_prev, s_med, breadth_val,
+            prev_open=po, prev_atr=pa, prev_low=pl
         )
-                
-        if entry_signal:
+
+        if metrics is not None:
             code_only = t_with_t.replace(".T", "")
             name = "Target"
             if symbols_df is not None:
                 match = symbols_df[symbols_df['コード'].astype(str) == code_only]
                 if not match.empty: name = match.iloc[0]['銘柄名']
+
+            score = score_daytrade_setup(
+                metrics,
+                rsi2=r2,
+                rs_alpha=rs,
+                prev_close=p_prev,
+                prev_prev_close=p_prev_prev,
+                prev_atr=pa
+            )
             
             candidates.append({
                 "code": code_only,
                 "name": name,
                 "price": p,
-                "atr": atr[t_with_t],
+                "atr": pa,
                 "rs": rs,
                 "rsi2": r2,
                 "adv_yen": turnover[t_with_t] if turnover is not None else 0,
-                "score": rs # Pure momentum score
+                "gap_pct": metrics["gap_pct"],
+                "prev_body_atr": metrics["prev_body_atr"],
+                "recovery_atr": metrics["intraday_recovery_atr"],
+                "score": score
             })
 
-    candidates = sorted(candidates, key=lambda x: x['rs'], reverse=True)
+    candidates = sorted(candidates, key=lambda x: x['score'], reverse=True)
     return candidates 
 
 class RealtimeBuffer:
