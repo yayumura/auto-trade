@@ -13,39 +13,40 @@ def _build_daytrade_bundle(exit_mode="close"):
     open_data = np.full((T, 1), 100.0)
     high_data = np.full((T, 1), 101.0)
     low_data = np.full((T, 1), 99.0)
-    rsi2_data = np.full((T, 1), 50.0)
-    sma20_data = np.full((T, 1), 84.0)
-    sma100_data = np.full((T, 1), 50.0)
+    rsi2_data = np.full((T, 1), 20.0)
+    sma20_data = np.full((T, 1), 95.0)
+    sma100_data = np.full((T, 1), 90.0)
     atr_data = np.full((T, 1), 2.0)
 
-    # Prior two sessions create a valid oversold rebound setup.
-    close_data[100, 0] = 90.0
-    open_data[100, 0] = 91.0
-    high_data[100, 0] = 91.5
-    low_data[100, 0] = 89.5
+    # Prior two sessions create a valid short-term momentum setup.
+    close_data[100, 0] = 100.0
+    open_data[100, 0] = 99.0
+    high_data[100, 0] = 100.5
+    low_data[100, 0] = 98.5
 
-    close_data[101, 0] = 82.0
-    open_data[101, 0] = 84.0
-    high_data[101, 0] = 84.5
-    low_data[101, 0] = 81.8
-    rsi2_data[101, 0] = 5.0
+    close_data[101, 0] = 104.0
+    open_data[101, 0] = 102.0
+    high_data[101, 0] = 104.5
+    low_data[101, 0] = 101.5
+    rsi2_data[101, 0] = 60.0
 
-    # Entry day: moderate gap-up from 82 to 83.64 (~2%)
-    open_data[102, 0] = 83.64
-    sma20_data[102, 0] = 84.0
+    # Entry day: controlled continuation gap from 104 to 105.0 (~+0.96%)
+    open_data[102, 0] = 105.0
+    sma20_data[101, 0] = 100.0
+    sma20_data[102, 0] = 100.0
 
     if exit_mode == "close":
-        close_data[102, 0] = 85.4
-        high_data[102, 0] = 85.8
-        low_data[102, 0] = 83.5
+        close_data[102, 0] = 106.5
+        high_data[102, 0] = 106.8
+        low_data[102, 0] = 104.8
     elif exit_mode == "stop":
-        close_data[102, 0] = 82.4
-        high_data[102, 0] = 83.9
-        low_data[102, 0] = 82.1
+        close_data[102, 0] = 103.0
+        high_data[102, 0] = 105.1
+        low_data[102, 0] = 102.8
     elif exit_mode == "target":
-        close_data[102, 0] = 85.6
-        high_data[102, 0] = 86.0
-        low_data[102, 0] = 83.4
+        close_data[102, 0] = 108.5
+        high_data[102, 0] = 109.2
+        low_data[102, 0] = 104.8
     else:
         raise ValueError(f"Unknown exit_mode: {exit_mode}")
 
@@ -57,8 +58,11 @@ def _build_daytrade_bundle(exit_mode="close"):
         "SMA5": np.full((T, 1), 90.0),
         "SMA20": sma20_data,
         "SMA100": sma100_data,
+        "SMA200": np.full((T, 1), 90.0),
         "ATR": atr_data,
         "RSI2": rsi2_data,
+        "RS_Alpha": np.full((T, 1), 30.0),
+        "Turnover": np.full((T, 1), 1_000_000_000.0),
         "BB_LOWER_2": np.full((T, 1), 80.0),
         "tickers": ["1000.T"],
     }
@@ -72,7 +76,7 @@ def _run_single_trade_backtest(exit_mode):
         univ_indices=np.arange(1),
         bundle_np=bundle_np,
         timeline=dates,
-        breadth_ratio=np.ones(len(dates)) * 0.7,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
         initial_cash=10_000_000,
         max_pos=1,
         sl_mult=5.0,
@@ -80,6 +84,24 @@ def _run_single_trade_backtest(exit_mode):
         leverage_rate=1.0,
         breadth_threshold=0.3,
         max_hold_days=1,
+    )
+
+
+def _run_single_trade_backtest_with_costs(exit_mode, **kwargs):
+    dates, bundle_np = _build_daytrade_bundle(exit_mode=exit_mode)
+    return run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+        **kwargs,
     )
 
 
@@ -108,6 +130,61 @@ def test_daytrade_intraday_target_locks_gain():
     assert len(results) == 1
     assert results[0] > 0
     assert final_assets > 10_000_000
+
+
+def test_daytrade_explicit_cost_reduces_equity():
+    no_cost_assets, *_ = _run_single_trade_backtest_with_costs(
+        "close",
+        slippage=0.0,
+        explicit_trade_cost=0.0,
+    )
+    with_cost_assets, *_ = _run_single_trade_backtest_with_costs(
+        "close",
+        slippage=0.0,
+        explicit_trade_cost=5_000.0,
+    )
+
+    assert with_cost_assets < no_cost_assets
+
+
+def test_daytrade_supports_asymmetric_execution_slippage():
+    symmetric_assets, *_ = _run_single_trade_backtest_with_costs(
+        "close",
+        slippage=0.001,
+    )
+    asymmetric_assets, *_ = _run_single_trade_backtest_with_costs(
+        "close",
+        slippage=0.001,
+        entry_slippage=0.0,
+        exit_slippage=0.002,
+    )
+
+    assert asymmetric_assets != symmetric_assets
+
+
+def test_daytrade_can_return_daily_stats():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    final_assets, trade_count, monthly, results, daily_stats = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+        return_daily_stats=True,
+    )
+
+    assert trade_count == 1
+    assert final_assets > 10_000_000
+    assert isinstance(daily_stats, dict)
+    assert "2024-04-12" in daily_stats
+    assert daily_stats["2024-04-12"]["day_pnl"] > 0
+    assert daily_stats["2024-04-12"]["trade_count"] == 1
 
 
 def test_monthly_rotation_can_hold_a_winner():

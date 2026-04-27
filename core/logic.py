@@ -9,24 +9,119 @@ from core.config import (
     EXCLUSION_CACHE_FILE, SMA20_EXIT_BUFFER, MAX_HOLD_DAYS,
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD,
     BULL_GAP_LIMIT, RS_THRESHOLD,
-    USE_COMPOUNDING, INITIAL_CASH, LEVERAGE
+    USE_COMPOUNDING, INITIAL_CASH, LEVERAGE, MIN_PRICE, MAX_PRICE
 )
 
-DAYTRADE_MIN_GAP_UP = 0.002
-DAYTRADE_MAX_GAP_UP = 0.03
-DAYTRADE_MAX_PREV_BODY_ATR = -0.35
-DAYTRADE_MIN_INTRADAY_RECOVERY_ATR = 0.20
-DAYTRADE_MAX_OPEN_FROM_PREV_CLOSE_ATR = 0.75
-DAYTRADE_MIN_RANGE_ATR = 0.80
-DAYTRADE_MAX_OPEN_POSITION_ATR = 0.25
+DAYTRADE_MIN_GAP = -0.005
+DAYTRADE_MAX_GAP = 0.03
+DAYTRADE_MIN_PREV_BODY_ATR = -10.0
+DAYTRADE_MAX_PREV_BODY_ATR = 10.0
+DAYTRADE_MIN_INTRADAY_RECOVERY_ATR = -0.05
+DAYTRADE_MAX_OPEN_FROM_PREV_CLOSE_ATR = 3.00
+DAYTRADE_MIN_RANGE_ATR = 0.00
+DAYTRADE_MIN_TREND_GAP_ATR = -999.0
+DAYTRADE_MAX_OPEN_POSITION_ATR = 999.0
+DAYTRADE_MIN_RS_ALPHA = 0.0
+DAYTRADE_MIN_RSI2 = 35.0
+DAYTRADE_MAX_RSI2 = 80.0
+DAYTRADE_MIN_SETUP_SCORE = 3.0
+DAYTRADE_MIN_PREV_DAY_DROP_PCT = -0.08
+DAYTRADE_MIN_PREV_DAY_RETURN_PCT = -0.005
+DAYTRADE_MAX_PREV_DAY_RETURN_PCT = 0.08
+DAYTRADE_MAX_DAILY_LOSS_PCT = 0.01
+DAYTRADE_MAX_MONTHLY_DRAWDOWN_PCT = 0.75
+DAYTRADE_RISK_PER_TRADE_PCT = 0.500
+DAYTRADE_MAX_NOTIONAL_PCT = 0.15
+DAYTRADE_MIN_TURNOVER = 600_000_000.0
+DAYTRADE_REBOUND_CONFIRM_ATR = 0.0
+DAYTRADE_STRONG_BREADTH_OVERRIDE = 0.60
+DAYTRADE_WEEKLY_TARGET_PCT = 0.01
+DAYTRADE_WEEKLY_CATCHUP_UNTIL_PCT = 0.005
+DAYTRADE_WEEKLY_CATCHUP_LEVERAGE_MULT = 20.00
 
 
 def _is_invalid_number(value):
     return value is None or pd.isna(value) or np.isinf(value)
 
 
+def _floor_lot(shares):
+    return max(0, (int(shares) // 100) * 100)
+
+
+def is_daytrade_market_allowed(breadth_val, market_open=None, prev_market_sma_trend=None):
+    if _is_invalid_number(breadth_val) or float(breadth_val) < BREADTH_THRESHOLD:
+        return False
+    if float(breadth_val) >= DAYTRADE_STRONG_BREADTH_OVERRIDE:
+        return True
+    if _is_invalid_number(market_open) or _is_invalid_number(prev_market_sma_trend):
+        return False
+    if float(market_open) <= 0 or float(prev_market_sma_trend) <= 0:
+        return False
+    return float(market_open) > float(prev_market_sma_trend)
+
+
+def get_daytrade_week_key(timestamp):
+    iso = timestamp.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def resolve_daytrade_weekly_leverage(
+    base_leverage,
+    week_start_equity,
+    current_equity,
+    target_pct=DAYTRADE_WEEKLY_CATCHUP_UNTIL_PCT,
+    catchup_mult=DAYTRADE_WEEKLY_CATCHUP_LEVERAGE_MULT,
+):
+    if base_leverage <= 0:
+        return 0.0
+    if _is_invalid_number(week_start_equity) or _is_invalid_number(current_equity):
+        return float(base_leverage)
+    if float(week_start_equity) <= 0:
+        return float(base_leverage)
+    week_return = (float(current_equity) / float(week_start_equity)) - 1.0
+    if week_return + 1e-12 >= float(target_pct):
+        return float(base_leverage)
+    return float(base_leverage) * float(catchup_mult)
+
+
+def is_daytrade_monthly_risk_blocked(
+    month_start_equity,
+    current_equity,
+    max_drawdown_pct=DAYTRADE_MAX_MONTHLY_DRAWDOWN_PCT,
+):
+    if _is_invalid_number(month_start_equity) or _is_invalid_number(current_equity):
+        return False
+    if float(month_start_equity) <= 0:
+        return False
+    month_return = (float(current_equity) / float(month_start_equity)) - 1.0
+    return month_return <= -float(max_drawdown_pct)
+
+
+def resolve_daytrade_intraday_stop_mult(sl_mult=STOP_LOSS_ATR):
+    return max(0.6, min(1.2, float(sl_mult) / 5.0))
+
+
+def resolve_daytrade_intraday_target_mult(tp_mult=TAKE_PROFIT_ATR):
+    return max(1.0, min(2.0, float(tp_mult) / 20.0))
+
+
+def resolve_daytrade_buying_power(current_equity, account_cash, dynamic_leverage, current_exposure=0.0):
+    if _is_invalid_number(current_equity) or _is_invalid_number(dynamic_leverage):
+        return 0.0
+    if float(current_equity) <= 0 or float(dynamic_leverage) <= 0:
+        return 0.0
+    exposure_budget = float(current_equity) * float(dynamic_leverage)
+    available_budget = exposure_budget - max(0.0, float(current_exposure or 0.0))
+    if _is_invalid_number(account_cash):
+        return max(0.0, available_budget)
+    if float(account_cash) < 0 and available_budget > 0:
+        return max(0.0, available_budget + float(account_cash))
+    return max(0.0, available_budget)
+
+
 def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
-                            prev_open=None, prev_atr=None, prev_low=None):
+                            prev_open=None, prev_atr=None, prev_low=None,
+                            rs_alpha=None, rsi2=None, prev_prev_close=None):
     """
     Evaluate a same-day mean-reversion setup using prior-day ATR and candle state.
     Returns a metric dict when valid, otherwise None.
@@ -40,15 +135,27 @@ def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
         return None
 
     gap_pct = (open_p / prev_close) - 1.0
+    prev_return = None
+    if not _is_invalid_number(prev_prev_close) and float(prev_prev_close) > 0:
+        prev_return = (prev_close / float(prev_prev_close)) - 1.0
     prev_body_atr = (prev_close - prev_open) / prev_atr
     intraday_recovery_atr = (price - open_p) / prev_atr
     prev_range_atr = abs(prev_open - prev_close) / prev_atr
 
     if breadth_val < BREADTH_THRESHOLD:
         return None
-    if gap_pct < DAYTRADE_MIN_GAP_UP or gap_pct > DAYTRADE_MAX_GAP_UP:
+    if not _is_invalid_number(rs_alpha) and float(rs_alpha) < DAYTRADE_MIN_RS_ALPHA:
         return None
-    if prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
+    if not _is_invalid_number(rsi2):
+        rsi2 = float(rsi2)
+        if rsi2 < DAYTRADE_MIN_RSI2 or rsi2 > DAYTRADE_MAX_RSI2:
+            return None
+    if prev_return is not None:
+        if prev_return < DAYTRADE_MIN_PREV_DAY_RETURN_PCT or prev_return > DAYTRADE_MAX_PREV_DAY_RETURN_PCT:
+            return None
+    if gap_pct < DAYTRADE_MIN_GAP or gap_pct > DAYTRADE_MAX_GAP:
+        return None
+    if prev_body_atr < DAYTRADE_MIN_PREV_BODY_ATR or prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
         return None
     if intraday_recovery_atr < DAYTRADE_MIN_INTRADAY_RECOVERY_ATR:
         return None
@@ -63,22 +170,27 @@ def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
 
     open_vs_sma_atr = None
     if not _is_invalid_number(sma_med) and sma_med > 0:
-        open_vs_sma_atr = abs(open_p - sma_med) / prev_atr
+        open_vs_sma_atr = (prev_close - sma_med) / prev_atr
+        if open_vs_sma_atr < DAYTRADE_MIN_TREND_GAP_ATR:
+            return None
         if open_vs_sma_atr > DAYTRADE_MAX_OPEN_POSITION_ATR:
             return None
 
     return {
         "gap_pct": gap_pct,
+        "prev_return": prev_return,
         "prev_body_atr": prev_body_atr,
         "intraday_recovery_atr": intraday_recovery_atr,
         "prev_range_atr": prev_range_atr,
         "open_from_prev_low_atr": open_from_prev_low_atr,
         "open_vs_sma_atr": open_vs_sma_atr,
+        "rs_alpha": float(rs_alpha) if not _is_invalid_number(rs_alpha) else None,
     }
 
 
 def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
-                                 prev_open=None, prev_atr=None, prev_low=None, prev_rsi2=None):
+                                 prev_open=None, prev_atr=None, prev_low=None,
+                                 prev_rsi2=None, rs_alpha=None, prev_prev_close=None):
     """
     Pre-open / opening-bell evaluation using only information available at the open.
     """
@@ -91,20 +203,31 @@ def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
         return None
 
     gap_pct = (open_p / prev_close) - 1.0
+    prev_return = None
+    if not _is_invalid_number(prev_prev_close) and float(prev_prev_close) > 0:
+        prev_return = (prev_close / float(prev_prev_close)) - 1.0
     prev_body_atr = (prev_close - prev_open) / prev_atr
     prev_range_atr = abs(prev_open - prev_close) / prev_atr
 
     if breadth_val < BREADTH_THRESHOLD:
         return None
-    if gap_pct < DAYTRADE_MIN_GAP_UP or gap_pct > DAYTRADE_MAX_GAP_UP:
+    if not _is_invalid_number(rs_alpha) and float(rs_alpha) < DAYTRADE_MIN_RS_ALPHA:
         return None
-    if prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
+    if gap_pct < DAYTRADE_MIN_GAP or gap_pct > DAYTRADE_MAX_GAP:
+        return None
+    if prev_body_atr < DAYTRADE_MIN_PREV_BODY_ATR or prev_body_atr > DAYTRADE_MAX_PREV_BODY_ATR:
         return None
     if prev_range_atr < DAYTRADE_MIN_RANGE_ATR:
         return None
 
-    if not _is_invalid_number(prev_rsi2) and float(prev_rsi2) > 55.0:
-        return None
+    if not _is_invalid_number(prev_rsi2):
+        prev_rsi2 = float(prev_rsi2)
+        if prev_rsi2 < DAYTRADE_MIN_RSI2 or prev_rsi2 > DAYTRADE_MAX_RSI2:
+            return None
+
+    if prev_return is not None:
+        if prev_return < DAYTRADE_MIN_PREV_DAY_RETURN_PCT or prev_return > DAYTRADE_MAX_PREV_DAY_RETURN_PCT:
+            return None
 
     open_from_prev_low_atr = None
     if not _is_invalid_number(prev_low):
@@ -114,50 +237,53 @@ def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
 
     open_vs_sma_atr = None
     if not _is_invalid_number(sma_med) and sma_med > 0:
-        open_vs_sma_atr = abs(open_p - sma_med) / prev_atr
-        if open_vs_sma_atr > (DAYTRADE_MAX_OPEN_POSITION_ATR + 0.35):
+        open_vs_sma_atr = (prev_close - sma_med) / prev_atr
+        if open_vs_sma_atr < DAYTRADE_MIN_TREND_GAP_ATR:
+            return None
+        if open_vs_sma_atr > DAYTRADE_MAX_OPEN_POSITION_ATR:
             return None
 
     return {
         "gap_pct": gap_pct,
+        "prev_return": prev_return,
         "prev_body_atr": prev_body_atr,
         "prev_range_atr": prev_range_atr,
         "open_from_prev_low_atr": open_from_prev_low_atr,
         "open_vs_sma_atr": open_vs_sma_atr,
+        "rs_alpha": float(rs_alpha) if not _is_invalid_number(rs_alpha) else None,
     }
 
 
 def score_daytrade_setup(metrics, rsi2=None, rs_alpha=None, prev_close=None, prev_prev_close=None, prev_atr=None):
     """
-    Rank same-day rebound candidates. Higher is better.
+    Rank same-day momentum-continuation candidates. Higher is better.
     """
     if metrics is None:
         return -np.inf
 
-    oversold_bonus = 0.0
+    rsi_penalty = 0.0
     if not _is_invalid_number(rsi2):
-        oversold_bonus = max(0.0, (55.0 - float(rsi2)) / 25.0)
+        rsi_penalty = max(0.0, float(rsi2) - 80.0) * 0.15
 
-    rs_penalty = 0.0
+    rs_bonus = 0.0
     if not _is_invalid_number(rs_alpha):
-        rs_penalty = min(max(float(rs_alpha), -30.0), 60.0) / 100.0
+        rs_bonus = max(float(rs_alpha), 0.0) * 0.08
 
-    reversal_bonus = 0.0
+    prev_return_bonus = 0.0
     if not any(_is_invalid_number(v) for v in [prev_close, prev_prev_close, prev_atr]) and prev_atr > 0:
-        reversal_bonus = max(0.0, (float(prev_prev_close) - float(prev_close)) / float(prev_atr))
+        prev_return_bonus = max(0.0, (float(prev_close) / float(prev_prev_close)) - 1.0) * 90.0
 
     score = (
-        abs(metrics["prev_body_atr"]) * 2.5 +
-        metrics["intraday_recovery_atr"] * 5.0 +
-        metrics["prev_range_atr"] * 1.5 +
-        reversal_bonus * 1.5 +
-        oversold_bonus -
-        max(metrics["gap_pct"], 0.0) * 8.0 -
-        rs_penalty
+        prev_return_bonus +
+        max(0.0, metrics["gap_pct"]) * 90.0 +
+        rs_bonus -
+        rsi_penalty
     )
 
+    if metrics.get("open_from_prev_low_atr") is not None:
+        score -= metrics["open_from_prev_low_atr"] * 0.125
     if metrics.get("open_vs_sma_atr") is not None:
-        score -= metrics["open_vs_sma_atr"] * 0.5
+        score -= abs(metrics["open_vs_sma_atr"]) * 0.15
 
     return float(score)
 
@@ -166,31 +292,29 @@ def score_daytrade_open_setup(metrics, prev_rsi2=None, prev_close=None, prev_pre
     if metrics is None:
         return -np.inf
 
-    oversold_bonus = 0.0
+    rsi_penalty = 0.0
     if not _is_invalid_number(prev_rsi2):
-        oversold_bonus = max(0.0, (55.0 - float(prev_rsi2)) / 20.0)
+        rsi_penalty = max(0.0, float(prev_rsi2) - 80.0) * 0.15
 
-    reversal_bonus = 0.0
+    prev_return_bonus = 0.0
     if not any(_is_invalid_number(v) for v in [prev_close, prev_prev_close, prev_atr]) and prev_atr > 0:
-        reversal_bonus = max(0.0, (float(prev_prev_close) - float(prev_close)) / float(prev_atr))
+        prev_return_bonus = max(0.0, (float(prev_close) / float(prev_prev_close)) - 1.0) * 90.0
 
-    rs_penalty = 0.0
+    rs_bonus = 0.0
     if not _is_invalid_number(rs_alpha):
-        rs_penalty = max(float(rs_alpha), 0.0) / 120.0
+        rs_bonus = max(float(rs_alpha), 0.0) * 0.08
 
     score = (
-        abs(metrics["prev_body_atr"]) * 3.0 +
-        metrics["prev_range_atr"] * 1.5 +
-        reversal_bonus * 1.2 +
-        oversold_bonus -
-        max(metrics["gap_pct"], 0.0) * 12.0 -
-        rs_penalty
+        prev_return_bonus +
+        max(0.0, metrics["gap_pct"]) * 90.0 +
+        rs_bonus -
+        rsi_penalty
     )
 
     if metrics.get("open_from_prev_low_atr") is not None:
-        score -= metrics["open_from_prev_low_atr"] * 0.35
+        score -= metrics["open_from_prev_low_atr"] * 0.125
     if metrics.get("open_vs_sma_atr") is not None:
-        score -= metrics["open_vs_sma_atr"] * 0.25
+        score -= abs(metrics["open_vs_sma_atr"]) * 0.15
 
     return float(score)
 
@@ -355,9 +479,22 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
     - Prioritize oversold rebound setups instead of trend breakouts.
     - Use previous ATR and previous bearish candle for gap-up continuation.
     """
-    if breadth_val < BREADTH_THRESHOLD: return []
-    
     bundle = calculate_all_technicals_v12(data_df)
+    market_open = np.nan
+    prev_market_sma_trend = np.nan
+    try:
+        if "1321.T" in bundle["Open"].columns and len(bundle["Open"]) >= 2:
+            market_open = bundle["Open"]["1321.T"].iloc[-1]
+            prev_market_sma_trend = bundle[f"SMA{SMA_TREND_PERIOD}"]["1321.T"].iloc[-2]
+    except Exception:
+        market_open = np.nan
+        prev_market_sma_trend = np.nan
+    if not is_daytrade_market_allowed(
+        breadth_val,
+        market_open=market_open,
+        prev_market_sma_trend=prev_market_sma_trend,
+    ):
+        return []
     
     close = bundle['Close'].iloc[-1]
     prev_close = bundle['Close'].iloc[-2]  # 前日終値（ギャップ計算用）
@@ -381,6 +518,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
         o = open_p[t_with_t]
         r2 = rsi2[t_with_t]
         s_med = sma_med[t_with_t]
+        s_trend = sma_trend[t_with_t] if t_with_t in sma_trend.index else np.nan
         rs = rs_alpha[t_with_t]
         pa = prev_atr[t_with_t] if t_with_t in prev_atr.index else np.nan
         po = prev_open[t_with_t] if t_with_t in prev_open.index else np.nan
@@ -389,14 +527,23 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
         
         if pd.isna(p) or p <= 0 or pd.isna(pa) or pa <= 0:
             continue
+        if o < MIN_PRICE or o > MAX_PRICE:
+            continue
 
         p_prev = prev_close[t_with_t] if t_with_t in prev_close.index else 0
         if p_prev <= 0:
             continue
+        if turnover is not None and turnover[t_with_t] < DAYTRADE_MIN_TURNOVER:
+            continue
+        if _is_invalid_number(s_trend):
+            continue
+        if p_prev <= s_trend:
+            continue
 
         metrics = evaluate_daytrade_setup(
             p, o, p_prev, s_med, breadth_val,
-            prev_open=po, prev_atr=pa, prev_low=pl
+            prev_open=po, prev_atr=pa, prev_low=pl, rs_alpha=rs,
+            rsi2=r2, prev_prev_close=p_prev_prev
         )
 
         if metrics is not None:
@@ -414,6 +561,8 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                 prev_prev_close=p_prev_prev,
                 prev_atr=pa
             )
+            if score < DAYTRADE_MIN_SETUP_SCORE:
+                continue
             
             candidates.append({
                 "code": code_only,
@@ -438,17 +587,48 @@ class RealtimeBuffer:
         self.latest_price = 0
         self.latest_volume = 0
         self.prices = [] # Simplified history for RSI2
+        self.session_open = 0
+        self.session_high = 0
+        self.session_low = 0
+        self.last_trade_date = None
         
-    def update(self, price, volume, server_time):
+    def update(self, price, volume, server_time, open_price=None, high_price=None, low_price=None):
+        trade_date = None
+        if server_time is not None:
+            trade_date = getattr(server_time, "date", lambda: None)()
+        if trade_date is not None and trade_date != self.last_trade_date:
+            self.session_open = 0
+            self.session_high = 0
+            self.session_low = 0
+            self.last_trade_date = trade_date
+
         if price and price > 0:
             if self.latest_price != price:
                 self.prices.append(price)
             self.latest_price = price
             self.latest_volume = volume
             if len(self.prices) > 20: self.prices = self.prices[-20:]
+            if self.session_open <= 0:
+                self.session_open = float(open_price or price)
+            session_high = float(high_price or price)
+            session_low = float(low_price or price)
+            self.session_high = max(float(self.session_high or 0), session_high)
+            if self.session_low <= 0:
+                self.session_low = session_low
+            else:
+                self.session_low = min(float(self.session_low), session_low)
             
     def get_latest_price(self):
         return self.latest_price
+
+    def get_session_open(self):
+        return float(self.session_open or 0)
+
+    def get_session_high(self):
+        return float(self.session_high or 0)
+
+    def get_session_low(self):
+        return float(self.session_low or 0)
 
     def get_current_rsi2(self):
         if len(self.prices) < 3: return 50
@@ -460,6 +640,21 @@ class RealtimeBuffer:
         if avg_down == 0: return 100
         rs = avg_up / avg_down
         return 100 - (100 / (1 + rs))
+
+
+def compute_daytrade_rebound_trigger(reference_open, atr, confirm_atr=DAYTRADE_REBOUND_CONFIRM_ATR):
+    if _is_invalid_number(reference_open) or _is_invalid_number(atr):
+        return 0.0
+    if float(reference_open) <= 0 or float(atr) <= 0:
+        return 0.0
+    return float(reference_open) + (float(atr) * float(confirm_atr))
+
+
+def has_daytrade_rebound_confirmation(current_price, reference_open, atr, confirm_atr=DAYTRADE_REBOUND_CONFIRM_ATR):
+    trigger_price = compute_daytrade_rebound_trigger(reference_open, atr, confirm_atr=confirm_atr)
+    if trigger_price <= 0:
+        return False
+    return float(current_price) >= float(trigger_price)
 
 def load_invalid_tickers():
     try:
@@ -491,26 +686,36 @@ def get_prime_tickers():
 def calculate_lot_size(current_equity, atr, sl_mult, price, dynamic_leverage, 
                        max_positions, buying_power=None, turnover=None):
     """
-    V17.0 Imperial Sizing Logic (Hardcoded Golden Rules)
-    1. Target Allocation = (Current Equity * LEVERAGE) / MAX_POSITIONS
+    Shared sizing logic.
+    1. Target Allocation = (Current Equity * dynamic leverage) / MAX_POSITIONS
     2. Shares = floor(Target Allocation / Close, unit=100)
     3. Minimum: 100 shares (skipped if less)
     """
-    # 総資産の決定 (USE_COMPOUNDINGの場合は現在資産、そうでない場合は初期資金)
+    if price <= 0 or max_positions <= 0 or dynamic_leverage <= 0:
+        return 0
+
     total_assets = current_equity if USE_COMPOUNDING else INITIAL_CASH
-    
-    # 1. Target Allocation = (現在の総資産 * LEVERAGE) / MAX_POSITIONS
-    target_allocation = (total_assets * LEVERAGE) / max_positions
-    
-    # 2. Shares = (Target Allocation / Close) -> 100株単位に切り捨て
-    shares = int(target_allocation // price)
-    final_shares = (shares // 100) * 100
-    
-    # 安全装置: 実際の購買力を超えないようにする
+    target_allocation = (total_assets * float(dynamic_leverage)) / max_positions
+    final_shares = _floor_lot(target_allocation // price)
+
     if buying_power is not None:
-        max_bp_shares = int((buying_power * 0.95) // price)
-        max_bp_shares = (max_bp_shares // 100) * 100
+        max_bp_shares = _floor_lot((buying_power * 0.95) // price)
         final_shares = min(final_shares, max_bp_shares)
 
     return final_shares
+
+
+def cap_daytrade_position_size(raw_shares, current_equity, buying_power, entry_price, stop_price):
+    shares = _floor_lot(raw_shares)
+    if shares < 100 or current_equity <= 0 or buying_power <= 0 or entry_price <= 0:
+        return 0
+
+    risk_per_share = max(float(entry_price) - float(stop_price), float(entry_price) * 0.001)
+    if risk_per_share <= 0:
+        return 0
+
+    risk_budget_shares = _floor_lot((float(current_equity) * DAYTRADE_RISK_PER_TRADE_PCT) / risk_per_share)
+    notional_cap_shares = _floor_lot((float(buying_power) * DAYTRADE_MAX_NOTIONAL_PCT) / float(entry_price))
+    capped_shares = min(shares, risk_budget_shares, notional_cap_shares)
+    return capped_shares if capped_shares >= 100 else 0
 

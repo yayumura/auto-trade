@@ -2,11 +2,23 @@ import numpy as np
 import pandas as pd
 from core.logic import (
     calculate_dynamic_leverage, calculate_lot_size, calculate_position_stops,
-    evaluate_daytrade_open_setup, score_daytrade_open_setup
+    evaluate_daytrade_open_setup, score_daytrade_open_setup,
+    is_daytrade_market_allowed,
+    get_daytrade_week_key, resolve_daytrade_weekly_leverage,
+    is_daytrade_monthly_risk_blocked,
+    resolve_daytrade_intraday_stop_mult, resolve_daytrade_intraday_target_mult,
+    resolve_daytrade_buying_power,
+    cap_daytrade_position_size,
+    DAYTRADE_MAX_DAILY_LOSS_PCT, DAYTRADE_MAX_GAP, DAYTRADE_MAX_RSI2,
+    DAYTRADE_MIN_PREV_DAY_DROP_PCT, DAYTRADE_MIN_SETUP_SCORE,
+    DAYTRADE_MIN_PREV_DAY_RETURN_PCT, DAYTRADE_MAX_PREV_DAY_RETURN_PCT,
+    DAYTRADE_MIN_TURNOVER,
 )
 from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD, SMA_LONG_PERIOD,
-    SLIPPAGE, BREADTH_THRESHOLD, TAX_RATE
+    SLIPPAGE, BREADTH_THRESHOLD, TAX_RATE,
+    BEAR_GAP_LIMIT, LEVERAGE_RATE, MAX_POSITIONS, STOP_LOSS_ATR, TAKE_PROFIT_ATR,
+    MIN_PRICE, MAX_PRICE,
 )
 from core.monthly_rotation_strategy import (
     MonthlyRotationStrategyConfig,
@@ -18,11 +30,9 @@ from core.monthly_rotation_strategy import (
 )
 from core.jquants_margin_cache import get_eligible_margin_codes_for_date
 
-MIN_SETUP_SCORE = 4.0
-MAX_DAILY_LOSS_PCT = 0.02
-RISK_PER_TRADE_PCT = 0.005
-MAX_NOTIONAL_PER_TRADE_PCT = 0.33
-MIN_PREV_DAY_DROP_PCT = 0.02
+MIN_SETUP_SCORE = DAYTRADE_MIN_SETUP_SCORE
+MAX_DAILY_LOSS_PCT = DAYTRADE_MAX_DAILY_LOSS_PCT
+MIN_PREV_DAY_DROP_PCT = DAYTRADE_MIN_PREV_DAY_DROP_PCT
 
 
 def _floor_lot(shares):
@@ -88,6 +98,12 @@ def _resolve_intraday_exit(entry_price, open_price, high_price, low_price, close
     if target_hit:
         return target_price, "intraday_target"
     return close_price, "close_exit"
+
+
+def _resolve_execution_slippage(rate, override):
+    if override is None:
+        return float(rate)
+    return float(override)
 
 
 def run_backtest_v17_swing(univ_indices, bundle_np, timeline, breadth_ratio,
@@ -833,18 +849,24 @@ def run_backtest_v19_monthly_rotation(univ_indices, bundle_np, timeline, breadth
     return float(final), trade_count, monthly_assets, trade_results
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
-                               initial_cash=1000000, max_pos=3,
-                               sl_mult=3.0, tp_mult=20.0, leverage_rate=2.0, breadth_threshold=0.50,
+                               initial_cash=1000000, max_pos=MAX_POSITIONS,
+                               sl_mult=STOP_LOSS_ATR, tp_mult=TAKE_PROFIT_ATR,
+                               leverage_rate=LEVERAGE_RATE, breadth_threshold=BREADTH_THRESHOLD,
                                slippage=SLIPPAGE, use_sma_exit=True,
                                exit_buffer=0.975, max_hold_days=1,
-                               liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
-                                atr_trail_mult=3.0, rsi_threshold=30.0,
+                               liquidity_limit=0.025, bull_gap_limit=DAYTRADE_MAX_GAP,
+                                bear_gap_limit=BEAR_GAP_LIMIT,
+                                atr_trail_mult=3.0, rsi_threshold=DAYTRADE_MAX_RSI2,
+                                entry_slippage=None, exit_slippage=None,
+                                explicit_trade_cost=0.0, profit_tax_rate=0.0,
+                                return_daily_stats=False,
                                 verbose=False):
     """
     Day-trade production backtest:
     - Signal is evaluated from prior-day weakness and today's gap-up rebound.
-    - Entry at today's Open with buy slippage.
-    - Mandatory exit at today's Close with sell slippage.
+    - Entry and exit execution slippage are modeled separately from explicit fees.
+    - Explicit fees default to zero so general day-trade margin assumptions can
+      match brokers that waive same-day financing / borrow costs.
     - No overnight positions are carried.
     """
     T = len(timeline)
@@ -852,6 +874,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     trade_count = 0
     monthly_assets = {}
     trade_results = []
+    daily_stats = {}
     
     close_np = bundle_np['Close']
     open_np = bundle_np['Open']
@@ -862,11 +885,20 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     rs_alpha_np = bundle_np.get('RS_Alpha', np.zeros_like(close_np))
     sma_med_np = bundle_np.get(f'SMA{SMA_MEDIUM_PERIOD}', np.zeros_like(close_np))
     turnover_np = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12)
-    sma_long_np = bundle_np.get(f'SMA{SMA_LONG_PERIOD}', np.zeros_like(close_np))
+    sma_trend_np = bundle_np.get(f'SMA{SMA_TREND_PERIOD}', np.zeros_like(close_np))
+    buy_slippage = _resolve_execution_slippage(slippage, entry_slippage)
+    sell_slippage = _resolve_execution_slippage(slippage, exit_slippage)
+    market_idx = -1
+    for idx_t, ticker in enumerate(bundle_np.get("tickers", [])):
+        if ticker == "1321.T":
+            market_idx = idx_t
+            break
     
     current_month = ""
     month_start_equity = initial_cash
     month_done = False
+    current_week = ""
+    week_start_equity = initial_cash
 
     for i in range(2, T):
         curr_time = timeline[i]
@@ -876,22 +908,55 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             month_start_equity = cash
             month_done = False 
 
-        total_equity = cash
-        month_drawdown = (total_equity / month_start_equity) - 1.0 if month_start_equity > 0 else 0
+        week_key = get_daytrade_week_key(curr_time)
+        if week_key != current_week:
+            current_week = week_key
+            week_start_equity = float(cash)
 
-        if month_drawdown <= -0.15:
+        day_key = curr_time.strftime('%Y-%m-%d')
+        day_start_equity = float(cash)
+        day_trade_count = 0
+
+        total_equity = cash
+        if is_daytrade_monthly_risk_blocked(month_start_equity, total_equity):
             month_done = True
 
         if i + 1 >= T or month_done:
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
-        if breadth_ratio[i] < breadth_threshold:
+        market_open = open_np[i, market_idx] if market_idx >= 0 else np.nan
+        prev_market_sma_trend = sma_trend_np[i - 1, market_idx] if market_idx >= 0 else np.nan
+        if not is_daytrade_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        ):
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
         dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
+        dynamic_lev = resolve_daytrade_weekly_leverage(
+            base_leverage=dynamic_lev,
+            week_start_equity=week_start_equity,
+            current_equity=cash,
+        )
         if dynamic_lev <= 0:
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
@@ -899,7 +964,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         for s_idx in univ_indices:
             t_close = close_np[i, s_idx]
             t_open = open_np[i, s_idx]
-            t_sma_med = sma_med_np[i, s_idx]
+            t_sma_med = sma_med_np[i - 1, s_idx]
             prev_close = close_np[i - 1, s_idx]
             prev_prev_close = close_np[i - 2, s_idx]
             prev_open = open_np[i - 1, s_idx]
@@ -908,34 +973,39 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_turnover = turnover_np[i - 1, s_idx]
             prev_rsi2 = rsi2_np[i - 1, s_idx]
             t_rs = rs_alpha_np[i - 1, s_idx]
-            prev_sma_long = sma_long_np[i - 1, s_idx]
-            prev_prev_sma_long = sma_long_np[i - 2, s_idx]
+            prev_sma_trend = sma_trend_np[i - 1, s_idx]
 
             raw_values = [
                 t_close, t_open, prev_close, prev_prev_close, prev_open,
                 prev_low, prev_atr, t_turnover, t_sma_med, prev_rsi2,
-                prev_sma_long, prev_prev_sma_long
+                prev_sma_trend
             ]
             if np.any(np.isnan(raw_values)):
                 continue
             if prev_atr <= 0 or t_open <= 0 or t_close <= 0 or prev_close <= 0:
                 continue
+            if t_open < MIN_PRICE or t_open > MAX_PRICE:
+                continue
             if t_turnover <= 0:
+                continue
+            if t_turnover < DAYTRADE_MIN_TURNOVER:
                 continue
             if liquidity_limit > 0 and (t_open * 100.0) > (t_turnover * liquidity_limit):
                 continue
-            if prev_close <= prev_sma_long:
-                continue
-            if prev_sma_long < prev_prev_sma_long:
+            if prev_close <= prev_sma_trend:
                 continue
 
-            prev_day_drop = 1.0 - (prev_close / prev_prev_close)
-            if prev_day_drop < max(bear_gap_limit, MIN_PREV_DAY_DROP_PCT):
+            prev_day_return = (prev_close / prev_prev_close) - 1.0
+            if (
+                prev_day_return < DAYTRADE_MIN_PREV_DAY_RETURN_PCT
+                or prev_day_return > DAYTRADE_MAX_PREV_DAY_RETURN_PCT
+            ):
                 continue
 
             metrics = evaluate_daytrade_open_setup(
                 t_open, prev_close, t_sma_med, breadth_ratio[i],
-                prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low, prev_rsi2=prev_rsi2
+                prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low,
+                prev_rsi2=prev_rsi2, rs_alpha=t_rs, prev_prev_close=prev_prev_close
             )
             if metrics is None:
                 continue
@@ -971,8 +1041,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if candidates:
             candidates.sort(key=lambda item: item["score"], reverse=True)
             selected = candidates[:max_pos]
-            day_start_equity = cash
-            day_buying_power = day_start_equity * dynamic_lev
+            day_buying_power = resolve_daytrade_buying_power(
+                current_equity=day_start_equity,
+                account_cash=cash,
+                dynamic_leverage=dynamic_lev,
+            )
             committed_capital = 0.0
             day_pnl = 0.0
             day_loss_limit = day_start_equity * MAX_DAILY_LOSS_PCT
@@ -980,13 +1053,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if -day_pnl >= day_loss_limit:
                     break
 
-                real_buy = candidate["open"] * (1.0 + slippage)
+                real_buy = candidate["open"] * (1.0 + buy_slippage)
                 remaining_buying_power = max(0.0, day_buying_power - committed_capital)
                 if remaining_buying_power <= 0:
                     break
 
-                effective_sl_mult = max(0.6, min(1.2, sl_mult / 5.0))
-                effective_tp_mult = max(1.0, min(2.0, tp_mult / 20.0))
+                effective_sl_mult = resolve_daytrade_intraday_stop_mult(sl_mult)
+                effective_tp_mult = resolve_daytrade_intraday_target_mult(tp_mult)
                 stop_price = max(0.01, real_buy - (candidate["atr"] * effective_sl_mult))
                 target_price = real_buy + (candidate["atr"] * effective_tp_mult)
 
@@ -1003,13 +1076,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if shares < 100:
                     continue
 
-                risk_per_share = max(real_buy - stop_price, real_buy * slippage)
-                if risk_per_share <= 0:
-                    continue
-
-                risk_budget_shares = _floor_lot((day_start_equity * RISK_PER_TRADE_PCT) / risk_per_share)
-                notional_cap_shares = _floor_lot((remaining_buying_power * MAX_NOTIONAL_PER_TRADE_PCT) / real_buy)
-                shares = min(shares, risk_budget_shares, notional_cap_shares)
+                shares = cap_daytrade_position_size(
+                    raw_shares=shares,
+                    current_equity=day_start_equity,
+                    buying_power=remaining_buying_power,
+                    entry_price=real_buy,
+                    stop_price=stop_price,
+                )
                 if shares < 100:
                     continue
 
@@ -1026,16 +1099,30 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     stop_price=stop_price,
                     target_price=target_price,
                 )
-                real_sell = raw_exit * (1.0 - slippage)
-                pnl = (real_sell - real_buy) * shares
+                real_sell = raw_exit * (1.0 - sell_slippage)
+                gross_pnl = (real_sell - real_buy) * shares
+                explicit_cost = float(explicit_trade_cost)
+                net_pnl, tax = _apply_profit_tax(
+                    gross_pnl - explicit_cost,
+                    tax_rate=profit_tax_rate,
+                )
                 committed_capital += trade_notional
-                day_pnl += pnl
-                trade_results.append(pnl)
+                day_pnl += net_pnl
+                trade_results.append(net_pnl)
                 trade_count += 1
+                day_trade_count += 1
 
             cash += day_pnl
+
+        daily_stats[day_key] = {
+            "equity": float(cash),
+            "day_pnl": float(cash - day_start_equity),
+            "trade_count": int(day_trade_count),
+        }
 
         monthly_assets[current_month] = float(cash)
 
     final = float(cash)
+    if return_daily_stats:
+        return final, trade_count, monthly_assets, trade_results, daily_stats
     return final, trade_count, monthly_assets, trade_results

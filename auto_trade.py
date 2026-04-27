@@ -10,7 +10,6 @@ from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
 from core.kabu_launcher import ensure_kabu_station_running, terminate_kabu_station, check_api_health
-from core.utils import calculate_effective_age
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -43,11 +42,12 @@ from core.config import (
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE,
     EXECUTION_LOG_FILE, TARGET_MARKETS,
     DEBUG_MODE, TRADE_MODE,
-    LEVERAGE_RATE, JST, COOLING_DAYS, BULL_GAP_LIMIT,
-    SMA_MEDIUM_PERIOD,
-    SLIPPAGE_RATE, load_insider_exclusion_codes
+    LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
+    SMA_LONG_PERIOD, MAX_POSITIONS,
+    SLIPPAGE_RATE, STOP_LOSS_ATR, load_insider_exclusion_codes,
+    INTRADAY_SNAPSHOT_FILE,
 )
-from core.file_io import atomic_write_json
+from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
 
 # --- インスタンスロック機構 ---
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
@@ -88,19 +88,164 @@ def release_lock():
 from core.logic import (
     detect_market_regime,
     load_invalid_tickers, normalize_tick_size,
-    RealtimeBuffer, calculate_dynamic_leverage
+    RealtimeBuffer, calculate_dynamic_leverage,
+    calculate_all_technicals_v12, get_prime_tickers,
+    manage_positions_live, select_best_candidates,
+    calculate_lot_size, cap_daytrade_position_size,
+    get_daytrade_week_key, resolve_daytrade_weekly_leverage,
+    is_daytrade_monthly_risk_blocked,
+    resolve_daytrade_intraday_stop_mult,
+    resolve_daytrade_buying_power,
 )
-from core.monthly_rotation_strategy import (
-    build_rotation_live_snapshot,
-    build_rotation_entry_plan,
-    build_rotation_position_record,
-    build_rotation_rebalance_plan,
-    build_rotation_watchlist,
-    compute_rotation_order_size,
-    PROD_MONTHLY_ROTATION_CONFIG,
-    mark_rotation_portfolio,
-)
+from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
+
+
+def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
+    watch_codes = [str(code) for code in watchlist]
+    portfolio_codes = [str(position["code"]) for position in portfolio]
+    registration_targets = list(dict.fromkeys((watch_codes + portfolio_codes + [market_index_code])[:50]))
+    return {
+        "watchlist": watch_codes,
+        "portfolio_codes": portfolio_codes,
+        "registration_targets": registration_targets,
+        "current_targets": set(registration_targets),
+    }
+
+
+def merge_account_state(account, persisted_state):
+    merged = dict(persisted_state or {})
+    merged.update(account or {})
+    return merged
+
+
+def ensure_daytrade_week_state(account, total_equity, server_datetime):
+    week_key = get_daytrade_week_key(server_datetime)
+    if account.get("daytrade_current_week") != week_key or float(account.get("daytrade_week_start_equity", 0) or 0) <= 0:
+        account["daytrade_current_week"] = week_key
+        account["daytrade_week_start_equity"] = float(total_equity)
+    return account
+
+
+def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None):
+    latest_close_map = latest_close_map or {}
+    updated = []
+    for position in portfolio:
+        pos = dict(position)
+        code = str(pos["code"])
+        current_price = float(pos.get("current_price", pos["buy_price"]))
+        if realtime_buffers and code in realtime_buffers:
+            rt_price = realtime_buffers[code].get_latest_price()
+            if rt_price and rt_price > 0:
+                current_price = rt_price
+        elif code in latest_close_map and latest_close_map[code] > 0:
+            current_price = latest_close_map[code]
+        pos["current_price"] = round(float(current_price), 1)
+        pos["highest_price"] = round(max(float(pos.get("highest_price", pos["buy_price"])), float(current_price)), 1)
+        updated.append(pos)
+    return updated
+
+
+def build_daytrade_position_record(item, executed_price, shares, buy_time):
+    return {
+        "code": str(item["code"]),
+        "name": item.get("name", str(item["code"])),
+        "buy_time": buy_time,
+        "buy_price": round(float(executed_price), 1),
+        "highest_price": round(float(executed_price), 1),
+        "current_price": round(float(executed_price), 1),
+        "shares": int(shares),
+        "buy_atr": float(item.get("atr", 0.0)),
+    }
+
+
+def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
+    bundle = calculate_all_technicals_v12(data_df)
+    close = bundle["Close"].iloc[-1]
+    sma_long = bundle[f"SMA{SMA_LONG_PERIOD}"].iloc[-1]
+    prime_ref = set(get_prime_tickers())
+    elite_cols = [ticker for ticker in close.index if ticker in prime_ref and ticker in sma_long.index]
+    breadth_val = 0.0
+    if elite_cols:
+        breadth_val = float(np.mean([
+            float(close[ticker]) > float(sma_long[ticker])
+            for ticker in elite_cols
+            if pd.notna(close[ticker]) and pd.notna(sma_long[ticker])
+        ]))
+
+    top_candidates = select_best_candidates(
+        data_df=data_df,
+        targets=targets,
+        symbols_df=symbols_df,
+        regime=regime,
+        breadth_val=breadth_val,
+    )
+    latest_close_map = {
+        str(col).replace(".T", ""): float(close[col])
+        for col in close.index
+        if pd.notna(close[col])
+    }
+    return {
+        "top_candidates": top_candidates,
+        "breadth": breadth_val,
+        "latest_close_map": latest_close_map,
+    }
+
+
+def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffers):
+    original_positions = [dict(position) for position in portfolio]
+    updated_portfolio, sell_actions = manage_positions_live(
+        portfolio=portfolio,
+        broker=broker,
+        is_simulation=is_sim,
+        realtime_buffers=realtime_buffers,
+    )
+    if is_sim and original_positions:
+        for position in original_positions:
+            current_price = float(position.get("current_price", position["buy_price"]))
+            sell_price = current_price * (1.0 - SLIPPAGE_RATE)
+            shares = int(position["shares"])
+            pnl = (sell_price - float(position["buy_price"])) * shares
+            account["cash"] = round(float(account["cash"]) + (sell_price * shares), 4)
+            broker.log_trade({
+                "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                "code": position["code"],
+                "name": position.get("name", position["code"]),
+                "side": "DAYTRADE_SELL",
+                "shares": shares,
+                "buy_price": round(float(position["buy_price"]), 4),
+                "sell_price": round(float(sell_price), 4),
+                "pnl": round(float(pnl), 4),
+                "holding_days": 0,
+                "note": "daytrade_flatten",
+            })
+    return updated_portfolio, sell_actions, account
+
+
+def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
+    if not boards:
+        return
+    rows = []
+    timestamp = snapshot_time.strftime('%Y-%m-%d %H:%M:%S')
+    for code, board in boards.items():
+        buffer = realtime_buffers.get(str(code))
+        rows.append({
+            "time": timestamp,
+            "code": str(code),
+            "price": board.get("price"),
+            "open": board.get("open"),
+            "high": board.get("high"),
+            "low": board.get("low"),
+            "prev_close": board.get("prev_close"),
+            "bid": board.get("bid"),
+            "ask": board.get("ask"),
+            "volume": board.get("volume"),
+            "session_open": None if buffer is None else buffer.get_session_open(),
+            "session_high": None if buffer is None else buffer.get_session_high(),
+            "session_low": None if buffer is None else buffer.get_session_low(),
+        })
+    append_csv_rows(INTRADAY_SNAPSHOT_FILE, rows)
+    rotate_csv_if_large(INTRADAY_SNAPSHOT_FILE, max_size_mb=20)
 
 # --- シグナルハンドラ ---
 def handle_shutdown(signum, frame):
@@ -215,7 +360,7 @@ def _main_exec():
             print(f"⚠️ Error loading JQuants Cache: {e}")
 
     # --- [Hybrid Monitoring State] ---
-    watchlist = []
+    watchlist = load_watchlist()
     special_quote_watchlist = {} # { "code": item_dict }
     realtime_buffers = {}
     canceled_orders = {}
@@ -223,19 +368,21 @@ def _main_exec():
     breadth_val = 0.5    # [Parity] Market breadth (updated each scan, default neutral)
     
     # --- [Aegis Protocol State] ---
-    current_month_str = server_datetime.strftime('%Y-%m')
-    account_data = safe_read_json(ACCOUNT_FILE)
+    current_month_str = datetime.datetime.now(JST).strftime('%Y-%m')
+    account_data = safe_read_json(ACCOUNT_FILE, default={}) or {}
     month_start_equity = account_data.get('month_start_equity', 0)
     
     # 初回起動時または月替わり時に月初資産を記録
-    account = broker.get_account_balance()
+    account = merge_account_state(broker.get_account_balance(), account_data)
     initial_total = account['cash'] + sum([p.get('current_price', p['buy_price']) * p['shares'] for p in broker.get_positions()])
     if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
         month_start_equity = initial_total
-        account_data['month_start_equity'] = month_start_equity
-        account_data['current_month'] = current_month_str
-        atomic_write_json(ACCOUNT_FILE, account_data)
+        account['month_start_equity'] = month_start_equity
+        account['current_month'] = current_month_str
+        atomic_write_json(ACCOUNT_FILE, account)
         print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
+    account = ensure_daytrade_week_state(account, initial_total, datetime.datetime.now(JST))
+    atomic_write_json(ACCOUNT_FILE, account)
 
     while True:
         if os.path.exists("stop.txt"):
@@ -314,7 +461,10 @@ def _main_exec():
             except: pass
 
         try:
-            account = broker.get_account_balance()
+            account = merge_account_state(
+                broker.get_account_balance(),
+                safe_read_json(ACCOUNT_FILE, default={}) or {},
+            )
             portfolio = broker.get_positions()
         except Exception as e:
             print(f"[WARNING] 口座情報取得エラー: {e}")
@@ -323,7 +473,7 @@ def _main_exec():
 
         # --- [Step 3.2] 特注監視（特別気配・価格未定）銘柄の高頻度チェック ---
         force_scan = False
-        if special_quote_watchlist and len(portfolio) < PROD_MONTHLY_ROTATION_CONFIG.max_pos:
+        if special_quote_watchlist and len(portfolio) < MAX_POSITIONS:
             print(f"📡 [HighFreq] 特別気配/価格未定の {len(special_quote_watchlist)} 銘柄を再チェックします...")
             sq_codes = list(special_quote_watchlist.keys())
             try:
@@ -342,11 +492,11 @@ def _main_exec():
         actions_taken = []
         trade_logs = [] 
 
+        boards = {}
         try:
-            watch_plan = build_rotation_watchlist(
-                candidates=[{"code": code} for code in watchlist],
+            watch_plan = build_daytrade_watch_plan(
+                watchlist=watchlist,
                 portfolio=portfolio,
-                max_pos=PROD_MONTHLY_ROTATION_CONFIG.max_pos,
             )
             current_targets = watch_plan["current_targets"]
             already_tracked = set(realtime_buffers.keys())
@@ -382,9 +532,18 @@ def _main_exec():
                     price = b_info.get('price')
                     vol = b_info.get('volume', 0)
                     if code in realtime_buffers:
-                        realtime_buffers[code].update(price, vol, server_datetime)
+                        realtime_buffers[code].update(
+                            price,
+                            vol,
+                            server_datetime,
+                            open_price=b_info.get('open'),
+                            high_price=b_info.get('high'),
+                            low_price=b_info.get('low'),
+                        )
         except Exception as e:
             print(f"[WARNING] バッファ同期エラー: {e}")
+        if boards:
+            record_intraday_snapshots(server_datetime, boards, realtime_buffers)
 
         try:
             # [V131.1 Aegis Enhancement] Regime Filter & Trend Health
@@ -395,15 +554,20 @@ def _main_exec():
 
         # Calculate Monthly Drawdown for Aegis Protocol
         current_total = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+        account = ensure_daytrade_week_state(account, current_total, server_datetime)
         month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
+        monthly_risk_blocked = is_daytrade_monthly_risk_blocked(month_start_equity, current_total)
         
-        print(f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} | MonthDD: {month_drawdown:+.2%}")
+        print(
+            f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} "
+            f"| MonthDD: {month_drawdown:+.2%}"
+        )
         
         latest_close_map = {
             str(code).replace(".T", ""): float(info.get("Close", 0) or 0)
             for code, info in jp_cache.items()
         }
-        portfolio = mark_rotation_portfolio(
+        portfolio = mark_daytrade_portfolio(
             portfolio,
             realtime_buffers=realtime_buffers,
             latest_close_map=latest_close_map,
@@ -415,7 +579,7 @@ def _main_exec():
         broker.save_portfolio(portfolio)
 
         should_scan = True
-        if month_drawdown <= -0.15 and not portfolio: should_scan = False  # Block fresh entries, but still allow rebalance/liquidation.
+        if monthly_risk_blocked and not portfolio: should_scan = False  # Block fresh entries, but still allow liquidation.
         elif not should_scan_override: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= datetime.time(14, 0) and not DEBUG_MODE: should_scan = False
@@ -424,55 +588,75 @@ def _main_exec():
              if time.time() - last_scan_time < SCAN_INTERVAL_SEC:
                   should_scan = False
 
+        if phase in [MarketPhase.AFTERNOON, MarketPhase.CLOSING_TIME] and portfolio:
+            portfolio, close_actions, account = close_daytrade_positions(
+                portfolio=portfolio,
+                account=account,
+                broker=broker,
+                is_sim=is_sim,
+                realtime_buffers=realtime_buffers,
+            )
+            actions_taken.extend(close_actions)
+            watchlist = []
+            save_watchlist(watchlist)
+            broker.save_account(account)
+            broker.save_portfolio(portfolio)
+
         if should_scan:
             last_scan_time = time.time()
-            print("\n=> 🔍 定期スキャン処理（銘柄探索）を開始します...")
-            
+            print("\n=> 🔍 デイトレード定期スキャン処理を開始します...")
             should_continue_scan = True
-            # [V17.0 Imperial Sync] Use JQuants Cache instead of yfinance
+            dynamic_lev = 0.0
+            top_candidates = []
             try:
                 if os.path.exists(JQUANTS_CACHE_FILE):
                     with open(JQUANTS_CACHE_FILE, 'rb') as f:
                         data_df = pickle.load(f)
-                    
-                    # Clean MultiIndex columns
+
                     new_cols = []
                     for col in data_df.columns:
                         ticker, field = col[0], col[1]
-                        if isinstance(field, tuple): field = field[0]
+                        if isinstance(field, tuple):
+                            field = field[0]
                         new_cols.append((ticker, field))
                     data_df.columns = pd.MultiIndex.from_tuples(new_cols)
-                    
-                    # Filtering targets
+
                     df_symbols = pd.read_csv(DATA_FILE)
                     if '市場・商品区分' in df_symbols.columns:
                         df_symbols = df_symbols[df_symbols['市場・商品区分'].isin(TARGET_MARKETS)]
-                    
+
                     invalid_tickers = load_invalid_tickers()
                     if invalid_tickers:
                         df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(invalid_tickers)]
-                    
+
                     insider_codes = load_insider_exclusion_codes()
                     if insider_codes:
                         df_symbols = df_symbols[~df_symbols['コード'].astype(str).isin(insider_codes)]
-                    
+
                     held_codes = [str(p['code']) for p in portfolio]
                     targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
-                    
-                    snapshot = build_rotation_live_snapshot(
+                    snapshot = compute_daytrade_snapshot(
                         data_df=data_df,
                         symbols_df=df_symbols,
-                        held_codes=held_codes,
-                        config=PROD_MONTHLY_ROTATION_CONFIG,
+                        targets=targets,
+                        regime=regime,
                     )
-                    breadth_val = snapshot["breadth"] if snapshot["breadth"] > 0 else 0.5
-                    print(f"📊 [Rotation] Market Breadth (Prime): {breadth_val:.1%}")
-
+                    breadth_val = snapshot["breadth"] if snapshot["breadth"] > 0 else breadth_val
                     dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
-                    if not snapshot["is_bull"] or dynamic_lev <= 0:
-                        print("🛡️ [Safeguard] Shared monthly rotation filter is not in entry mode.")
-
-                    print(f"✅ Scanning {len(targets)} tickers from JQuants Cache (Leverage: {dynamic_lev}x).")
+                    dynamic_lev = resolve_daytrade_weekly_leverage(
+                        base_leverage=dynamic_lev,
+                        week_start_equity=account.get("daytrade_week_start_equity", current_total),
+                        current_equity=current_total,
+                    )
+                    latest_close_snapshot = snapshot["latest_close_map"]
+                    portfolio = mark_daytrade_portfolio(
+                        portfolio,
+                        realtime_buffers=realtime_buffers,
+                        latest_close_map=latest_close_snapshot,
+                    )
+                    top_candidates = snapshot["top_candidates"]
+                    print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")
+                    print(f"✅ Shared daytrade scan found {len(top_candidates)} candidates.")
                 else:
                     print("❌ JQuants Cache not found. Skipping scan.")
                     should_continue_scan = False
@@ -480,219 +664,103 @@ def _main_exec():
                 print(f"[WARNING] JQuants Cache 読込エラー: {e}")
                 should_continue_scan = False
 
-            if should_continue_scan:
-                # [Optimization] We cannot fetch 3400+ board prices sequentially via kabucom REST API (exhausts quota and takes 15 mins).
-                # We rely purely on highly accurate JQuants EOD cache for the initial heavy Perfect Order scan.
-                # Live validation is done on the top 50 candidates in the next step.
-                if not is_sim:
-                     print("🚀 [OMS] 一次スキャンはJQuantsキャッシュ(EOD)速度を優先して実行します...")
-                
-                try:
-                    last_update = data_df.index[-1]
-                    if last_update.tzinfo is None: last_update = last_update.replace(tzinfo=JST)
-                    age = calculate_effective_age(last_update, datetime.datetime.now(JST))
-                    if age > 3600:
-                        print(f"⚠️ [Data Delay Warning] Acquired price data is too old (effective delay: {age/60:.1f} minutes).")
-                except: pass
+            if should_continue_scan and dynamic_lev > 0:
+                watchlist = [str(item["code"]) for item in top_candidates[:max(5, MAX_POSITIONS * 4)]]
+                save_watchlist(watchlist)
 
-            if should_continue_scan:
-                top_candidates = snapshot["top_candidates"]
-                rotation_breadth = snapshot["breadth"]
-                rotation_bull = snapshot["is_bull"]
-                if rotation_bull:
-                    breadth_val = rotation_breadth
-                    dynamic_lev = PROD_MONTHLY_ROTATION_CONFIG.leverage_rate
-                latest_close_snapshot = snapshot["latest_close_map"]
-                sma20_snapshot = snapshot["sma20_map"]
-                portfolio = mark_rotation_portfolio(
-                    portfolio,
-                    realtime_buffers=realtime_buffers,
-                    latest_close_map=latest_close_snapshot,
-                )
+                selected_candidates = []
+                max_to_buy = MAX_POSITIONS - len(portfolio)
+                for item in top_candidates:
+                    if len(selected_candidates) >= max_to_buy:
+                        break
 
-                rebalance_plan = build_rotation_rebalance_plan(
-                    portfolio=portfolio,
-                    snapshot=snapshot,
-                    config=PROD_MONTHLY_ROTATION_CONFIG,
-                )
-                rebalanced_portfolio = list(rebalance_plan["keep_positions"])
-                for p in rebalance_plan["exit_positions"]:
+                    if not is_sim and hasattr(broker, 'get_board_data'):
+                        try:
+                            board = broker.get_board_data([item['code']])
+                            b_info = board.get(str(item['code']).replace(".T", ""))
+                            if b_info:
+                                c_price = b_info.get('price')
+                                p_close = b_info.get('prev_close', item['price'])
+                                if not c_price or c_price == 0:
+                                    special_quote_watchlist[str(item['code'])] = item
+                                    continue
+                                gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
+                                if gap_pct < -0.02 or abs(gap_pct) > BULL_GAP_LIMIT:
+                                    continue
+                                item['price'] = c_price
+                        except Exception as e:
+                            print(f"[WARNING] 板情報チェック中のエラー: {e}")
 
-                    code = str(p["code"])
-                    shares = int(p["shares"])
-                    current_price = float(p.get("current_price", p["buy_price"]))
-
-                    if is_sim:
-                        sell_price = current_price * (1.0 - SLIPPAGE_RATE)
-                        pnl = (sell_price - float(p["buy_price"])) * shares
-                        account["cash"] = round(float(account["cash"]) + (sell_price * shares), 4)
-                        broker.log_trade({
-                            "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                            "code": code,
-                            "name": p.get("name", code),
-                            "side": "ROTATION_SELL",
-                            "shares": shares,
-                            "buy_price": round(float(p["buy_price"]), 4),
-                            "sell_price": round(float(sell_price), 4),
-                            "pnl": round(float(pnl), 4),
-                            "holding_days": 0,
-                            "note": "monthly_rotation_exit",
-                        })
-                        actions_taken.append(f"SELL {code} - Monthly rotation exit (@{sell_price:,.1f})")
-                    else:
-                        details = broker.execute_chase_order(code, shares, side="1")
-                        if details and details.get("State") in [6, 7]:
-                            exec_qty = int(details.get("Qty", shares))
-                            exec_price = float(details.get("Price", current_price)) or current_price
-                            if exec_qty < shares:
-                                remainder = dict(p)
-                                remainder["shares"] = shares - exec_qty
-                                rebalanced_portfolio.append(remainder)
-                            actions_taken.append(f"SELL {code} - Monthly rotation exit (@{exec_price:,.1f})")
-                        else:
-                            rebalanced_portfolio.append(p)
+                    news = get_recent_news(item['code'], item['name'])
+                    if news and news != "ニュースなし":
+                        is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
+                        if not is_safe:
+                            print(f"🚫 [AI Filter] {item['code']} skipped: {reason}")
                             continue
 
-                portfolio = rebalanced_portfolio
-                broker.save_account(account)
-                broker.save_portfolio(portfolio)
+                    selected_candidates.append(item)
 
-                if not top_candidates:
-                    should_continue_scan = False
-                else:
-                    watch_plan = build_rotation_watchlist(
-                        candidates=top_candidates,
-                        portfolio=portfolio,
-                        max_pos=PROD_MONTHLY_ROTATION_CONFIG.max_pos,
+                current_exposure = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+                day_equity = account['cash'] + current_exposure
+                day_buying_power = resolve_daytrade_buying_power(
+                    current_equity=day_equity,
+                    account_cash=account['cash'],
+                    dynamic_leverage=dynamic_lev,
+                    current_exposure=current_exposure,
+                )
+                for item in selected_candidates:
+                    buy_price = normalize_tick_size(float(item['price']), is_buy=True)
+                    stop_mult = resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)
+                    stop_price = max(0.01, buy_price - (float(item.get('atr', 0.0)) * stop_mult))
+                    shares = calculate_lot_size(
+                        current_equity=day_equity,
+                        atr=float(item.get('atr', 0.0)),
+                        sl_mult=5.0,
+                        price=buy_price,
+                        dynamic_leverage=dynamic_lev,
+                        max_positions=MAX_POSITIONS,
+                        buying_power=day_buying_power,
                     )
-                    watchlist = watch_plan["watchlist"]
-                    realtime_buffers = {}
-                    empty_df = pd.DataFrame()
-                    for code in watchlist:
-                        realtime_buffers[code] = RealtimeBuffer(code, empty_df)
-                    for p in portfolio:
-                        c = str(p['code'])
-                        if c not in realtime_buffers:
-                            realtime_buffers[c] = RealtimeBuffer(c, empty_df)
-                    if '1321' not in realtime_buffers:
-                        try:
-                            if '1321.T' in jp_cache:
-                                realtime_buffers['1321'] = RealtimeBuffer('1321', None)
-                                realtime_buffers['1321'].latest_price = jp_cache['1321.T'].get('Close', 0)
-                        except:
-                            pass
-                    if not is_sim:
-                        broker.unregister_all()
-                        broker.register_symbols(watch_plan["registration_targets"])
+                    shares = cap_daytrade_position_size(
+                        raw_shares=shares,
+                        current_equity=day_equity,
+                        buying_power=day_buying_power,
+                        entry_price=buy_price,
+                        stop_price=stop_price,
+                    )
+                    if shares < 100:
+                        continue
 
-            if should_continue_scan and rotation_bull:
-                print(f"\n--- AI Qualitative Filter Check ---")
-                scan_targets = top_candidates
-                num_filled = 0
-                max_to_buy = PROD_MONTHLY_ROTATION_CONFIG.max_pos - len(portfolio)
-                
-                if max_to_buy <= 0:
-                    should_continue_scan = False
-                else:
-                    selected_candidates = []
-                    for item in scan_targets:
-                        if len(selected_candidates) >= max_to_buy:
-                            break
-                        
-                        # 1. 特別気配チェック
-                        if not is_sim and hasattr(broker, 'get_board_data'):
-                            try:
-                                board = broker.get_board_data([item['code']])
-                                b_info = board.get(str(item['code']).replace(".T", ""))
-                                if b_info:
-                                    c_price = b_info.get('price')
-                                    p_close = b_info.get('prev_close', item['price'])
-                                    if not c_price or c_price == 0:
-                                        print(f"WAIT: {item['code']} special quote or undecided. Adding to watchlist.")
-                                        special_quote_watchlist[str(item['code'])] = item
-                                        continue
-                                    gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
-                                    gap_threshold = BULL_GAP_LIMIT
-                                    if gap_pct < -0.02 or abs(gap_pct) > gap_threshold:
-                                        print(f"[Skip] {item['code']} Gap check failed: {gap_pct:.2%}")
-                                        continue
-                                    item['price'] = c_price
-                            except Exception as e:
-                                print(f"[WARNING] 板情報チェック中のエラー: {e}")
-
-                        # 2. AI定性フィルタ
-                        news = get_recent_news(item['code'], item['name'])
-                        if news and news != "ニュースなし":
-                            is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
-                            if not is_safe:
-                                print(f"🚫 [AI Filter] {item['code']} skipped: {reason}")
-                                continue
-
-                        selected_candidates.append(item)
-
-                    if not selected_candidates:
-                        should_continue_scan = False
-                    else:
-                        entry_plan = build_rotation_entry_plan(
-                            candidates=selected_candidates,
-                            portfolio=portfolio,
-                            account_cash=account['cash'],
-                            dynamic_leverage=dynamic_lev,
-                            config=PROD_MONTHLY_ROTATION_CONFIG,
-                        )
-                        target_allocations = entry_plan["target_allocations"]
-
-                        for item in entry_plan["planned_entries"]:
-
-                            p = float(item['price']) if item['price'] else 0.0
-                            a = float(item.get('atr', 0))
-                            if p <= 0 or a <= 0:
-                                continue
-
-                            buy_price = normalize_tick_size(p, is_buy=True)
-                            target_allocation = target_allocations.get(str(item['code']), 0.0)
-                            ts = compute_rotation_order_size(
-                                target_allocation=target_allocation,
-                                buy_price=buy_price,
-                                account_cash=account['cash'],
+                    if is_sim:
+                        exec_p = buy_price * (1.0 + SLIPPAGE_RATE)
+                        account['cash'] -= exec_p * shares
+                        day_buying_power = max(0.0, day_buying_power - (exec_p * shares))
+                        portfolio.append(
+                            build_daytrade_position_record(
+                                item=item,
+                                executed_price=exec_p,
+                                shares=shares,
+                                buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                             )
-                            if ts < 100:
-                                continue
-
-                            if is_sim:
-                                print(f"🛒 [BUY SIM] {item['code']} {ts} shares @ {buy_price}")
-                                exec_p = buy_price * (1.0 + SLIPPAGE_RATE)
-                                account['cash'] -= exec_p * ts
-                                portfolio.append(
-                                    build_rotation_position_record(
-                                        item=item,
-                                        executed_price=exec_p,
-                                        shares=ts,
-                                        buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                    )
+                        )
+                        actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                    else:
+                        details = broker.execute_chase_order(item['code'], shares, side="2", atr=float(item.get('atr', 0.0)))
+                        if details and details.get('State') in [6, 7]:
+                            actual_qty = int(details.get('Qty', 0))
+                            exec_p = float(details.get('Price', 0)) or buy_price
+                            portfolio.append(
+                                build_daytrade_position_record(
+                                    item=item,
+                                    executed_price=exec_p,
+                                    shares=actual_qty,
+                                    buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                                 )
-                                num_filled += 1
-                            else:
-                                print(f"🚀 [OMS] Chase: {item['code']} ({ts} shares)")
-                                details = broker.execute_chase_order(item['code'], ts, side="2", atr=a)
-                                if details and details.get('State') in [6, 7]:
-                                    actual_qty = int(details.get('Qty', 0))
-                                    exec_p = float(details.get('Price', 0)) or buy_price
-                                    if not broker.is_production: account['cash'] -= exec_p * actual_qty
+                            )
+                            actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
 
-                                    portfolio.append(
-                                        build_rotation_position_record(
-                                            item=item,
-                                            executed_price=exec_p,
-                                            shares=actual_qty,
-                                            buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                        )
-                                    )
-                                    num_filled += 1
-
-                            if hasattr(broker, 'save_portfolio'): broker.save_portfolio(portfolio)
-                            if hasattr(broker, 'save_account'): broker.save_account(account)
-                            if item['code'] in watchlist: watchlist.remove(item['code'])
+                    broker.save_portfolio(portfolio)
+                    broker.save_account(account)
 
         summary_record = {
             "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
@@ -703,12 +771,14 @@ def _main_exec():
             "total_assets_yen": account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
             "regime": regime
         }
-        if hasattr(broker, 'log_execution_summary'): broker.log_execution_summary(summary_record)
+        if hasattr(broker, 'log_execution_summary'):
+            broker.log_execution_summary(summary_record)
 
         elapsed = time.time() - loop_start_time
-        sleep_time = max( MONITOR_INTERVAL_SEC - elapsed, 5.0)
+        sleep_time = max(MONITOR_INTERVAL_SEC - elapsed, 5.0)
         print(f"\nNext loop in {sleep_time:.1f}s...")
         time.sleep(sleep_time)
+        continue
 
 if __name__ == "__main__":
     main()

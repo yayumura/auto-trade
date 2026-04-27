@@ -69,6 +69,18 @@ def atomic_write_csv(path, df):
             os.remove(temp_path)
         raise e
 
+
+@retry_io()
+def append_csv_rows(path, rows):
+    if not rows:
+        return
+    path = ensure_absolute_path(path)
+    dir_name = os.path.dirname(path)
+    os.makedirs(dir_name, exist_ok=True)
+    df = pd.DataFrame(rows)
+    write_header = (not os.path.exists(path)) or os.path.getsize(path) == 0
+    df.to_csv(path, mode='a', index=False, header=write_header, encoding='utf-8-sig')
+
 @retry_io()
 def safe_read_json(path, default=None):
     path = ensure_absolute_path(path)
