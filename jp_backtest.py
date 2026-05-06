@@ -129,10 +129,12 @@ def run_jp_broad_backtest(cache_path):
         ]
         if month_rates:
             months_ge_two_thirds = sum(1 for rate in month_rates if rate >= (2.0 / 3.0))
+            months_ge_three_quarters = sum(1 for rate in month_rates if rate >= 0.75)
             print(f"AVG MONTH ACTIVE RATE: {np.mean(month_rates) * 100.0:.2f}%")
             print(f"MED MONTH ACTIVE RATE: {np.median(month_rates) * 100.0:.2f}%")
             print(f"MONTHS >= 50% ACTIVE: {sum(1 for rate in month_rates if rate >= 0.5)}/{len(month_rates)}")
             print(f"MONTHS >= 2/3 ACTIVE: {months_ge_two_thirds}/{len(month_rates)}")
+            print(f"MONTHS >= 3/4 ACTIVE: {months_ge_three_quarters}/{len(month_rates)}")
         if week_stats:
             plus_1pct_weeks = sum(
                 1
@@ -142,7 +144,7 @@ def run_jp_broad_backtest(cache_path):
             positive_weeks = sum(1 for item in week_stats.values() if item["pnl"] > 0)
             print(f"WEEKS >= +1%:  {plus_1pct_weeks}/{len(week_stats)}")
             print(f"POSITIVE WEEKS: {positive_weeks}/{len(week_stats)}")
-            print(f"TARGET CHECK:   active-month 2/3={'PASS' if month_rates and np.mean(month_rates) >= (2.0 / 3.0) else 'MISS'} | weekly +1%={'PASS' if plus_1pct_weeks == len(week_stats) else 'MISS'}")
+            print(f"TARGET CHECK:   active-month 3/4={'PASS' if month_rates and np.mean(month_rates) >= 0.75 else 'MISS'} | weekly +1%={'PASS' if plus_1pct_weeks == len(week_stats) else 'MISS'}")
     
     print("-" * 50)
     

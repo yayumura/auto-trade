@@ -1,6 +1,7 @@
 import os
 import sys
 import datetime
+import numpy as np
 import pandas as pd
 import time
 import pickle
@@ -9,7 +10,6 @@ import jpholiday
 from enum import Enum
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
-from core.kabu_launcher import ensure_kabu_station_running, terminate_kabu_station, check_api_health
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -92,9 +92,13 @@ from core.logic import (
     calculate_all_technicals_v12, get_prime_tickers,
     manage_positions_live, select_best_candidates,
     calculate_lot_size, cap_daytrade_position_size,
+    is_daytrade_inverse_setup_type,
     get_daytrade_week_key, resolve_daytrade_weekly_leverage,
+    is_daytrade_weekly_profit_guard_active,
     is_daytrade_monthly_risk_blocked,
+    resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_intraday_stop_mult,
+    resolve_daytrade_inverse_buying_power,
     resolve_daytrade_buying_power,
 )
 from core.watchlist import load_watchlist, save_watchlist
@@ -111,6 +115,12 @@ def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
         "registration_targets": registration_targets,
         "current_targets": set(registration_targets),
     }
+
+
+def is_inverse_only_candidate_set(candidates):
+    return bool(candidates) and all(
+        is_daytrade_inverse_setup_type(item.get("setup_type")) for item in candidates
+    )
 
 
 def merge_account_state(account, persisted_state):
@@ -280,6 +290,8 @@ def main():
         release_lock()
 
 def _main_exec():
+    from core.kabu_launcher import ensure_kabu_station_running, terminate_kabu_station, check_api_health
+
     # --- 【新規】kabuステーションの自動起動・ログイン ---
     if TRADE_MODE in ["KABUCOM_LIVE", "KABUCOM_TEST"]:
         if not ensure_kabu_station_running():
@@ -608,6 +620,7 @@ def _main_exec():
             should_continue_scan = True
             dynamic_lev = 0.0
             top_candidates = []
+            weekly_profit_guard_active = False
             try:
                 if os.path.exists(JQUANTS_CACHE_FILE):
                     with open(JQUANTS_CACHE_FILE, 'rb') as f:
@@ -647,6 +660,13 @@ def _main_exec():
                         base_leverage=dynamic_lev,
                         week_start_equity=account.get("daytrade_week_start_equity", current_total),
                         current_equity=current_total,
+                        current_time=server_datetime,
+                    )
+                    dynamic_lev *= resolve_daytrade_breadth_exposure_scale(breadth_val)
+                    weekly_profit_guard_active = is_daytrade_weekly_profit_guard_active(
+                        week_start_equity=account.get("daytrade_week_start_equity", current_total),
+                        current_equity=current_total,
+                        current_time=server_datetime,
                     )
                     latest_close_snapshot = snapshot["latest_close_map"]
                     portfolio = mark_daytrade_portfolio(
@@ -657,6 +677,9 @@ def _main_exec():
                     top_candidates = snapshot["top_candidates"]
                     print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")
                     print(f"✅ Shared daytrade scan found {len(top_candidates)} candidates.")
+                    if weekly_profit_guard_active:
+                        top_candidates = []
+                        print("🛡️ [DayTrade] Weekly profit guard active. Skipping new entries for late-week protection.")
                 else:
                     print("❌ JQuants Cache not found. Skipping scan.")
                     should_continue_scan = False
@@ -664,14 +687,18 @@ def _main_exec():
                 print(f"[WARNING] JQuants Cache 読込エラー: {e}")
                 should_continue_scan = False
 
-            if should_continue_scan and dynamic_lev > 0:
+            inverse_only = is_inverse_only_candidate_set(top_candidates)
+            if weekly_profit_guard_active:
+                save_watchlist([])
+            elif should_continue_scan and (dynamic_lev > 0 or inverse_only):
                 watchlist = [str(item["code"]) for item in top_candidates[:max(5, MAX_POSITIONS * 4)]]
                 save_watchlist(watchlist)
 
                 selected_candidates = []
                 max_to_buy = MAX_POSITIONS - len(portfolio)
+                max_to_review = max(5, max_to_buy * 4)
                 for item in top_candidates:
-                    if len(selected_candidates) >= max_to_buy:
+                    if len(selected_candidates) >= max_to_review:
                         break
 
                     if not is_sim and hasattr(broker, 'get_board_data'):
@@ -708,25 +735,43 @@ def _main_exec():
                     dynamic_leverage=dynamic_lev,
                     current_exposure=current_exposure,
                 )
+                inverse_day_buying_power = 0.0
+                if inverse_only:
+                    inverse_day_buying_power = resolve_daytrade_inverse_buying_power(
+                        current_equity=day_equity,
+                        account_cash=account['cash'],
+                        current_exposure=current_exposure,
+                    )
+                opened_count = 0
                 for item in selected_candidates:
+                    if opened_count >= max_to_buy:
+                        break
+
                     buy_price = normalize_tick_size(float(item['price']), is_buy=True)
-                    stop_mult = resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)
+                    stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
                     stop_price = max(0.01, buy_price - (float(item.get('atr', 0.0)) * stop_mult))
+                    candidate_buying_power = day_buying_power
+                    candidate_dynamic_lev = dynamic_lev
+                    if is_daytrade_inverse_setup_type(item.get("setup_type")):
+                        candidate_buying_power = inverse_day_buying_power
+                        candidate_dynamic_lev = 1.0
                     shares = calculate_lot_size(
                         current_equity=day_equity,
                         atr=float(item.get('atr', 0.0)),
                         sl_mult=5.0,
                         price=buy_price,
-                        dynamic_leverage=dynamic_lev,
+                        dynamic_leverage=candidate_dynamic_lev,
                         max_positions=MAX_POSITIONS,
-                        buying_power=day_buying_power,
+                        buying_power=candidate_buying_power,
                     )
                     shares = cap_daytrade_position_size(
                         raw_shares=shares,
                         current_equity=day_equity,
-                        buying_power=day_buying_power,
+                        buying_power=candidate_buying_power,
                         entry_price=buy_price,
                         stop_price=stop_price,
+                        notional_pct=item.get("notional_pct"),
+                        equity_notional_pct=item.get("equity_notional_pct"),
                     )
                     if shares < 100:
                         continue
@@ -734,7 +779,10 @@ def _main_exec():
                     if is_sim:
                         exec_p = buy_price * (1.0 + SLIPPAGE_RATE)
                         account['cash'] -= exec_p * shares
-                        day_buying_power = max(0.0, day_buying_power - (exec_p * shares))
+                        if is_daytrade_inverse_setup_type(item.get("setup_type")):
+                            inverse_day_buying_power = max(0.0, inverse_day_buying_power - (exec_p * shares))
+                        else:
+                            day_buying_power = max(0.0, day_buying_power - (exec_p * shares))
                         portfolio.append(
                             build_daytrade_position_record(
                                 item=item,
@@ -744,6 +792,7 @@ def _main_exec():
                             )
                         )
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                        opened_count += 1
                     else:
                         details = broker.execute_chase_order(item['code'], shares, side="2", atr=float(item.get('atr', 0.0)))
                         if details and details.get('State') in [6, 7]:
@@ -758,6 +807,7 @@ def _main_exec():
                                 )
                             )
                             actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                            opened_count += 1
 
                     broker.save_portfolio(portfolio)
                     broker.save_account(account)

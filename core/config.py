@@ -69,12 +69,12 @@ INTRADAY_SNAPSHOT_FILE = str(DATA_ROOT / "intraday_snapshots.csv")
 # --- Day-trade production profile ---
 USE_COMPOUNDING       = True   # ★GOLDEN: Compounding on
 MAX_POSITIONS         = 1      # Frequency profile chooses one best continuation setup per day
-LEVERAGE              = 1.30   # Aggressive day-trade profile; notional cap controls realized exposure
+LEVERAGE              = 1.25   # Balanced day-trade profile; weekly lock and sizing caps control realized exposure
 LEVERAGE_RATE         = LEVERAGE
 INITIAL_CASH          = 1000000
 
 # Strategy Core
-BREADTH_THRESHOLD     = 0.423  # Profit-biased day-trade filter while keeping monthly activity near 2/3
+BREADTH_THRESHOLD     = 0.423  # Profit-biased day-trade filter while keeping monthly activity near 3/4
 SMA20_EXIT_BUFFER     = 0.975  # ★GOLDEN: Trend Exit Buffer
 STOP_LOSS_ATR         = 3.35   # Intraday stop maps to roughly 0.67 ATR in production backtest
 TAKE_PROFIT_ATR       = 40.0   # Intraday target maps to roughly 2 ATR in production backtest

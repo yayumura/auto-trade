@@ -19,6 +19,7 @@ data/kabucom_test/
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.egg-info/
