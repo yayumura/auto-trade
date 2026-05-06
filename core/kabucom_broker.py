@@ -373,6 +373,11 @@ class KabucomBroker(BaseBroker):
                     "status": data.get('CurrentPriceStatus'),
                     "bid": data.get('BidPrice'),
                     "ask": data.get('AskPrice'),
+                    "open": data.get('OpeningPrice'),
+                    "high": data.get('HighPrice'),
+                    "low": data.get('LowPrice'),
+                    "volume": data.get('TradingVolume'),
+                    "current_price_time": data.get('CurrentPriceTime'),
                     "upper_limit": data.get('UpperLimit'),
                     "lower_limit": data.get('LowerLimit')
                 }

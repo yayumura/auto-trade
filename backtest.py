@@ -2,11 +2,52 @@ import numpy as np
 import pandas as pd
 from core.logic import (
     calculate_dynamic_leverage, calculate_lot_size, calculate_position_stops,
-    evaluate_daytrade_open_setup, score_daytrade_open_setup
+    evaluate_daytrade_open_setup, score_daytrade_open_setup,
+    evaluate_daytrade_fallback_open_setup, score_daytrade_fallback_open_setup,
+    evaluate_daytrade_strong_oversold_open_setup, score_daytrade_strong_oversold_open_setup,
+    evaluate_daytrade_catchup_open_setups, score_daytrade_catchup_open_setup,
+    evaluate_daytrade_inverse_open_setup, score_daytrade_inverse_open_setup,
+    is_daytrade_market_allowed, is_daytrade_fallback_market_allowed,
+    is_daytrade_strong_oversold_market_allowed,
+    is_daytrade_catchup_market_allowed, is_daytrade_inverse_market_allowed,
+    is_daytrade_inverse_pullback_market_allowed,
+    is_daytrade_trend_allowed,
+    is_daytrade_inverse_setup_type,
+    select_daytrade_candidates,
+    get_daytrade_week_key, resolve_daytrade_weekly_leverage,
+    is_daytrade_weekly_profit_guard_active,
+    is_daytrade_monthly_risk_blocked,
+    resolve_daytrade_intraday_stop_mult, resolve_daytrade_intraday_target_mult,
+    resolve_daytrade_buying_power,
+    resolve_daytrade_inverse_buying_power,
+    cap_daytrade_position_size,
+    resolve_daytrade_breadth_exposure_scale,
+    DAYTRADE_MAX_DAILY_LOSS_PCT, DAYTRADE_MAX_GAP, DAYTRADE_MAX_RSI2,
+    DAYTRADE_MIN_SETUP_SCORE,
+    DAYTRADE_MIN_PREV_DAY_RETURN_PCT, DAYTRADE_MAX_PREV_DAY_RETURN_PCT,
+    DAYTRADE_MIN_TURNOVER, DAYTRADE_FALLBACK_MIN_SETUP_SCORE,
+    DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT, DAYTRADE_MAX_NOTIONAL_PCT,
+    DAYTRADE_STRONG_OVERSOLD_MIN_SETUP_SCORE, DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT,
+    DAYTRADE_STRONG_OVERSOLD_EQUITY_NOTIONAL_PCT, DAYTRADE_STRONG_OVERSOLD_STOP_MULT,
+    DAYTRADE_STRONG_OVERSOLD_TARGET_MULT,
+    DAYTRADE_PRIMARY_MAX_EQUITY_NOTIONAL_PCT, DAYTRADE_FALLBACK_TREND_BUFFER,
+    DAYTRADE_FALLBACK_INTRADAY_STOP_MULT, DAYTRADE_FALLBACK_INTRADAY_TARGET_MULT,
+    DAYTRADE_CATCHUP_MIN_TURNOVER, DAYTRADE_CATCHUP_MIN_SETUP_SCORE,
+    DAYTRADE_CATCHUP_GAPDOWN_STOP_MULT, DAYTRADE_CATCHUP_GAPDOWN_TARGET_MULT,
+    DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT, DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_STOP_MULT, DAYTRADE_CATCHUP_RS_TARGET_MULT,
+    DAYTRADE_CATCHUP_RS_NOTIONAL_PCT, DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_INVERSE_CODES, DAYTRADE_INVERSE_MIN_TURNOVER, DAYTRADE_INVERSE_MIN_SETUP_SCORE,
+    DAYTRADE_INVERSE_STOP_MULT, DAYTRADE_INVERSE_TARGET_MULT,
+    DAYTRADE_INVERSE_PULLBACK_STOP_MULT, DAYTRADE_INVERSE_PULLBACK_TARGET_MULT,
+    DAYTRADE_INVERSE_NOTIONAL_PCT, DAYTRADE_INVERSE_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE,
 )
 from core.config import (
     SMA_SHORT_PERIOD, SMA_MEDIUM_PERIOD, SMA_TREND_PERIOD, SMA_LONG_PERIOD,
-    SLIPPAGE, BREADTH_THRESHOLD, TAX_RATE
+    SLIPPAGE, BREADTH_THRESHOLD, TAX_RATE,
+    BEAR_GAP_LIMIT, LEVERAGE_RATE, MAX_POSITIONS, STOP_LOSS_ATR, TAKE_PROFIT_ATR,
+    MIN_PRICE, MAX_PRICE,
 )
 from core.monthly_rotation_strategy import (
     MonthlyRotationStrategyConfig,
@@ -18,11 +59,8 @@ from core.monthly_rotation_strategy import (
 )
 from core.jquants_margin_cache import get_eligible_margin_codes_for_date
 
-MIN_SETUP_SCORE = 4.0
-MAX_DAILY_LOSS_PCT = 0.02
-RISK_PER_TRADE_PCT = 0.005
-MAX_NOTIONAL_PER_TRADE_PCT = 0.33
-MIN_PREV_DAY_DROP_PCT = 0.02
+MIN_SETUP_SCORE = DAYTRADE_MIN_SETUP_SCORE
+MAX_DAILY_LOSS_PCT = DAYTRADE_MAX_DAILY_LOSS_PCT
 
 
 def _floor_lot(shares):
@@ -88,6 +126,12 @@ def _resolve_intraday_exit(entry_price, open_price, high_price, low_price, close
     if target_hit:
         return target_price, "intraday_target"
     return close_price, "close_exit"
+
+
+def _resolve_execution_slippage(rate, override):
+    if override is None:
+        return float(rate)
+    return float(override)
 
 
 def run_backtest_v17_swing(univ_indices, bundle_np, timeline, breadth_ratio,
@@ -833,18 +877,24 @@ def run_backtest_v19_monthly_rotation(univ_indices, bundle_np, timeline, breadth
     return float(final), trade_count, monthly_assets, trade_results
 
 def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio,
-                               initial_cash=1000000, max_pos=3,
-                               sl_mult=3.0, tp_mult=20.0, leverage_rate=2.0, breadth_threshold=0.50,
+                               initial_cash=1000000, max_pos=MAX_POSITIONS,
+                               sl_mult=STOP_LOSS_ATR, tp_mult=TAKE_PROFIT_ATR,
+                               leverage_rate=LEVERAGE_RATE, breadth_threshold=BREADTH_THRESHOLD,
                                slippage=SLIPPAGE, use_sma_exit=True,
                                exit_buffer=0.975, max_hold_days=1,
-                               liquidity_limit=0.025, bull_gap_limit=0.13, bear_gap_limit=0.02,
-                                atr_trail_mult=3.0, rsi_threshold=30.0,
+                               liquidity_limit=0.025, bull_gap_limit=DAYTRADE_MAX_GAP,
+                                bear_gap_limit=BEAR_GAP_LIMIT,
+                                atr_trail_mult=3.0, rsi_threshold=DAYTRADE_MAX_RSI2,
+                                entry_slippage=None, exit_slippage=None,
+                                explicit_trade_cost=0.0, profit_tax_rate=0.0,
+                                return_daily_stats=False,
                                 verbose=False):
     """
     Day-trade production backtest:
     - Signal is evaluated from prior-day weakness and today's gap-up rebound.
-    - Entry at today's Open with buy slippage.
-    - Mandatory exit at today's Close with sell slippage.
+    - Entry and exit execution slippage are modeled separately from explicit fees.
+    - Explicit fees default to zero so general day-trade margin assumptions can
+      match brokers that waive same-day financing / borrow costs.
     - No overnight positions are carried.
     """
     T = len(timeline)
@@ -852,6 +902,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     trade_count = 0
     monthly_assets = {}
     trade_results = []
+    daily_stats = {}
     
     close_np = bundle_np['Close']
     open_np = bundle_np['Open']
@@ -862,11 +913,20 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     rs_alpha_np = bundle_np.get('RS_Alpha', np.zeros_like(close_np))
     sma_med_np = bundle_np.get(f'SMA{SMA_MEDIUM_PERIOD}', np.zeros_like(close_np))
     turnover_np = bundle_np.get('Turnover', np.ones_like(close_np) * 1e12)
-    sma_long_np = bundle_np.get(f'SMA{SMA_LONG_PERIOD}', np.zeros_like(close_np))
+    sma_trend_np = bundle_np.get(f'SMA{SMA_TREND_PERIOD}', np.zeros_like(close_np))
+    buy_slippage = _resolve_execution_slippage(slippage, entry_slippage)
+    sell_slippage = _resolve_execution_slippage(slippage, exit_slippage)
+    market_idx = -1
+    for idx_t, ticker in enumerate(bundle_np.get("tickers", [])):
+        if ticker == "1321.T":
+            market_idx = idx_t
+            break
     
     current_month = ""
     month_start_equity = initial_cash
     month_done = False
+    current_week = ""
+    week_start_equity = initial_cash
 
     for i in range(2, T):
         curr_time = timeline[i]
@@ -876,30 +936,111 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             month_start_equity = cash
             month_done = False 
 
-        total_equity = cash
-        month_drawdown = (total_equity / month_start_equity) - 1.0 if month_start_equity > 0 else 0
+        week_key = get_daytrade_week_key(curr_time)
+        if week_key != current_week:
+            current_week = week_key
+            week_start_equity = float(cash)
 
-        if month_drawdown <= -0.15:
+        day_key = curr_time.strftime('%Y-%m-%d')
+        day_start_equity = float(cash)
+        day_trade_count = 0
+
+        total_equity = cash
+        if is_daytrade_monthly_risk_blocked(month_start_equity, total_equity):
             month_done = True
 
         if i + 1 >= T or month_done:
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
-        if breadth_ratio[i] < breadth_threshold:
+        market_open = open_np[i, market_idx] if market_idx >= 0 else np.nan
+        prev_market_close = close_np[i - 1, market_idx] if market_idx >= 0 else np.nan
+        prev_market_sma_trend = sma_trend_np[i - 1, market_idx] if market_idx >= 0 else np.nan
+        primary_market_allowed = is_daytrade_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        )
+        fallback_market_allowed = is_daytrade_fallback_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        )
+        strong_oversold_market_allowed = is_daytrade_strong_oversold_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        )
+        catchup_market_allowed = is_daytrade_catchup_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        )
+        inverse_market_allowed = is_daytrade_inverse_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+            prev_market_close=prev_market_close,
+        )
+        inverse_pullback_market_allowed = is_daytrade_inverse_pullback_market_allowed(
+            breadth_ratio[i],
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+            prev_market_close=prev_market_close,
+        )
+        if not (
+            primary_market_allowed
+            or strong_oversold_market_allowed
+            or fallback_market_allowed
+            or catchup_market_allowed
+            or inverse_market_allowed
+            or inverse_pullback_market_allowed
+        ):
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
         dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
-        if dynamic_lev <= 0:
+        dynamic_lev = resolve_daytrade_weekly_leverage(
+            base_leverage=dynamic_lev,
+            week_start_equity=week_start_equity,
+            current_equity=cash,
+            current_time=curr_time,
+        )
+        dynamic_lev *= resolve_daytrade_breadth_exposure_scale(breadth_ratio[i])
+        if is_daytrade_weekly_profit_guard_active(
+            week_start_equity=week_start_equity,
+            current_equity=cash,
+            current_time=curr_time,
+        ):
+            daily_stats[day_key] = {
+                "equity": float(cash),
+                "day_pnl": 0.0,
+                "trade_count": 0,
+            }
             monthly_assets[current_month] = float(cash)
             continue
 
         candidates = []
+        strong_oversold_candidates = []
+        fallback_candidates = []
+        catchup_candidates = []
+        inverse_candidates = []
+        inverse_code_set = {ticker if str(ticker).endswith(".T") else f"{ticker}.T" for ticker in DAYTRADE_INVERSE_CODES}
         for s_idx in univ_indices:
+            ticker = bundle_np["tickers"][s_idx]
             t_close = close_np[i, s_idx]
             t_open = open_np[i, s_idx]
-            t_sma_med = sma_med_np[i, s_idx]
+            t_sma_med = sma_med_np[i - 1, s_idx]
             prev_close = close_np[i - 1, s_idx]
             prev_prev_close = close_np[i - 2, s_idx]
             prev_open = open_np[i - 1, s_idx]
@@ -908,85 +1049,278 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             t_turnover = turnover_np[i - 1, s_idx]
             prev_rsi2 = rsi2_np[i - 1, s_idx]
             t_rs = rs_alpha_np[i - 1, s_idx]
-            prev_sma_long = sma_long_np[i - 1, s_idx]
-            prev_prev_sma_long = sma_long_np[i - 2, s_idx]
+            prev_sma_trend = sma_trend_np[i - 1, s_idx]
 
             raw_values = [
                 t_close, t_open, prev_close, prev_prev_close, prev_open,
                 prev_low, prev_atr, t_turnover, t_sma_med, prev_rsi2,
-                prev_sma_long, prev_prev_sma_long
+                prev_sma_trend
             ]
             if np.any(np.isnan(raw_values)):
                 continue
             if prev_atr <= 0 or t_open <= 0 or t_close <= 0 or prev_close <= 0:
                 continue
+            if t_open < MIN_PRICE or t_open > MAX_PRICE:
+                continue
             if t_turnover <= 0:
+                continue
+            if t_turnover < min(DAYTRADE_MIN_TURNOVER, DAYTRADE_CATCHUP_MIN_TURNOVER):
                 continue
             if liquidity_limit > 0 and (t_open * 100.0) > (t_turnover * liquidity_limit):
                 continue
-            if prev_close <= prev_sma_long:
-                continue
-            if prev_sma_long < prev_prev_sma_long:
-                continue
-
-            prev_day_drop = 1.0 - (prev_close / prev_prev_close)
-            if prev_day_drop < max(bear_gap_limit, MIN_PREV_DAY_DROP_PCT):
-                continue
-
-            metrics = evaluate_daytrade_open_setup(
-                t_open, prev_close, t_sma_med, breadth_ratio[i],
-                prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low, prev_rsi2=prev_rsi2
+            prev_day_return = (prev_close / prev_prev_close) - 1.0
+            primary_trend_allowed = is_daytrade_trend_allowed(prev_close, prev_sma_trend)
+            fallback_trend_allowed = is_daytrade_trend_allowed(
+                prev_close,
+                prev_sma_trend,
+                trend_buffer=DAYTRADE_FALLBACK_TREND_BUFFER,
             )
-            if metrics is None:
-                continue
-            if prev_rsi2 > rsi_threshold:
-                continue
-            if metrics["gap_pct"] > bull_gap_limit:
-                continue
 
-            score = score_daytrade_open_setup(
-                metrics,
-                rs_alpha=t_rs,
-                prev_close=prev_close,
-                prev_prev_close=prev_prev_close,
-                prev_atr=prev_atr,
-                prev_rsi2=prev_rsi2
+            if primary_market_allowed and primary_trend_allowed and t_turnover >= DAYTRADE_MIN_TURNOVER:
+                if (
+                    prev_day_return >= DAYTRADE_MIN_PREV_DAY_RETURN_PCT
+                    and prev_day_return <= DAYTRADE_MAX_PREV_DAY_RETURN_PCT
+                ):
+                    metrics = evaluate_daytrade_open_setup(
+                        t_open, prev_close, t_sma_med, breadth_ratio[i],
+                        prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low,
+                        prev_rsi2=prev_rsi2, rs_alpha=t_rs, prev_prev_close=prev_prev_close,
+                        trade_weekday=curr_time.weekday(),
+                    )
+                    if metrics is not None and prev_rsi2 <= rsi_threshold and metrics["gap_pct"] <= bull_gap_limit:
+                        score = score_daytrade_open_setup(
+                            metrics,
+                            rs_alpha=t_rs,
+                            prev_close=prev_close,
+                            prev_prev_close=prev_prev_close,
+                            prev_atr=prev_atr,
+                            prev_rsi2=prev_rsi2
+                        )
+                        if np.isfinite(score) and score >= MIN_SETUP_SCORE:
+                            candidates.append({
+                                "code": ticker,
+                                "s_idx": s_idx,
+                                "score": score,
+                                "open": t_open,
+                                "close": t_close,
+                                "high": high_np[i, s_idx],
+                                "low": low_np[i, s_idx],
+                                "atr": prev_atr,
+                                "turnover": t_turnover,
+                                "setup_type": "primary",
+                                "notional_pct": DAYTRADE_MAX_NOTIONAL_PCT,
+                                "equity_notional_pct": DAYTRADE_PRIMARY_MAX_EQUITY_NOTIONAL_PCT,
+                            })
+                            continue
+
+            if strong_oversold_market_allowed and t_turnover >= DAYTRADE_MIN_TURNOVER:
+                strong_oversold_metrics = evaluate_daytrade_strong_oversold_open_setup(
+                    t_open,
+                    prev_close,
+                    breadth_ratio[i],
+                    prev_atr=prev_atr,
+                    prev_rsi2=prev_rsi2,
+                    rs_alpha=t_rs,
+                    prev_prev_close=prev_prev_close,
+                    prev_sma_trend=prev_sma_trend,
+                )
+                if strong_oversold_metrics is not None:
+                    score = score_daytrade_strong_oversold_open_setup(
+                        strong_oversold_metrics,
+                        rs_alpha=t_rs,
+                    )
+                    if np.isfinite(score) and score >= DAYTRADE_STRONG_OVERSOLD_MIN_SETUP_SCORE:
+                        strong_oversold_candidates.append({
+                            "code": ticker,
+                            "s_idx": s_idx,
+                            "score": score,
+                            "open": t_open,
+                            "close": t_close,
+                            "high": high_np[i, s_idx],
+                            "low": low_np[i, s_idx],
+                            "atr": prev_atr,
+                            "turnover": t_turnover,
+                            "setup_type": "strong_oversold",
+                            "notional_pct": DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT,
+                            "equity_notional_pct": DAYTRADE_STRONG_OVERSOLD_EQUITY_NOTIONAL_PCT,
+                            "stop_mult": DAYTRADE_STRONG_OVERSOLD_STOP_MULT,
+                            "target_mult": DAYTRADE_STRONG_OVERSOLD_TARGET_MULT,
+                        })
+
+            if fallback_market_allowed and fallback_trend_allowed and t_turnover >= DAYTRADE_MIN_TURNOVER:
+                fallback_metrics = evaluate_daytrade_fallback_open_setup(
+                    t_open, prev_close, t_sma_med, breadth_ratio[i],
+                    prev_atr=prev_atr, prev_low=prev_low,
+                    prev_rsi2=prev_rsi2, rs_alpha=t_rs,
+                    prev_prev_close=prev_prev_close
+                )
+                if fallback_metrics is not None:
+                    score = score_daytrade_fallback_open_setup(
+                        fallback_metrics,
+                        rs_alpha=t_rs,
+                        prev_close=prev_close,
+                        prev_prev_close=prev_prev_close,
+                        prev_atr=prev_atr,
+                        prev_rsi2=prev_rsi2
+                    )
+                    if np.isfinite(score) and score >= DAYTRADE_FALLBACK_MIN_SETUP_SCORE:
+                        fallback_candidates.append({
+                            "code": ticker,
+                            "s_idx": s_idx,
+                            "score": score,
+                            "open": t_open,
+                            "close": t_close,
+                            "high": high_np[i, s_idx],
+                            "low": low_np[i, s_idx],
+                            "atr": prev_atr,
+                            "turnover": t_turnover,
+                            "setup_type": "fallback",
+                            "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+                            "stop_mult": DAYTRADE_FALLBACK_INTRADAY_STOP_MULT,
+                            "target_mult": DAYTRADE_FALLBACK_INTRADAY_TARGET_MULT,
+                        })
+
+            if catchup_market_allowed and t_turnover >= DAYTRADE_CATCHUP_MIN_TURNOVER:
+                catchup_metrics_list = evaluate_daytrade_catchup_open_setups(
+                    t_open, prev_close, t_sma_med, breadth_ratio[i],
+                    prev_atr=prev_atr, prev_low=prev_low,
+                    prev_rsi2=prev_rsi2, rs_alpha=t_rs,
+                    prev_prev_close=prev_prev_close,
+                    prev_sma_trend=prev_sma_trend,
+                )
+                for catchup_metrics in catchup_metrics_list:
+                    score = score_daytrade_catchup_open_setup(catchup_metrics)
+                    if not np.isfinite(score) or score < DAYTRADE_CATCHUP_MIN_SETUP_SCORE:
+                        continue
+                    if catchup_metrics["setup_type"] == "catchup_gapdown":
+                        stop_mult = DAYTRADE_CATCHUP_GAPDOWN_STOP_MULT
+                        target_mult = DAYTRADE_CATCHUP_GAPDOWN_TARGET_MULT
+                        notional_pct = DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT
+                        equity_notional_pct = DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT
+                    else:
+                        stop_mult = DAYTRADE_CATCHUP_RS_STOP_MULT
+                        target_mult = DAYTRADE_CATCHUP_RS_TARGET_MULT
+                        notional_pct = DAYTRADE_CATCHUP_RS_NOTIONAL_PCT
+                        equity_notional_pct = DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT
+                    catchup_candidates.append({
+                        "code": ticker,
+                        "s_idx": s_idx,
+                        "score": score,
+                        "open": t_open,
+                        "close": t_close,
+                        "high": high_np[i, s_idx],
+                        "low": low_np[i, s_idx],
+                        "atr": prev_atr,
+                        "turnover": t_turnover,
+                        "setup_type": catchup_metrics["setup_type"],
+                        "notional_pct": notional_pct,
+                        "equity_notional_pct": equity_notional_pct,
+                        "stop_mult": stop_mult,
+                        "target_mult": target_mult,
+                    })
+
+            if (
+                (inverse_market_allowed or inverse_pullback_market_allowed)
+                and ticker in inverse_code_set
+                and t_turnover >= DAYTRADE_INVERSE_MIN_TURNOVER
+            ):
+                inverse_metrics = evaluate_daytrade_inverse_open_setup(
+                    t_open,
+                    prev_close,
+                    breadth_ratio[i],
+                    prev_atr=prev_atr,
+                    prev_prev_close=prev_prev_close,
+                    market_open=market_open,
+                    prev_market_close=prev_market_close,
+                    prev_market_sma_trend=prev_market_sma_trend,
+                )
+                if inverse_metrics is not None:
+                    score = score_daytrade_inverse_open_setup(
+                        inverse_metrics,
+                        rs_alpha=t_rs,
+                    )
+                    if np.isfinite(score) and score >= DAYTRADE_INVERSE_MIN_SETUP_SCORE:
+                        setup_type = inverse_metrics.get("setup_type", "inverse")
+                        if setup_type == "inverse_pullback":
+                            stop_mult = DAYTRADE_INVERSE_PULLBACK_STOP_MULT
+                            target_mult = DAYTRADE_INVERSE_PULLBACK_TARGET_MULT
+                        else:
+                            stop_mult = DAYTRADE_INVERSE_STOP_MULT
+                            target_mult = DAYTRADE_INVERSE_TARGET_MULT
+                        inverse_candidates.append({
+                            "code": ticker,
+                            "s_idx": s_idx,
+                            "score": score,
+                            "open": t_open,
+                            "close": t_close,
+                            "high": high_np[i, s_idx],
+                            "low": low_np[i, s_idx],
+                            "atr": prev_atr,
+                            "turnover": t_turnover,
+                            "setup_type": setup_type,
+                            "notional_pct": DAYTRADE_INVERSE_NOTIONAL_PCT,
+                            "equity_notional_pct": DAYTRADE_INVERSE_EQUITY_NOTIONAL_PCT,
+                            "stop_mult": stop_mult,
+                            "target_mult": target_mult,
+                        })
+
+        if candidates or strong_oversold_candidates or fallback_candidates or catchup_candidates or inverse_candidates:
+            selected = select_daytrade_candidates(
+                candidates,
+                strong_oversold_candidates,
+                fallback_candidates,
+                catchup_candidates,
+                inverse_candidates,
+                breadth_val=breadth_ratio[i],
+                trade_weekday=curr_time.weekday(),
             )
-            if not np.isfinite(score):
+            inverse_only = bool(selected) and all(
+                is_daytrade_inverse_setup_type(item.get("setup_type")) for item in selected
+            )
+            if dynamic_lev <= 0 and not inverse_only:
+                daily_stats[day_key] = {
+                    "equity": float(cash),
+                    "day_pnl": 0.0,
+                    "trade_count": 0,
+                }
+                monthly_assets[current_month] = float(cash)
                 continue
-            if score < MIN_SETUP_SCORE:
-                continue
-
-            candidates.append({
-                "s_idx": s_idx,
-                "score": score,
-                "open": t_open,
-                "close": t_close,
-                "high": high_np[i, s_idx],
-                "low": low_np[i, s_idx],
-                "atr": prev_atr,
-                "turnover": t_turnover
-            })
-
-        if candidates:
-            candidates.sort(key=lambda item: item["score"], reverse=True)
-            selected = candidates[:max_pos]
-            day_start_equity = cash
-            day_buying_power = day_start_equity * dynamic_lev
+            day_buying_power = resolve_daytrade_buying_power(
+                current_equity=day_start_equity,
+                account_cash=cash,
+                dynamic_leverage=dynamic_lev,
+            )
+            inverse_buying_power = 0.0
+            if inverse_only:
+                inverse_buying_power = resolve_daytrade_inverse_buying_power(
+                    current_equity=day_start_equity,
+                    account_cash=cash,
+                )
             committed_capital = 0.0
             day_pnl = 0.0
             day_loss_limit = day_start_equity * MAX_DAILY_LOSS_PCT
             for candidate in selected:
+                if day_trade_count >= max_pos:
+                    break
                 if -day_pnl >= day_loss_limit:
                     break
 
-                real_buy = candidate["open"] * (1.0 + slippage)
-                remaining_buying_power = max(0.0, day_buying_power - committed_capital)
+                real_buy = candidate["open"] * (1.0 + buy_slippage)
+                candidate_buying_power = day_buying_power
+                candidate_dynamic_lev = dynamic_lev
+                if is_daytrade_inverse_setup_type(candidate.get("setup_type")):
+                    candidate_buying_power = inverse_buying_power
+                    candidate_dynamic_lev = DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE
+                remaining_buying_power = max(0.0, candidate_buying_power - committed_capital)
                 if remaining_buying_power <= 0:
                     break
 
-                effective_sl_mult = max(0.6, min(1.2, sl_mult / 5.0))
-                effective_tp_mult = max(1.0, min(2.0, tp_mult / 20.0))
+                effective_sl_mult = candidate.get("stop_mult")
+                if effective_sl_mult is None:
+                    effective_sl_mult = resolve_daytrade_intraday_stop_mult(sl_mult)
+                effective_tp_mult = candidate.get("target_mult")
+                if effective_tp_mult is None:
+                    effective_tp_mult = resolve_daytrade_intraday_target_mult(tp_mult)
                 stop_price = max(0.01, real_buy - (candidate["atr"] * effective_sl_mult))
                 target_price = real_buy + (candidate["atr"] * effective_tp_mult)
 
@@ -995,7 +1329,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     atr=candidate["atr"],
                     sl_mult=sl_mult,
                     price=real_buy,
-                    dynamic_leverage=dynamic_lev,
+                    dynamic_leverage=candidate_dynamic_lev,
                     max_positions=max_pos,
                     buying_power=remaining_buying_power,
                     turnover=candidate["turnover"]
@@ -1003,13 +1337,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 if shares < 100:
                     continue
 
-                risk_per_share = max(real_buy - stop_price, real_buy * slippage)
-                if risk_per_share <= 0:
-                    continue
-
-                risk_budget_shares = _floor_lot((day_start_equity * RISK_PER_TRADE_PCT) / risk_per_share)
-                notional_cap_shares = _floor_lot((remaining_buying_power * MAX_NOTIONAL_PER_TRADE_PCT) / real_buy)
-                shares = min(shares, risk_budget_shares, notional_cap_shares)
+                shares = cap_daytrade_position_size(
+                    raw_shares=shares,
+                    current_equity=day_start_equity,
+                    buying_power=remaining_buying_power,
+                    entry_price=real_buy,
+                    stop_price=stop_price,
+                    notional_pct=candidate.get("notional_pct"),
+                    equity_notional_pct=candidate.get("equity_notional_pct"),
+                )
                 if shares < 100:
                     continue
 
@@ -1026,16 +1362,30 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     stop_price=stop_price,
                     target_price=target_price,
                 )
-                real_sell = raw_exit * (1.0 - slippage)
-                pnl = (real_sell - real_buy) * shares
+                real_sell = raw_exit * (1.0 - sell_slippage)
+                gross_pnl = (real_sell - real_buy) * shares
+                explicit_cost = float(explicit_trade_cost)
+                net_pnl, tax = _apply_profit_tax(
+                    gross_pnl - explicit_cost,
+                    tax_rate=profit_tax_rate,
+                )
                 committed_capital += trade_notional
-                day_pnl += pnl
-                trade_results.append(pnl)
+                day_pnl += net_pnl
+                trade_results.append(net_pnl)
                 trade_count += 1
+                day_trade_count += 1
 
             cash += day_pnl
+
+        daily_stats[day_key] = {
+            "equity": float(cash),
+            "day_pnl": float(cash - day_start_equity),
+            "trade_count": int(day_trade_count),
+        }
 
         monthly_assets[current_month] = float(cash)
 
     final = float(cash)
+    if return_daily_stats:
+        return final, trade_count, monthly_assets, trade_results, daily_stats
     return final, trade_count, monthly_assets, trade_results

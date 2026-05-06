@@ -13,11 +13,13 @@ execution_log.csv
 logs/
 data_cache/
 opt_results.csv
+scratch/
 data/simulation/
 data/kabucom_test/
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.egg-info/

@@ -16,7 +16,8 @@ _PROTECTED_FILES = {
     "trade_history.csv",
     "account.json",
     "execution_log.csv",
-    "jp_watchlist.json"
+    "jp_watchlist.json",
+    "intraday_snapshots.csv",
 }
 
 def pre_flight_check():

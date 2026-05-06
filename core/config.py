@@ -64,27 +64,29 @@ EXECUTION_LOG_FILE  = str(DATA_ROOT / "execution_log.csv")
 EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
+INTRADAY_SNAPSHOT_FILE = str(DATA_ROOT / "intraday_snapshots.csv")
 
-# --- Imperial Oracle V17.0 FINAL (V17 Golden Logic) ---
+# --- Day-trade production profile ---
 USE_COMPOUNDING       = True   # ★GOLDEN: Compounding on
-MAX_POSITIONS         = 3      # ★GOLDEN: Concentration
-LEVERAGE              = 1.5    # ★GOLDEN: 1.5x Leverage
+MAX_POSITIONS         = 1      # Frequency profile chooses one best continuation setup per day
+LEVERAGE              = 1.25   # Balanced day-trade profile; weekly lock and sizing caps control realized exposure
+LEVERAGE_RATE         = LEVERAGE
 INITIAL_CASH          = 1000000
 
-# Strategy Core (V17 Golden Plateau)
-BREADTH_THRESHOLD     = 0.60   # ★GOLDEN: Market Breadth
+# Strategy Core
+BREADTH_THRESHOLD     = 0.423  # Profit-biased day-trade filter while keeping monthly activity near 3/4
 SMA20_EXIT_BUFFER     = 0.975  # ★GOLDEN: Trend Exit Buffer
-STOP_LOSS_ATR         = 5.0    # ★GOLDEN: Stop Loss Mult
-TAKE_PROFIT_ATR       = 40.0   # ★GOLDEN: Take Profit Mult
-BULL_GAP_LIMIT        = 0.11   # ★GOLDEN: Gap Limit
-BEAR_GAP_LIMIT        = 0.02
+STOP_LOSS_ATR         = 3.35   # Intraday stop maps to roughly 0.67 ATR in production backtest
+TAKE_PROFIT_ATR       = 40.0   # Intraday target maps to roughly 2 ATR in production backtest
+BULL_GAP_LIMIT        = 0.03   # Opening continuation gap upper bound
+BEAR_GAP_LIMIT        = 0.00
 RS_THRESHOLD          = 25.0
 
 MAX_ALLOCATION_PCT    = 1.0  
 MAX_ALLOCATION_AMOUNT = 10000000 
 LIQUIDITY_LIMIT_RATE  = 0.025  
 MIN_ALLOCATION_AMOUNT = 50000  
-MIN_PRICE             = 200    
+MIN_PRICE             = 100
 MAX_PRICE             = 10000  
 
 EXIT_ON_SMA20_BREACH  = True   

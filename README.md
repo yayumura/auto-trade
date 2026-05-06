@@ -1,61 +1,75 @@
 # Auto-Trade
 
 日本株向けの自動売買・バックテスト用リポジトリです。  
-現在の主戦略は、`月次ローテーション型の順張り戦略` です。
+現在の主戦略は、**当日中に建玉を閉じるデイトレード戦略**です。
 
-このリポジトリでは、バックテストは本番戦略を検証するためのものとして扱い、戦略判断はできるだけ本番ロジックと共有する方針を採っています。詳細な原則は [AGENTS.md](/C:/Users/yayum/git_work/auto-trade/AGENTS.md:1) を参照してください。
+このリポジトリでは、**本番戦略ロジックを唯一の判断源**として扱います。  
+バックテストは本番ロジックを検証するための実行レイヤーであり、独自の売買判断を持たせない前提です。運用ルールの詳細は [AGENTS.md](AGENTS.md) を参照してください。
+
+また、探索の履歴と「もうそのまま再試行しない案」は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残しています。
 
 ## 現在の戦略概要
 
-- 主戦略: 月次ローテーション
-- 対象: 日本株プライム中心
-- 判断軸: 市場 breadth、長期トレンド、相対強度、流動性、ATR、モメンタム
-- 執行思想: 月末に判定し、翌営業日寄り付きベースで売買
+- 主戦略: 日本株デイトレード
+- 対象: 主に `.T` 銘柄と一部 ETF
+- 執行前提: 寄り付き前後で候補を選び、当日中に全ポジションを解消
+- 主な判断軸:
+  - 市場 breadth
+  - 指数トレンド
+  - 個別銘柄のトレンド
+  - 前日リターンと寄りギャップ
+  - ATR、RSI2、相対強度
+- 補助セットアップ:
+  - `fallback`
+  - `strong_oversold`
+  - `catchup`
+  - `inverse`
+  - `inverse_pullback`
+- 設計方針:
+  - 週初資産比 `+1%` の達成週数を最適化目標として追う
+  - 稼働率も見るが、低品質なエントリーの水増しはしない
+  - リスク、流動性、スリッページ、急落時損失を無視した過大建玉は採らない
 
-共有戦略ロジックの中心は [core/monthly_rotation_strategy.py](/C:/Users/yayum/git_work/auto-trade/core/monthly_rotation_strategy.py:1) にあります。
+共有戦略ロジックの中心は [core/logic.py](core/logic.py) です。
 
-## 現在のバックテスト前提
+## 現在の検証状況
 
-`jp_backtest.py` の月次ローテーション検証では、次の前提を反映しています。
+最新確認日は **2026-05-06** です。  
+`python jp_backtest.py` の最新確認値:
 
-- 月末終値でシグナル判定
-- 翌営業日寄り付きで約定
-- スリッページあり
-- 税金あり
-- 信用買方金利あり
-- 流動性制約あり
+- `FINAL EQUITY: 48,347,449円`
+- `CLOSED TRADES: 509`
+- `WIN RATE: 49.51%`
+- `WEEKS >= +1%: 138/215`
+- `POSITIVE WEEKS: 142/215`
+- `TOTAL RETURN: +4734.74%`
+- `PROFIT FACTOR: 1.33`
+- `AVG MONTH ACTIVE RATE: 50.48%`
+- `MONTHS >= 3/4 ACTIVE: 2/50`
+- `WORST DAY: -4,201,220円`
 
-一方で、次の点はまだ完全には再現していません。
+補足:
 
-- 特別気配や寄り付き不成立
-- 部分約定の詳細モデル
-- 証券会社独自の信用規制
-- broker 固有の信用建て可否
+- これは将来成績を保証するものではありません
+- データ更新やロジック変更で数値は変動します
+- 月間 `3/4` 稼働目標は、現時点では未達です
+- 週次 `+1%` は保証値ではなく、改善目標として扱っています
 
-## 最新の参考バックテスト結果
-
-`python jp_backtest.py` 実行時の直近確認結果:
-
-- DATA WINDOW: 2021-04-05 to 2026-04-03
-- ACTIVE TEST: 2022-01 to 2026-04-03
-- FINAL EQUITY: Y5,763,432
-- TOTAL RETURN: +476.34%
-- CLOSED TRADES: 55
-
-この数値は将来の成績を保証するものではありません。  
-また、データ更新やロジック変更により変動します。
-
-## リポジトリ主要構成
+## リポジトリ構成
 
 ```text
 auto-trade/
 ├── AGENTS.md
+├── STRATEGY_EXPERIMENT_LOG.md
+├── README.md
 ├── auto_trade.py
 ├── backtest.py
 ├── jp_backtest.py
 ├── jp_jquants_fetcher_v2.py
 ├── jp_jquants_margin_fetcher.py
 ├── jp_optimizer.py
+├── run_daily_cycle.py
+├── run_imperial_oracle.bat
 ├── core/
 │   ├── config.py
 │   ├── jquants_margin_cache.py
@@ -68,9 +82,43 @@ auto-trade/
     └── test_logic.py
 ```
 
-## セットアップ
+## 主要スクリプト
 
-### 1. 依存ライブラリ
+- `auto_trade.py`  
+  本番の自動売買実行エントリです。
+
+- `backtest.py`  
+  共有戦略ロジックを使って仮想約定を行うバックテスト実行レイヤーです。
+
+- `jp_backtest.py`  
+  日本株キャッシュを読み込み、現行デイトレード戦略の評価を出す確認用スクリプトです。
+
+- `jp_optimizer.py`  
+  パラメータ探索用スクリプトです。採用判断は、必ず shared logic と説明可能性を前提に行ってください。
+
+- `jp_jquants_fetcher_v2.py`  
+  株価キャッシュを更新します。
+
+- `jp_jquants_margin_fetcher.py`  
+  信用銘柄キャッシュを更新します。
+
+- `run_daily_cycle.py` / `run_imperial_oracle.bat`  
+  日次実行の補助スクリプトです。
+
+## 月次ローテーションについて
+
+`core/monthly_rotation_strategy.py` と関連テストは、まだリポジトリ内に残っています。  
+ただし、**現在の主戦略は月次ローテーションではなくデイトレード**です。
+
+月次ローテーション系コードは、
+
+- 過去資産
+- 参照実装
+- 一部テストの依存先
+
+として残っているもので、現行の主改善対象はデイトレード側です。
+
+## セットアップ
 
 Python 3.10 以上を想定しています。
 
@@ -78,86 +126,83 @@ Python 3.10 以上を想定しています。
 pip install -r requirements.txt
 ```
 
-### 2. `.env` の設定
+`.env` には少なくとも次の系統の設定が必要です。
 
-最低限、次の項目を設定してください。
+- auカブコム証券 API
+- J-Quants
+- AI フィルタ用 API キー
+- 通知先やデバッグ設定
 
-```ini
-# auカブコム証券 API
-TRADE_MODE=KABUCOM_TEST
-KABUCOM_API_PASSWORD=xxxxxxxx
-KABUCOM_LOGIN_PASSWORD=yyyyyyyy
-KABUCOM_ACCOUNT_TYPE=4
+## データ更新
 
-# J-Quants
-JQUANTS_REFRESH_TOKEN=zzz...
-
-# AIフィルタ
-GEMINI_API_KEY=...
-GEMINI_MODEL=gemini-2.5-flash
-GROQ_API_KEY=...
-GROQ_MODEL=llama-3.3-70b-versatile
-
-# 通知・デバッグ
-DISCORD_WEBHOOK_URL=https://...
-DEBUG_MODE=true
-```
-
-## データ構築
-
-### 株価キャッシュ作成
+株価キャッシュ:
 
 ```bash
 python jp_jquants_fetcher_v2.py
 ```
 
-### 信用銘柄キャッシュ作成
+信用銘柄キャッシュ:
 
 ```bash
 python jp_jquants_margin_fetcher.py
 ```
 
-注意:
+## 実行
 
-- `J-Quants Light` では `listed/info` の `MarginCode` が利用できないため、信用銘柄キャッシュに信用区分が入らない場合があります
-- その場合、現在の実装では信用銘柄フィルタは自動的に無効化されます
-- `MarginCode` を使いたい場合は `Standard` 以上のプランが必要です
-
-## 実行方法
-
-### バックテスト
+バックテスト:
 
 ```bash
 python jp_backtest.py
 ```
 
-### 最適化
+最適化:
 
 ```bash
 python jp_optimizer.py
 ```
 
-### 自動売買
+自動売買:
 
 ```bash
 python auto_trade.py
 ```
 
-### 日次オーケストレーション
-
-```bash
-run_imperial_oracle.bat
-```
-
 ## テスト
 
+現在のテストは主に次を確認します。
+
+- `tests/test_logic.py`
+  - shared strategy の判定関数
+  - setup ごとの境界条件
+  - 候補選択、買付余力、サイズ計算
+- `tests/test_backtest.py`
+  - `backtest.py` から shared logic を参照したときの売買フロー
+  - 日中決済、stop/target、inverse 系を含むバックテスト挙動
+  - 月次ローテーションの既存参照実装
+- `tests/test_auto_trade.py`
+  - `auto_trade.py` の軽量な回帰確認
+  - スナップショット計算
+  - live 側での inverse / `inverse_pullback` の扱い
+
+全件実行:
+
 ```bash
-python -m pytest tests\test_backtest.py tests\test_logic.py
+python -m pytest tests
 ```
 
-## 補足
+ファイル単位で実行:
 
-- 現在の README は、古い逆張り戦略の説明ではなく、現行の月次ローテーション戦略に合わせて更新しています
-- 戦略変更時は、まず共有戦略ロジックを修正し、その後にバックテストや本番実行側を参照させる構成を維持してください
+```bash
+python -m pytest tests/test_logic.py
+python -m pytest tests/test_backtest.py
+python -m pytest tests/test_auto_trade.py
+```
 
-Last updated: 2026-04-20
+## 運用メモ
+
+- 戦略変更は、まず [core/logic.py](core/logic.py) の shared logic を直し、その結果を本番・バックテストから参照させます
+- 改善探索では、やみくもに閾値を振るのではなく、負け日・未達週の原因分析から仮説を立てます
+- 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
+- テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
+
+Last updated: 2026-05-06
