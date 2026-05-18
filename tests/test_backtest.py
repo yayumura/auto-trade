@@ -70,6 +70,55 @@ def _build_daytrade_bundle(exit_mode="close"):
     return dates, bundle_np
 
 
+def _build_low_breadth_tuesday_catchup_bundle():
+    T = 110
+    dates = pd.date_range("2024-01-05", periods=T)
+    tickers = ["1000.T", "1321.T"]
+
+    close_data = np.full((T, 2), [100.0, 100.0])
+    open_data = np.full((T, 2), [100.0, 100.0])
+    high_data = np.full((T, 2), [101.0, 101.0])
+    low_data = np.full((T, 2), [99.0, 99.0])
+    rsi2_data = np.full((T, 2), [55.0, 50.0])
+    sma20_data = np.full((T, 2), [100.0, 100.0])
+    sma100_data = np.full((T, 2), [95.0, 100.0])
+    atr_data = np.full((T, 2), [2.0, 1.0])
+
+    close_data[100] = [100.0, 100.0]
+    open_data[100] = [99.0, 100.0]
+    low_data[100] = [98.5, 99.5]
+
+    close_data[101] = [104.0, 100.0]
+    open_data[101] = [102.0, 100.0]
+    high_data[101] = [104.5, 100.5]
+    low_data[101] = [101.5, 99.5]
+    rsi2_data[101] = [60.0, 50.0]
+
+    open_data[102] = [105.0, 100.0]
+    close_data[102] = [106.5, 100.2]
+    high_data[102] = [106.8, 100.4]
+    low_data[102] = [104.8, 99.8]
+
+    bundle_np = {
+        "Close": close_data,
+        "Open": open_data,
+        "High": high_data,
+        "Low": low_data,
+        "SMA5": np.full((T, 2), [99.0, 100.0]),
+        "SMA20": sma20_data,
+        "SMA100": sma100_data,
+        "SMA200": np.full((T, 2), [90.0, 100.0]),
+        "ATR": atr_data,
+        "RSI2": rsi2_data,
+        "RS_Alpha": np.full((T, 2), [30.0, 0.0]),
+        "Turnover": np.full((T, 2), 1_000_000_000.0),
+        "BB_LOWER_2": np.full((T, 2), [80.0, 95.0]),
+        "tickers": tickers,
+    }
+
+    return dates, bundle_np
+
+
 def _run_single_trade_backtest(exit_mode):
     dates, bundle_np = _build_daytrade_bundle(exit_mode=exit_mode)
     return run_backtest_v16_production(
@@ -185,6 +234,29 @@ def test_daytrade_can_return_daily_stats():
     assert "2024-04-12" in daily_stats
     assert daily_stats["2024-04-12"]["day_pnl"] > 0
     assert daily_stats["2024-04-12"]["trade_count"] == 1
+
+
+def test_daytrade_can_probe_low_breadth_tuesday_catchup_rs():
+    dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle()
+    final_assets, trade_count, monthly, results = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.30,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        slippage=0.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+    )
+
+    assert trade_count == 1
+    assert len(results) == 1
+    assert results[0] > 0
+    assert final_assets > 10_000_000
 
 
 def test_daytrade_tries_next_candidate_when_top_is_too_large():
@@ -304,9 +376,73 @@ def test_daytrade_can_trade_inverse_on_riskoff_day():
     assert results[0] > 0
 
 
-def test_daytrade_can_trade_inverse_pullback_in_bear_market():
+def test_daytrade_can_trade_low_turnover_inverse_in_panic_breadth():
     T = 104
     dates = pd.date_range("2024-01-01", periods=T)
+    tickers = ["1368.T", "1321.T"]
+
+    close_data = np.full((T, 2), [100.0, 100.0])
+    open_data = np.full((T, 2), [100.0, 100.0])
+    high_data = np.full((T, 2), [101.0, 101.0])
+    low_data = np.full((T, 2), [99.0, 99.0])
+    atr_data = np.full((T, 2), 1.0)
+    rsi2_data = np.full((T, 2), 60.0)
+    rs_alpha_data = np.full((T, 2), [10.0, 0.0])
+    turnover_data = np.full((T, 2), [150_000_000.0, 2_000_000_000.0])
+
+    close_data[100] = [98.0, 100.0]
+    open_data[100] = [97.5, 101.0]
+    low_data[100] = [97.0, 99.5]
+
+    close_data[101] = [100.0, 97.0]
+    open_data[101] = [99.0, 98.0]
+    high_data[101] = [100.5, 98.2]
+    low_data[101] = [98.8, 96.5]
+    rsi2_data[101] = [100.0, 40.0]
+    rs_alpha_data[101] = [12.0, -5.0]
+
+    open_data[102] = [101.0, 97.0]
+    close_data[102] = [102.0, 96.5]
+    high_data[102] = [103.5, 97.2]
+    low_data[102] = [100.8, 96.0]
+
+    bundle_np = {
+        "Close": close_data,
+        "Open": open_data,
+        "High": high_data,
+        "Low": low_data,
+        "SMA5": np.full((T, 2), [99.0, 99.0]),
+        "SMA20": np.full((T, 2), [99.0, 99.0]),
+        "SMA100": np.full((T, 2), [99.0, 99.0]),
+        "SMA200": np.full((T, 2), [99.0, 100.0]),
+        "ATR": atr_data,
+        "RSI2": rsi2_data,
+        "RS_Alpha": rs_alpha_data,
+        "Turnover": turnover_data,
+        "BB_LOWER_2": np.full((T, 2), [95.0, 95.0]),
+        "tickers": tickers,
+    }
+
+    final_assets, trade_count, monthly, results = run_backtest_v16_production(
+        univ_indices=np.array([0]),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.09,
+        initial_cash=1_000_000,
+        max_pos=1,
+        slippage=0.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+    )
+
+    assert trade_count == 1
+    assert final_assets > 1_000_000
+    assert results[0] > 0
+
+
+def test_daytrade_can_trade_inverse_pullback_in_bear_market():
+    T = 104
+    dates = pd.date_range("2023-12-31", periods=T)
     tickers = ["1368.T", "1321.T"]
 
     close_data = np.full((T, 2), [100.0, 100.0])
@@ -365,9 +501,71 @@ def test_daytrade_can_trade_inverse_pullback_in_bear_market():
     assert results[0] > 0
 
 
-def test_daytrade_can_trade_strong_oversold_in_bull_market():
+def test_daytrade_can_trade_inverse_rebreak_after_failed_rebound():
     T = 104
     dates = pd.date_range("2024-01-01", periods=T)
+    tickers = ["1360.T", "1321.T"]
+
+    close_data = np.full((T, 2), [100.0, 100.0])
+    open_data = np.full((T, 2), [100.0, 100.0])
+    high_data = np.full((T, 2), [101.0, 101.0])
+    low_data = np.full((T, 2), [99.0, 99.0])
+    atr_data = np.full((T, 2), [2.0, 1.0])
+    rsi2_data = np.full((T, 2), [60.0, 40.0])
+    rs_alpha_data = np.full((T, 2), [10.0, -5.0])
+
+    close_data[100] = [112.0, 90.0]
+    open_data[100] = [111.0, 91.0]
+
+    close_data[101] = [100.0, 87.0]
+    open_data[101] = [101.0, 89.0]
+    high_data[101] = [102.0, 90.0]
+    low_data[101] = [99.0, 86.0]
+
+    open_data[102] = [104.9, 84.5]
+    close_data[102] = [106.0, 84.0]
+    high_data[102] = [108.0, 85.0]
+    low_data[102] = [104.5, 83.5]
+
+    bundle_np = {
+        "Close": close_data,
+        "Open": open_data,
+        "High": high_data,
+        "Low": low_data,
+        "SMA5": np.full((T, 2), [110.0, 100.0]),
+        "SMA20": np.full((T, 2), [110.0, 100.0]),
+        "SMA100": np.full((T, 2), [110.0, 100.0]),
+        "SMA200": np.full((T, 2), [110.0, 100.0]),
+        "ATR": atr_data,
+        "RSI2": rsi2_data,
+        "RS_Alpha": rs_alpha_data,
+        "Turnover": np.full((T, 2), 2_000_000_000.0),
+        "BB_LOWER_2": np.full((T, 2), [95.0, 95.0]),
+        "tickers": tickers,
+    }
+
+    final_assets, trade_count, monthly, results, trade_log = run_backtest_v16_production(
+        univ_indices=np.array([0]),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.12,
+        initial_cash=1_000_000,
+        max_pos=1,
+        slippage=0.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        return_trade_log=True,
+    )
+
+    assert trade_count == 1
+    assert final_assets > 1_000_000
+    assert results[0] > 0
+    assert trade_log[0]["setup_type"] == "inverse_rebreak"
+
+
+def test_daytrade_can_trade_strong_oversold_in_bull_market():
+    T = 104
+    dates = pd.date_range("2023-12-31", periods=T)
     tickers = ["9000.T", "1321.T"]
 
     close_data = np.full((T, 2), [100.0, 100.0])

@@ -1,0 +1,261 @@
+import os
+import pickle
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import pandas as pd
+
+import jp_jquants_fetcher_v2 as fetcher
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+class _Always429Client:
+    def get_list(self):
+        raise RuntimeError("too many 429 error responses")
+
+
+class TestJpJquantsFetcherV2(unittest.TestCase):
+    def test_extract_subscription_floor_date_from_text_parses_api_message(self):
+        text = (
+            '{"message": "Your subscription covers the following dates: 2021-05-16 ~ . '
+            'If you want more data, please check other plans:https://jpx-jquants.com/#dataset"}'
+        )
+
+        floor_date = fetcher._extract_subscription_floor_date_from_text(text)
+
+        self.assertEqual(floor_date, "2021-05-16")
+
+    def test_resolve_refresh_start_date_uses_cached_latest_day_with_overlap(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                {"Close": [100.0, 101.0]},
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            start_date = fetcher.resolve_refresh_start_date(
+                output_path=output_path,
+                refresh_overlap_days=7,
+            )
+
+        self.assertEqual(start_date, "20260508")
+
+    def test_resolve_incremental_target_tickers_prefers_cached_universe_plus_missing_codes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                [[100.0, 200.0], [101.0, 201.0]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("1301.T", "Close"),
+                        ("7203.T", "Close"),
+                    ]
+                ),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            target_tickers = fetcher.resolve_incremental_target_tickers(
+                output_path=output_path,
+                ticker_codes=["13010", "72030", "67580"],
+                checkpointed_tickers={"1301", "7203"},
+            )
+
+        self.assertEqual(target_tickers, ["1301", "6758", "7203"])
+
+    def test_resolve_incremental_target_tickers_normalizes_legacy_five_digit_checkpoint_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                [[100.0, 200.0], [101.0, 201.0]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("1301.T", "Close"),
+                        ("7203.T", "Close"),
+                    ]
+                ),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            target_tickers = fetcher.resolve_incremental_target_tickers(
+                output_path=output_path,
+                ticker_codes=["1301", "7203", "6758"],
+                checkpointed_tickers={"13010", "72030"},
+            )
+
+        self.assertEqual(target_tickers, ["1301", "6758", "7203"])
+
+    def test_fetch_ticker_turbo_merges_overlapping_rows_into_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            existing = pd.DataFrame(
+                [
+                    {"Date": "2026-05-14", "Code": "72030", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000},
+                    {"Date": "2026-05-15", "Code": "72030", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100},
+                ]
+            )
+            existing.to_pickle(os.path.join(temp_dir, "7203.pkl"))
+
+            payload = {
+                "data": [
+                    {"Date": "2026-05-15", "Code": "72030", "AdjO": 201.0, "AdjH": 202.0, "AdjL": 200.0, "AdjC": 201.5, "AdjVo": 2100},
+                    {"Date": "2026-05-16", "Code": "72030", "AdjO": 202.0, "AdjH": 203.0, "AdjL": 201.0, "AdjC": 202.5, "AdjVo": 2200},
+                ]
+            }
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir), patch.object(
+                fetcher.requests,
+                "get",
+                return_value=_FakeResponse(200, payload),
+            ):
+                result = fetcher.fetch_ticker_turbo("7203", "dummy-token", "20260515", "20260516")
+
+            self.assertEqual(result, "SUCCESS:7203")
+            merged = pd.read_pickle(os.path.join(temp_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
+            self.assertEqual(list(pd.to_datetime(merged["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15", "2026-05-16"])
+            self.assertEqual(float(merged.loc[1, "Open"]), 201.0)
+            self.assertEqual(float(merged.loc[2, "Close"]), 202.5)
+
+    def test_fetch_ticker_turbo_returns_failure_detail_for_non_200_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir), patch.object(
+                fetcher.requests,
+                "get",
+                return_value=_FakeResponse(400, {"message": "bad request"}),
+            ):
+                result = fetcher.fetch_ticker_turbo("7203", "dummy-token", "20210405", "20260516")
+
+        self.assertIn("FAIL:7203:status=400", result)
+
+    def test_fetch_ticker_turbo_returns_range_error_when_subscription_floor_is_hit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            message = {
+                "message": "Your subscription covers the following dates: 2021-05-16 ~ . "
+                "If you want more data, please check other plans:https://jpx-jquants.com/#dataset"
+            }
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir), patch.object(
+                fetcher.requests,
+                "get",
+                return_value=_FakeResponse(400, message),
+            ):
+                result = fetcher.fetch_ticker_turbo("7203", "dummy-token", "20210405", "20260516")
+
+        self.assertEqual(result, "RANGE_ERROR:7203:min_date=2021-05-16")
+
+    def test_seed_missing_checkpoints_from_output_cache_restores_history_when_checkpoint_dir_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                [[100.0, 101.0, 99.0, 100.5, 1000], [101.0, 102.0, 100.0, 101.5, 1100]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("7203.T", "Open"),
+                        ("7203.T", "High"),
+                        ("7203.T", "Low"),
+                        ("7203.T", "Close"),
+                        ("7203.T", "Volume"),
+                    ]
+                ),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir):
+                seeded = fetcher.seed_missing_checkpoints_from_output_cache(output_path, ["72030"])
+
+            self.assertEqual(seeded, 1)
+            restored = pd.read_pickle(os.path.join(temp_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
+            self.assertEqual(list(pd.to_datetime(restored["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
+            self.assertEqual(float(restored.loc[0, "Open"]), 100.0)
+            self.assertEqual(float(restored.loc[1, "Close"]), 101.5)
+
+    def test_fetch_ticker_master_with_fallback_uses_cached_universe_after_rate_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                [[100.0, 200.0], [101.0, 201.0]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("1301.T", "Close"),
+                        ("7203.T", "Close"),
+                    ]
+                ),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            with patch.object(fetcher.jquantsapi, "ClientV2", return_value=_Always429Client()), patch.object(
+                fetcher.time,
+                "sleep",
+                return_value=None,
+            ):
+                ticker_codes, used_fallback = fetcher.fetch_ticker_master_with_fallback(
+                    output_path=output_path,
+                    checkpointed_tickers={"67580"},
+                    api_key="dummy-token",
+                    max_retries=2,
+                )
+
+        self.assertTrue(used_fallback)
+        self.assertEqual(ticker_codes, ["1301", "6758", "7203"])
+
+    def test_load_existing_checkpoint_merges_legacy_and_normalized_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            normalized = pd.DataFrame(
+                [{"Date": "2026-05-15", "Code": "7203", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100}]
+            )
+            legacy = pd.DataFrame(
+                [{"Date": "2026-05-14", "Code": "72030", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000}]
+            )
+            normalized.to_pickle(os.path.join(temp_dir, "7203.pkl"))
+            legacy.to_pickle(os.path.join(temp_dir, "72030.pkl"))
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir):
+                merged = fetcher._load_existing_checkpoint("7203")
+
+            self.assertEqual(list(pd.to_datetime(merged["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
+
+    def test_resolve_full_refresh_target_tickers_skips_already_backfilled_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            complete = pd.DataFrame(
+                [
+                    {"Date": "2021-04-05", "Code": "1301", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000},
+                    {"Date": "2026-05-15", "Code": "1301", "Open": 200.0, "High": 201.0, "Low": 199.0, "Close": 200.5, "Volume": 2000},
+                ]
+            )
+            incomplete = pd.DataFrame(
+                [
+                    {"Date": "2026-03-27", "Code": "7203", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100},
+                    {"Date": "2026-05-15", "Code": "7203", "Open": 201.0, "High": 202.0, "Low": 200.0, "Close": 201.5, "Volume": 2100},
+                ]
+            )
+            complete.to_pickle(os.path.join(temp_dir, "1301.pkl"))
+            incomplete.to_pickle(os.path.join(temp_dir, "7203.pkl"))
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir):
+                target_tickers = fetcher.resolve_full_refresh_target_tickers(
+                    ticker_codes=["1301", "7203", "6758"],
+                    start_date="20210405",
+                )
+
+        self.assertEqual(target_tickers, ["6758", "7203"])
+
+
+if __name__ == "__main__":
+    unittest.main()

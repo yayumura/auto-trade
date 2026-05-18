@@ -25,17 +25,52 @@ from core.logic import (
     is_daytrade_fallback_market_allowed,
     is_daytrade_inverse_market_allowed,
     is_daytrade_inverse_pullback_market_allowed,
+    is_daytrade_inverse_rebreak_context,
     is_daytrade_monthly_risk_blocked,
     is_daytrade_market_allowed,
     is_daytrade_strong_oversold_market_allowed,
     is_daytrade_weekly_profit_guard_active,
+    is_daytrade_bull_etf_price_allowed,
     resolve_daytrade_intraday_stop_mult,
     resolve_daytrade_intraday_target_mult,
     resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_buying_power,
     resolve_daytrade_inverse_buying_power,
+    resolve_daytrade_selected_leverage,
+    resolve_daytrade_selected_inverse_buying_power_leverage,
+    resolve_daytrade_scan_min_turnover,
+    resolve_daytrade_inverse_min_turnover,
+    DAYTRADE_PRIMARY_HOT_CONTINUATION_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_PRIMARY_LOW_RS_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_PRIMARY_STRETCHED_STALL_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_PRIMARY_FRAGILE_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_PRIMARY_HEATED_CONTINUATION_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_PRIMARY_TUESDAY_OVERHEATED_EQUITY_NOTIONAL_PCT,
+    resolve_daytrade_primary_equity_notional_pct,
+    resolve_daytrade_fallback_equity_notional_pct,
+    resolve_daytrade_catchup_equity_notional_pct,
+    resolve_daytrade_catchup_notional_pct,
     resolve_daytrade_weekly_leverage,
     select_daytrade_candidates,
+    DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE,
+    DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_HOT_PREV_RETURN_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE,
+    DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_FALLBACK_HIGH_BREADTH_EXTENDED_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE,
+    DAYTRADE_SELECTED_FRAGILE_HOT_MARKET_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_HEATED_POSITIVE_GAP_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_LATE_WEEK_HIGH_SCORE_HOT_MARKET_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_LOW_SCORE_OVERHEATED_NO_TRADE_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_LOW_SCORE_HOT_GAP_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_OVERHEATED_LOW_BREADTH_MAX_LEVERAGE,
+    DAYTRADE_SELECTED_WEDNESDAY_NONPOSITIVE_GAP_NO_TRADE_MAX_LEVERAGE,
 )
 
 class TestLogic(unittest.TestCase):
@@ -125,10 +160,39 @@ class TestLogic(unittest.TestCase):
                 prev_market_close=100.0,
             )
         )
+    def test_daytrade_catchup_rs_caps_hot_prev_return(self):
+        eligible = evaluate_daytrade_catchup_open_setups(
+            102.0,
+            100.0,
+            99.0,
+            0.40,
+            prev_atr=2.0,
+            prev_low=98.0,
+            prev_rsi2=60.0,
+            rs_alpha=30.0,
+            prev_prev_close=92.593,
+            prev_sma_trend=90.0,
+        )
+        self.assertTrue(any(item["setup_type"] == "catchup_rs" for item in eligible))
+
+        capped = evaluate_daytrade_catchup_open_setups(
+            102.0,
+            100.0,
+            99.0,
+            0.40,
+            prev_atr=2.0,
+            prev_low=98.0,
+            prev_rsi2=60.0,
+            rs_alpha=30.0,
+            prev_prev_close=91.743,
+            prev_sma_trend=90.0,
+        )
+        self.assertFalse(any(item["setup_type"] == "catchup_rs" for item in capped))
 
     def test_daytrade_weekly_leverage_catches_up_until_target(self):
         self.assertEqual(get_daytrade_week_key(pd.Timestamp("2026-04-24")), "2026-W17")
-        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_000_000), 20.0)
+        self.assertEqual(get_daytrade_week_key(pd.Timestamp("2026-04-20")), "2026-W17")
+        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_000_000), 30.0)
         self.assertAlmostEqual(
             resolve_daytrade_weekly_leverage(
                 1.0,
@@ -154,11 +218,11 @@ class TestLogic(unittest.TestCase):
                 1_000_000,
                 current_time=pd.Timestamp("2026-04-23"),
             ),
-            20.0,
+            30.0,
         )
-        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_004_999), 20.0)
-        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_005_000), 20.0)
-        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_009_999), 20.0)
+        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_004_999), 30.0)
+        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_005_000), 30.0)
+        self.assertAlmostEqual(resolve_daytrade_weekly_leverage(1.0, 1_000_000, 1_009_999), 30.0)
         self.assertAlmostEqual(
             resolve_daytrade_weekly_leverage(
                 1.0,
@@ -176,17 +240,17 @@ class TestLogic(unittest.TestCase):
                 current_time=pd.Timestamp("2026-04-22"),
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             is_daytrade_weekly_profit_guard_active(
                 1_000_000,
-                1_005_000,
+                1_009_000,
                 current_time=pd.Timestamp("2026-04-23"),
             )
         )
         self.assertTrue(
             is_daytrade_weekly_profit_guard_active(
                 1_000_000,
-                1_009_000,
+                1_010_000,
                 current_time=pd.Timestamp("2026-04-24"),
             )
         )
@@ -198,8 +262,789 @@ class TestLogic(unittest.TestCase):
         self.assertAlmostEqual(resolve_daytrade_intraday_target_mult(40.0), 2.0)
         self.assertAlmostEqual(resolve_daytrade_buying_power(1_000_000, 1_000_000, 2.3), 2_300_000)
         self.assertAlmostEqual(resolve_daytrade_inverse_buying_power(1_000_000, 1_000_000), 1_000_000)
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_rs", "score": 10.0, "gap_pct": 0.009}],
+                0.30,
+                trade_weekday=1,
+            ),
+            0.20,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.5,
+                [{"setup_type": "catchup_rs", "score": 10.0, "gap_pct": 0.009}],
+                0.30,
+                trade_weekday=1,
+            ),
+            1.5,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 9.0, "gap_pct": 0.004}],
+                0.50,
+                market_ratio=1.16,
+                trade_weekday=0,
+            ),
+            DAYTRADE_SELECTED_FRAGILE_HOT_MARKET_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 7.5, "gap_pct": 0.004}],
+                0.59,
+                market_ratio=1.18,
+                trade_weekday=0,
+            ),
+            DAYTRADE_SELECTED_LOW_SCORE_HOT_GAP_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 7.5, "gap_pct": 0.004}],
+                0.59,
+                market_ratio=1.20,
+                trade_weekday=0,
+            ),
+            DAYTRADE_SELECTED_LOW_SCORE_OVERHEATED_NO_TRADE_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 7.5, "gap_pct": -0.004}],
+                0.59,
+                market_ratio=1.18,
+                trade_weekday=0,
+            ),
+            1.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 7.5, "gap_pct": 0.004}],
+                0.50,
+                market_ratio=1.18,
+                trade_weekday=0,
+            ),
+            DAYTRADE_SELECTED_LOW_SCORE_HOT_GAP_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 11.5, "gap_pct": 0.004}],
+                0.59,
+                market_ratio=1.18,
+                trade_weekday=1,
+            ),
+            DAYTRADE_SELECTED_HEATED_POSITIVE_GAP_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 9.5, "gap_pct": 0.0}],
+                0.70,
+                market_ratio=1.12,
+                trade_weekday=2,
+            ),
+            DAYTRADE_SELECTED_WEDNESDAY_NONPOSITIVE_GAP_NO_TRADE_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 9.5, "gap_pct": 0.0}],
+                0.64,
+                market_ratio=1.12,
+                trade_weekday=2,
+            ),
+            1.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 10.5, "gap_pct": 0.0}],
+                0.70,
+                market_ratio=1.12,
+                trade_weekday=2,
+            ),
+            1.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 11.5, "gap_pct": 0.004}],
+                0.59,
+                market_ratio=1.18,
+                trade_weekday=2,
+            ),
+            DAYTRADE_SELECTED_LATE_WEEK_HIGH_SCORE_HOT_MARKET_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 11.5, "gap_pct": 0.004}],
+                0.59,
+                market_ratio=1.22,
+                trade_weekday=2,
+            ),
+            DAYTRADE_SELECTED_LATE_WEEK_HIGH_SCORE_HOT_MARKET_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 11.5, "gap_pct": 0.0}],
+                0.59,
+                market_ratio=1.18,
+                trade_weekday=2,
+            ),
+            DAYTRADE_SELECTED_LATE_WEEK_HIGH_SCORE_HOT_MARKET_MAX_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 10.0, "gap_pct": 0.004}],
+                0.50,
+                market_ratio=1.10,
+                trade_weekday=0,
+            ),
+            1.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "inverse", "score": 10.0, "gap_pct": 0.004}],
+                0.50,
+                market_ratio=1.16,
+                trade_weekday=0,
+            ),
+            1.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                1.25,
+                [{"setup_type": "primary", "score": 11.5, "gap_pct": -0.004}],
+                0.59,
+                market_ratio=1.22,
+                trade_weekday=2,
+            ),
+            DAYTRADE_SELECTED_LATE_WEEK_HIGH_SCORE_HOT_MARKET_MAX_LEVERAGE,
+        )
+        self.assertEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_rs", "score": 12.0, "gap_pct": 0.009}],
+                0.30,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_rs", "score": 10.0, "gap_pct": 0.011}],
+                0.30,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_gapdown", "score": 7.0, "gap_pct": -0.012}],
+                0.30,
+                market_ratio=1.08,
+                trade_weekday=2,
+            ),
+            DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE,
+        )
+        self.assertEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_gapdown", "score": 7.0, "gap_pct": -0.012}],
+                0.30,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{"setup_type": "catchup_gapdown", "score": 8.0, "gap_pct": -0.012}],
+                0.30,
+                trade_weekday=2,
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{
+                    "setup_type": "bull_etf_rebound",
+                    "score": 8.5,
+                    "gap_pct": 0.034,
+                    "prev_return": 0.017,
+                    "prev_rsi2": 46.2,
+                    "open_vs_sma_atr": -2.9,
+                    "code": "1570",
+                }],
+                0.15,
+            ),
+            DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE,
+        )
+        self.assertEqual(
+            resolve_daytrade_selected_leverage(
+                0.0,
+                [{
+                    "setup_type": "bull_etf_rebound",
+                    "score": 8.5,
+                    "gap_pct": 0.034,
+                    "prev_return": 0.017,
+                    "prev_rsi2": 46.2,
+                    "open_vs_sma_atr": -2.9,
+                    "code": "1570",
+                }],
+                0.25,
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_NOTIONAL_PCT, 1.0)
+        self.assertTrue(is_daytrade_bull_etf_price_allowed(22_795.5, "1570.T", 0.15))
+        self.assertFalse(is_daytrade_bull_etf_price_allowed(22_795.5, "7203.T", 0.15))
+        self.assertFalse(is_daytrade_bull_etf_price_allowed(22_795.5, "1570.T", 0.25))
+        self.assertAlmostEqual(resolve_daytrade_scan_min_turnover("1368", 0.09), 125_000_000.0)
+        self.assertAlmostEqual(resolve_daytrade_scan_min_turnover("1368", 0.10), 300_000_000.0)
+        self.assertAlmostEqual(resolve_daytrade_scan_min_turnover("7203", 0.09), 300_000_000.0)
+        self.assertAlmostEqual(resolve_daytrade_inverse_min_turnover(0.09), 125_000_000.0)
+        self.assertAlmostEqual(resolve_daytrade_inverse_min_turnover(0.10), 300_000_000.0)
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_inverse_buying_power_leverage(
+                [{"setup_type": "inverse", "turnover": 140_000_000.0}],
+                0.09,
+            ),
+            0.60,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_inverse_buying_power_leverage(
+                [{"setup_type": "inverse", "adv_yen": 140_000_000.0}],
+                0.09,
+            ),
+            0.60,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_inverse_buying_power_leverage(
+                [{"setup_type": "inverse", "turnover": 400_000_000.0}],
+                0.09,
+            ),
+            DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_selected_inverse_buying_power_leverage(
+                [{"setup_type": "inverse", "turnover": 140_000_000.0}],
+                0.12,
+            ),
+            DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE,
+        )
         self.assertAlmostEqual(resolve_daytrade_breadth_exposure_scale(0.49), 0.35)
         self.assertAlmostEqual(resolve_daytrade_breadth_exposure_scale(0.50), 1.0)
+        self.assertAlmostEqual(DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT, 1.20)
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.65,
+                gap_pct=0.008,
+                open_vs_sma_atr=0.4,
+                trade_weekday=1,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.65,
+                gap_pct=0.0,
+                open_vs_sma_atr=0.4,
+                trade_weekday=1,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.008,
+                open_vs_sma_atr=3.4,
+                trade_weekday=0,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.015,
+                open_vs_sma_atr=3.4,
+                trade_weekday=0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.52,
+                gap_pct=0.028,
+                open_vs_sma_atr=0.4,
+                trade_weekday=0,
+            ),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.52,
+                gap_pct=0.028,
+                open_vs_sma_atr=1.2,
+                trade_weekday=0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.020,
+                open_vs_sma_atr=-0.2,
+                trade_weekday=2,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.020,
+                open_vs_sma_atr=0.2,
+                trade_weekday=2,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.75,
+                gap_pct=0.018,
+                open_vs_sma_atr=1.2,
+                trade_weekday=2,
+                prev_return=0.06,
+                prev_rsi2=62.0,
+            ),
+            DAYTRADE_PRIMARY_HOT_CONTINUATION_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.75,
+                gap_pct=0.018,
+                open_vs_sma_atr=1.2,
+                trade_weekday=2,
+                prev_return=0.06,
+                prev_rsi2=55.0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.002,
+                open_vs_sma_atr=1.8,
+                trade_weekday=0,
+            ),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.65,
+                gap_pct=-0.001,
+                open_vs_sma_atr=1.8,
+                trade_weekday=1,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.008,
+                open_vs_sma_atr=1.8,
+                trade_weekday=1,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.58,
+                gap_pct=0.005,
+                open_vs_sma_atr=2.2,
+                trade_weekday=3,
+            ),
+            0.90,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.52,
+                gap_pct=0.005,
+                open_vs_sma_atr=2.2,
+                trade_weekday=3,
+            ),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.58,
+                gap_pct=0.005,
+                open_vs_sma_atr=0.8,
+                trade_weekday=3,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.007,
+                open_vs_sma_atr=1.1,
+                market_ratio=1.07,
+                primary_score=11.0,
+                trade_weekday=2,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.007,
+                open_vs_sma_atr=1.1,
+                market_ratio=1.12,
+                primary_score=11.0,
+                trade_weekday=2,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.007,
+                open_vs_sma_atr=1.1,
+                market_ratio=1.20,
+                primary_score=11.0,
+                trade_weekday=1,
+            ),
+            DAYTRADE_PRIMARY_TUESDAY_OVERHEATED_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.66,
+                gap_pct=0.018,
+                open_vs_sma_atr=0.8,
+                market_ratio=1.10,
+                primary_score=11.5,
+                prev_return=0.040,
+                trade_weekday=0,
+            ),
+            DAYTRADE_PRIMARY_HEATED_CONTINUATION_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.66,
+                gap_pct=0.018,
+                open_vs_sma_atr=0.8,
+                market_ratio=1.10,
+                primary_score=11.5,
+                prev_return=0.030,
+                trade_weekday=0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.52,
+                gap_pct=0.012,
+                open_vs_sma_atr=0.8,
+                market_ratio=1.12,
+                primary_score=7.5,
+                trade_weekday=0,
+            ),
+            DAYTRADE_PRIMARY_FRAGILE_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.52,
+                gap_pct=0.012,
+                open_vs_sma_atr=1.2,
+                market_ratio=1.12,
+                primary_score=7.5,
+                trade_weekday=0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.58,
+                gap_pct=0.015,
+                open_vs_sma_atr=1.2,
+                rs_alpha=8.0,
+                trade_weekday=0,
+            ),
+            DAYTRADE_PRIMARY_LOW_RS_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.72,
+                gap_pct=0.007,
+                open_vs_sma_atr=1.1,
+                market_ratio=1.07,
+                primary_score=11.0,
+                rs_alpha=8.0,
+                trade_weekday=2,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.65,
+                gap_pct=0.015,
+                open_vs_sma_atr=4.4,
+                rs_alpha=40.0,
+                trade_weekday=0,
+            ),
+            DAYTRADE_PRIMARY_STRETCHED_STALL_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.65,
+                gap_pct=0.015,
+                open_vs_sma_atr=5.1,
+                rs_alpha=40.0,
+                trade_weekday=0,
+            ),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.006,
+                breadth_val=0.55,
+                trade_weekday=1,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.004,
+                breadth_val=0.55,
+                trade_weekday=2,
+            ),
+            DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.006929,
+                breadth_val=0.578801,
+                prev_return=0.051866,
+                open_vs_sma_atr=4.132314,
+                trade_weekday=0,
+            ),
+            DAYTRADE_FALLBACK_HIGH_BREADTH_EXTENDED_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.008621,
+                breadth_val=0.569735,
+                prev_return=-0.004766,
+                open_vs_sma_atr=3.787703,
+                trade_weekday=0,
+            ),
+            DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.006,
+                breadth_val=0.80,
+                trade_weekday=2,
+            ),
+            0.30,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.006,
+                breadth_val=0.44,
+                score=3.5,
+                trade_weekday=2,
+            ),
+            0.30,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.006,
+                breadth_val=0.48,
+                score=4.5,
+                trade_weekday=2,
+            ),
+            0.50,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.002,
+                breadth_val=0.42,
+                prev_return=0.03,
+                open_vs_sma_atr=0.8,
+                trade_weekday=4,
+            ),
+            DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_fallback_equity_notional_pct(
+                gap_pct=0.002,
+                breadth_val=0.42,
+                prev_return=0.03,
+                open_vs_sma_atr=1.3,
+                trade_weekday=4,
+            ),
+            DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.44,
+                gap_pct=0.012,
+                open_vs_sma_atr=1.6,
+                trade_weekday=0,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.44,
+                gap_pct=0.012,
+                open_vs_sma_atr=1.4,
+                trade_weekday=0,
+            ),
+            DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.48,
+                gap_pct=0.002,
+                prev_return=0.081858,
+                open_vs_sma_atr=3.9,
+                trade_weekday=2,
+            ),
+            DAYTRADE_CATCHUP_RS_HOT_PREV_RETURN_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.60,
+                gap_pct=0.017,
+                prev_return=0.084663,
+                open_vs_sma_atr=3.26,
+                trade_weekday=1,
+            ),
+            DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.44,
+                gap_pct=0.012,
+                open_vs_sma_atr=2.1,
+                trade_weekday=4,
+            ),
+            0.35,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.44,
+                gap_pct=0.012,
+                open_vs_sma_atr=1.9,
+                trade_weekday=4,
+            ),
+            0.75,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.40,
+                gap_pct=-0.018,
+                open_vs_sma_atr=-1.2,
+                trade_weekday=0,
+            ),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.40,
+                gap_pct=-0.018,
+                open_vs_sma_atr=-0.8,
+                trade_weekday=0,
+            ),
+            DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.30,
+                gap_pct=-0.010,
+                open_vs_sma_atr=0.3,
+                trade_weekday=4,
+            ),
+            DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.40,
+                gap_pct=-0.009,
+                open_vs_sma_atr=0.3,
+                trade_weekday=1,
+            ),
+            0.10,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.40,
+                gap_pct=-0.009,
+                open_vs_sma_atr=0.8,
+                trade_weekday=1,
+            ),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.30,
+                gap_pct=-0.010,
+                trade_weekday=4,
+            ),
+            DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_equity_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.40,
+                gap_pct=-0.009,
+                trade_weekday=1,
+            ),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_notional_pct(
+                setup_type="catchup_gapdown",
+                breadth_val=0.55,
+                market_ratio=1.06,
+            ),
+            DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_catchup_notional_pct(
+                setup_type="catchup_rs",
+                breadth_val=0.54,
+                market_ratio=1.06,
+            ),
+            DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
+        )
         self.assertEqual(
             cap_daytrade_position_size(
                 raw_shares=5_000,
@@ -476,7 +1321,7 @@ class TestLogic(unittest.TestCase):
 
     def test_daytrade_primary_setup_avoids_tuesday_mid_breadth_weak_rs_extension(self):
         blocked_open = evaluate_daytrade_open_setup(
-            open_p=106.8,
+            open_p=107.3,
             prev_close=105.0,
             sma_med=102.0,
             breadth_val=0.55,
@@ -489,7 +1334,7 @@ class TestLogic(unittest.TestCase):
             trade_weekday=1,
         )
         allowed_open = evaluate_daytrade_open_setup(
-            open_p=106.8,
+            open_p=107.3,
             prev_close=105.0,
             sma_med=102.0,
             breadth_val=0.55,
@@ -507,7 +1352,7 @@ class TestLogic(unittest.TestCase):
 
     def test_daytrade_primary_setup_avoids_tuesday_high_breadth_weak_rs_extension(self):
         blocked_open = evaluate_daytrade_open_setup(
-            open_p=107.0,
+            open_p=107.8,
             prev_close=105.5,
             sma_med=102.0,
             breadth_val=0.72,
@@ -520,7 +1365,7 @@ class TestLogic(unittest.TestCase):
             trade_weekday=1,
         )
         allowed_open = evaluate_daytrade_open_setup(
-            open_p=107.0,
+            open_p=107.8,
             prev_close=105.5,
             sma_med=102.0,
             breadth_val=0.72,
@@ -535,6 +1380,402 @@ class TestLogic(unittest.TestCase):
 
         self.assertIsNone(blocked_open)
         self.assertIsNotNone(allowed_open)
+
+    def test_daytrade_primary_setup_avoids_tuesday_index_gap_mid_breadth(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=100.4,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.55,
+            prev_open=96.5,
+            prev_atr=2.0,
+            prev_low=98.5,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=96.0,
+            trade_weekday=1,
+            market_open=101.2,
+            prev_market_close=100.0,
+        )
+        allowed_lower_index_gap = evaluate_daytrade_open_setup(
+            open_p=100.4,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.55,
+            prev_open=96.5,
+            prev_atr=2.0,
+            prev_low=98.5,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=96.0,
+            trade_weekday=1,
+            market_open=100.8,
+            prev_market_close=100.0,
+        )
+        allowed_other_breadth = evaluate_daytrade_open_setup(
+            open_p=100.4,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.62,
+            prev_open=96.5,
+            prev_atr=2.0,
+            prev_low=98.5,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=96.0,
+            trade_weekday=1,
+            market_open=101.2,
+            prev_market_close=100.0,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=100.5,
+            open_p=100.4,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.55,
+            prev_open=96.5,
+            prev_atr=2.0,
+            prev_low=98.5,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=96.0,
+            trade_weekday=1,
+            market_open=101.2,
+            prev_market_close=100.0,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_lower_index_gap)
+        self.assertIsNotNone(allowed_other_breadth)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_tuesday_stall_gap(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=109.62,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+        allowed_open_lower_gap = evaluate_daytrade_open_setup(
+            open_p=109.1,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+        allowed_open_other_day = evaluate_daytrade_open_setup(
+            open_p=109.62,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=109.8,
+            open_p=109.62,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open_lower_gap)
+        self.assertIsNotNone(allowed_open_other_day)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_tuesday_far_trend_extension(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=108.2,
+            prev_close=108.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+        allowed_open_below_threshold = evaluate_daytrade_open_setup(
+            open_p=108.2,
+            prev_close=108.0,
+            sma_med=100.1,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+        allowed_open_other_day = evaluate_daytrade_open_setup(
+            open_p=108.2,
+            prev_close=108.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=4,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=108.4,
+            open_p=108.2,
+            prev_close=108.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open_below_threshold)
+        self.assertIsNotNone(allowed_open_other_day)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_wednesday_stall_gap_and_far_trend(self):
+        blocked_gap_open = evaluate_daytrade_open_setup(
+            open_p=108.864,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        allowed_gap_other_day = evaluate_daytrade_open_setup(
+            open_p=108.864,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=3,
+        )
+        blocked_far_trend_open = evaluate_daytrade_open_setup(
+            open_p=110.3,
+            prev_close=108.0,
+            sma_med=99.5,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        allowed_far_trend_below_threshold = evaluate_daytrade_open_setup(
+            open_p=110.3,
+            prev_close=108.0,
+            sma_med=100.2,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=110.5,
+            open_p=110.3,
+            prev_close=108.0,
+            sma_med=99.5,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+
+        self.assertIsNone(blocked_gap_open)
+        self.assertIsNotNone(allowed_gap_other_day)
+        self.assertIsNone(blocked_far_trend_open)
+        self.assertIsNotNone(allowed_far_trend_below_threshold)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_tuesday_crowded_mid_high_breadth(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=100.9,
+            prev_close=100.0,
+            sma_med=96.0,
+            breadth_val=0.65,
+            prev_open=99.0,
+            prev_atr=2.0,
+            prev_low=98.8,
+            prev_rsi2=55.0,
+            rs_alpha=60.0,
+            prev_prev_close=97.0,
+            trade_weekday=1,
+        )
+        allowed_higher_gap = evaluate_daytrade_open_setup(
+            open_p=101.1,
+            prev_close=100.0,
+            sma_med=96.0,
+            breadth_val=0.65,
+            prev_open=99.0,
+            prev_atr=2.0,
+            prev_low=98.8,
+            prev_rsi2=55.0,
+            rs_alpha=60.0,
+            prev_prev_close=97.0,
+            trade_weekday=1,
+        )
+        allowed_lower_rs = evaluate_daytrade_open_setup(
+            open_p=100.9,
+            prev_close=100.0,
+            sma_med=96.0,
+            breadth_val=0.65,
+            prev_open=99.0,
+            prev_atr=2.0,
+            prev_low=98.8,
+            prev_rsi2=55.0,
+            rs_alpha=50.0,
+            prev_prev_close=97.0,
+            trade_weekday=1,
+        )
+        allowed_other_day = evaluate_daytrade_open_setup(
+            open_p=100.9,
+            prev_close=100.0,
+            sma_med=96.0,
+            breadth_val=0.65,
+            prev_open=99.0,
+            prev_atr=2.0,
+            prev_low=98.8,
+            prev_rsi2=55.0,
+            rs_alpha=60.0,
+            prev_prev_close=97.0,
+            trade_weekday=3,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=101.2,
+            open_p=100.9,
+            prev_close=100.0,
+            sma_med=96.0,
+            breadth_val=0.65,
+            prev_open=99.0,
+            prev_atr=2.0,
+            prev_low=98.8,
+            rs_alpha=60.0,
+            rsi2=55.0,
+            prev_prev_close=97.0,
+            trade_weekday=1,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_higher_gap)
+        self.assertIsNotNone(allowed_lower_rs)
+        self.assertIsNotNone(allowed_other_day)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_wednesday_small_gap(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=108.54,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        allowed_boundary_gap = evaluate_daytrade_open_setup(
+            open_p=108.324,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+        allowed_other_day = evaluate_daytrade_open_setup(
+            open_p=108.54,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=104.0,
+            trade_weekday=1,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=108.7,
+            open_p=108.54,
+            prev_close=108.0,
+            sma_med=104.0,
+            breadth_val=0.72,
+            prev_open=106.5,
+            prev_atr=2.0,
+            prev_low=106.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=104.0,
+            trade_weekday=2,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_boundary_gap)
+        self.assertIsNotNone(allowed_other_day)
+        self.assertIsNone(blocked_live)
 
     def test_daytrade_primary_setup_avoids_thursday_mid_breadth_low_gap_without_followthrough(self):
         blocked_open = evaluate_daytrade_open_setup(
@@ -561,7 +1802,7 @@ class TestLogic(unittest.TestCase):
             prev_rsi2=55.0,
             rs_alpha=40.0,
             prev_prev_close=97.5,
-            trade_weekday=2,
+            trade_weekday=4,
         )
 
         self.assertIsNone(blocked_open)
@@ -584,23 +1825,221 @@ class TestLogic(unittest.TestCase):
         allowed_open = evaluate_daytrade_open_setup(
             open_p=102.8,
             prev_close=101.0,
-            sma_med=99.0,
+            sma_med=98.5,
             breadth_val=0.55,
             prev_open=100.5,
             prev_atr=2.0,
             prev_low=100.3,
             prev_rsi2=55.0,
             rs_alpha=40.0,
-            prev_prev_close=94.0,
+            prev_prev_close=96.0,
             trade_weekday=3,
         )
 
         self.assertIsNone(blocked_open)
         self.assertIsNotNone(allowed_open)
 
+    def test_daytrade_primary_setup_avoids_thursday_broad_late_week_extension(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=107.0,
+            prev_close=106.6,
+            sma_med=102.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=100.0,
+            trade_weekday=3,
+        )
+        allowed_open = evaluate_daytrade_open_setup(
+            open_p=107.0,
+            prev_close=106.6,
+            sma_med=102.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=100.0,
+            trade_weekday=4,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=107.5,
+            open_p=107.0,
+            prev_close=106.6,
+            sma_med=102.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=100.0,
+            trade_weekday=3,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_thursday_neutral_trend_stall(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=105.0,
+            prev_close=104.0,
+            sma_med=103.0,
+            breadth_val=0.72,
+            prev_open=102.0,
+            prev_atr=2.0,
+            prev_low=101.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=100.0,
+            trade_weekday=3,
+        )
+        allowed_open = evaluate_daytrade_open_setup(
+            open_p=105.0,
+            prev_close=104.0,
+            sma_med=103.0,
+            breadth_val=0.72,
+            prev_open=102.0,
+            prev_atr=2.0,
+            prev_low=101.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=100.0,
+            trade_weekday=4,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=105.5,
+            open_p=105.0,
+            prev_close=104.0,
+            sma_med=103.0,
+            breadth_val=0.72,
+            prev_open=102.0,
+            prev_atr=2.0,
+            prev_low=101.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=100.0,
+            trade_weekday=3,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_thursday_stall_trend_extension(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=108.0,
+            prev_close=107.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=103.0,
+            trade_weekday=3,
+        )
+        allowed_open_below_threshold = evaluate_daytrade_open_setup(
+            open_p=108.0,
+            prev_close=107.0,
+            sma_med=101.2,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=103.0,
+            trade_weekday=3,
+        )
+        allowed_open_other_day = evaluate_daytrade_open_setup(
+            open_p=108.0,
+            prev_close=107.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            prev_rsi2=55.0,
+            rs_alpha=40.0,
+            prev_prev_close=103.0,
+            trade_weekday=4,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=108.3,
+            open_p=108.0,
+            prev_close=107.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=105.5,
+            prev_atr=2.0,
+            prev_low=105.0,
+            rs_alpha=40.0,
+            rsi2=55.0,
+            prev_prev_close=103.0,
+            trade_weekday=3,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open_below_threshold)
+        self.assertIsNotNone(allowed_open_other_day)
+        self.assertIsNone(blocked_live)
+
+    def test_daytrade_primary_setup_avoids_friday_flat_gap_weak_rs(self):
+        blocked_open = evaluate_daytrade_open_setup(
+            open_p=105.6,
+            prev_close=105.2,
+            sma_med=102.0,
+            breadth_val=0.65,
+            prev_open=104.5,
+            prev_atr=2.0,
+            prev_low=104.0,
+            prev_rsi2=55.0,
+            rs_alpha=8.0,
+            prev_prev_close=100.0,
+            trade_weekday=4,
+        )
+        allowed_open = evaluate_daytrade_open_setup(
+            open_p=105.6,
+            prev_close=105.2,
+            sma_med=102.0,
+            breadth_val=0.65,
+            prev_open=104.5,
+            prev_atr=2.0,
+            prev_low=104.0,
+            prev_rsi2=55.0,
+            rs_alpha=12.0,
+            prev_prev_close=100.0,
+            trade_weekday=4,
+        )
+        blocked_live = evaluate_daytrade_setup(
+            price=106.1,
+            open_p=105.6,
+            prev_close=105.2,
+            sma_med=102.0,
+            breadth_val=0.65,
+            prev_open=104.5,
+            prev_atr=2.0,
+            prev_low=104.0,
+            rs_alpha=8.0,
+            rsi2=55.0,
+            prev_prev_close=100.0,
+            trade_weekday=4,
+        )
+
+        self.assertIsNone(blocked_open)
+        self.assertIsNotNone(allowed_open)
+        self.assertIsNone(blocked_live)
+
     def test_daytrade_fallback_open_setup_is_bounded(self):
         accepted = evaluate_daytrade_fallback_open_setup(
-            open_p=100.2,
+            open_p=101.1,
             prev_close=100.0,
             sma_med=98.0,
             breadth_val=0.40,
@@ -611,7 +2050,7 @@ class TestLogic(unittest.TestCase):
             prev_prev_close=99.5,
         )
         rejected = evaluate_daytrade_fallback_open_setup(
-            open_p=103.0,
+            open_p=101.3,
             prev_close=100.0,
             sma_med=98.0,
             breadth_val=0.40,
@@ -624,6 +2063,45 @@ class TestLogic(unittest.TestCase):
 
         self.assertIsNotNone(accepted)
         self.assertIsNone(rejected)
+
+    def test_daytrade_fallback_open_setup_avoids_low_breadth_flat_gap(self):
+        blocked = evaluate_daytrade_fallback_open_setup(
+            open_p=100.25,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.39,
+            prev_atr=2.0,
+            prev_low=99.2,
+            prev_rsi2=55.0,
+            rs_alpha=15.0,
+            prev_prev_close=99.5,
+        )
+        allowed_by_breadth = evaluate_daytrade_fallback_open_setup(
+            open_p=100.25,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.40,
+            prev_atr=2.0,
+            prev_low=99.2,
+            prev_rsi2=55.0,
+            rs_alpha=15.0,
+            prev_prev_close=99.5,
+        )
+        allowed_by_gap = evaluate_daytrade_fallback_open_setup(
+            open_p=100.5,
+            prev_close=100.0,
+            sma_med=98.0,
+            breadth_val=0.39,
+            prev_atr=2.0,
+            prev_low=99.2,
+            prev_rsi2=55.0,
+            rs_alpha=15.0,
+            prev_prev_close=99.5,
+        )
+
+        self.assertIsNone(blocked)
+        self.assertIsNotNone(allowed_by_breadth)
+        self.assertIsNotNone(allowed_by_gap)
 
     def test_daytrade_fallback_open_setup_accepts_moderately_hot_rsi(self):
         accepted = evaluate_daytrade_fallback_open_setup(
@@ -667,6 +2145,27 @@ class TestLogic(unittest.TestCase):
             score_daytrade_fallback_open_setup(stretched, prev_rsi2=60.0, rs_alpha=30.0),
         )
 
+    def test_daytrade_fallback_score_prefers_structural_room_over_compression(self):
+        compressed = {
+            "gap_pct": 0.007,
+            "prev_return": 0.022,
+            "open_from_prev_low_atr": 0.75,
+            "open_vs_sma_atr": 0.46,
+            "rs_alpha": 40.0,
+        }
+        structured = {
+            "gap_pct": 0.007,
+            "prev_return": 0.020,
+            "open_from_prev_low_atr": 1.20,
+            "open_vs_sma_atr": 4.00,
+            "rs_alpha": 33.0,
+        }
+
+        self.assertGreater(
+            score_daytrade_fallback_open_setup(structured, prev_rsi2=60.0, rs_alpha=33.0),
+            score_daytrade_fallback_open_setup(compressed, prev_rsi2=60.0, rs_alpha=40.0),
+        )
+
     def test_daytrade_catchup_setups_cover_gapdown_and_strong_rs(self):
         gapdown = evaluate_daytrade_catchup_open_setups(
             open_p=97.1,
@@ -708,6 +2207,7 @@ class TestLogic(unittest.TestCase):
         self.assertEqual(gapdown[0]["setup_type"], "catchup_gapdown")
         self.assertEqual(strong_rs[0]["setup_type"], "catchup_rs")
         self.assertFalse(any(item["setup_type"] == "catchup_gapdown" for item in shallow_gap))
+        self.assertAlmostEqual(DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT, 0.50)
         self.assertGreater(score_daytrade_catchup_open_setup(gapdown[0]), 4.0)
         self.assertGreater(score_daytrade_catchup_open_setup(strong_rs[0]), 4.0)
 
@@ -765,6 +2265,54 @@ class TestLogic(unittest.TestCase):
         self.assertLess(accepted["gap_pct"], 0.0)
         self.assertGreater(score_daytrade_inverse_open_setup(accepted, rs_alpha=10.0), 3.0)
         self.assertIsNone(rejected)
+
+    def test_daytrade_inverse_open_setup_supports_panic_rebreak(self):
+        accepted = evaluate_daytrade_inverse_open_setup(
+            open_p=104.9,
+            prev_close=100.0,
+            breadth_val=0.12,
+            prev_atr=2.0,
+            prev_prev_close=112.0,
+            market_open=84.5,
+            prev_market_close=87.0,
+            prev_market_sma_trend=100.0,
+        )
+        rejected_shallow_market = evaluate_daytrade_inverse_open_setup(
+            open_p=104.9,
+            prev_close=100.0,
+            breadth_val=0.12,
+            prev_atr=2.0,
+            prev_prev_close=112.0,
+            market_open=90.0,
+            prev_market_close=92.0,
+            prev_market_sma_trend=100.0,
+        )
+        rejected_first_panic_day = evaluate_daytrade_inverse_open_setup(
+            open_p=104.9,
+            prev_close=100.0,
+            breadth_val=0.12,
+            prev_atr=2.0,
+            prev_prev_close=96.0,
+            market_open=84.5,
+            prev_market_close=87.0,
+            prev_market_sma_trend=100.0,
+        )
+
+        self.assertTrue(
+            is_daytrade_inverse_rebreak_context(
+                0.12,
+                market_open=84.5,
+                prev_market_close=87.0,
+                prev_market_sma_trend=100.0,
+            )
+        )
+        self.assertIsNotNone(accepted)
+        self.assertEqual(accepted["setup_type"], "inverse_rebreak")
+        self.assertGreater(accepted["gap_pct"], 0.03)
+        self.assertLess(accepted["prev_return"], 0.0)
+        self.assertGreater(score_daytrade_inverse_open_setup(accepted, rs_alpha=10.0), 3.0)
+        self.assertIsNone(rejected_shallow_market)
+        self.assertIsNone(rejected_first_panic_day)
 
     def test_daytrade_strong_oversold_open_setup_targets_strong_market_dips(self):
         self.assertTrue(
@@ -824,32 +2372,235 @@ class TestLogic(unittest.TestCase):
         self.assertFalse(should_replace_primary_with_preferred_etf(9.0, 9.9, 0.70))
         self.assertFalse(should_replace_primary_with_preferred_etf(9.0, 11.5, 0.64))
 
-    def test_daytrade_candidate_selection_can_prefer_bull_etf_over_marginal_primary(self):
-        primary = [{"code": "3000", "score": 9.5, "setup_type": "primary"}]
-        strong_oversold = [{"code": "1579", "score": 11.0, "setup_type": "strong_oversold"}]
-        catchup = [{"code": "1306", "score": 10.8, "setup_type": "catchup_rs"}]
+    def test_daytrade_candidate_selection_prefers_bull_etf_over_low_breadth_non_primary(self):
+        catchup = [
+            {"code": "7979", "score": 11.9, "setup_type": "catchup_rs", "gap_pct": 0.0149},
+            {"code": "7011", "score": 7.3, "setup_type": "catchup_rs", "gap_pct": 0.0173},
+        ]
+        bull_etf = [{"code": "1570", "score": 8.4, "setup_type": "bull_etf_rebound"}]
 
         self.assertEqual(
             select_daytrade_candidates(
-                primary,
-                strong_oversold,
+                [],
+                [],
                 [],
                 catchup,
-                breadth_val=0.70,
+                [],
+                bull_etf,
+                breadth_val=0.216,
+                trade_weekday=1,
                 max_count=1,
             )[0]["code"],
-            "1579",
+            "1570",
         )
         self.assertEqual(
             select_daytrade_candidates(
-                primary,
-                strong_oversold,
+                [],
+                [],
                 [],
                 catchup,
-                breadth_val=0.60,
+                [],
+                [],
+                breadth_val=0.216,
+                trade_weekday=1,
+                max_count=1,
+            )[0]["code"],
+            "7979",
+        )
+
+    def test_daytrade_candidate_selection_replaces_primary_on_high_ratio_crowding(self):
+        primary = [
+            {"code": f"{3000 + idx}", "score": 10.0 - (idx * 0.05), "setup_type": "primary"}
+            for idx in range(20)
+        ]
+        catchup = [
+            {"code": "9000", "score": 11.2, "setup_type": "catchup_rs"},
+            {"code": "9001", "score": 9.8, "setup_type": "catchup_rs"},
+        ]
+
+        replaced = select_daytrade_candidates(
+            primary,
+            [],
+            [],
+            catchup,
+            market_ratio=1.10,
+            max_count=1,
+        )
+        self.assertEqual(replaced[0]["code"], "9000")
+        self.assertEqual(
+            select_daytrade_candidates(
+                primary,
+                [],
+                [],
+                catchup,
+                market_ratio=1.09,
                 max_count=1,
             )[0]["code"],
             "3000",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                primary[:19],
+                [],
+                [],
+                catchup,
+                market_ratio=1.10,
+                max_count=1,
+            )[0]["code"],
+            "3000",
+        )
+
+    def test_daytrade_candidate_selection_replaces_fallback_with_hot_market_catchup_rs(self):
+        fallback = [{"code": "2282", "score": 3.8, "setup_type": "fallback"}]
+        catchup = [{"code": "7940", "score": 14.4, "setup_type": "catchup_rs", "gap_pct": 0.011}]
+
+        replaced = select_daytrade_candidates(
+            [],
+            [],
+            fallback,
+            catchup,
+            breadth_val=0.54,
+            market_ratio=1.11,
+            max_count=1,
+        )
+        self.assertEqual(replaced[0]["code"], "7940")
+        self.assertEqual(replaced[0]["setup_type"], "catchup_rs")
+
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                fallback,
+                catchup,
+                breadth_val=0.56,
+                market_ratio=1.11,
+                max_count=1,
+            )[0]["code"],
+            "2282",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                fallback,
+                catchup,
+                breadth_val=0.54,
+                market_ratio=1.09,
+                max_count=1,
+            )[0]["code"],
+            "2282",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                fallback,
+                [{"code": "7940", "score": 14.4, "setup_type": "catchup_rs", "gap_pct": 0.013}],
+                breadth_val=0.54,
+                market_ratio=1.11,
+                max_count=1,
+            )[0]["code"],
+            "2282",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                fallback,
+                [{"code": "7940", "score": 9.7, "setup_type": "catchup_rs", "gap_pct": 0.011}],
+                breadth_val=0.54,
+                market_ratio=1.11,
+                max_count=1,
+            )[0]["code"],
+            "2282",
+        )
+
+    def test_daytrade_candidate_selection_filters_friday_countertrend_setups(self):
+        strong_oversold = [{"code": "1579", "score": 11.0, "setup_type": "strong_oversold"}]
+        inverse = [
+            {"code": "1459", "score": 20.0, "setup_type": "inverse_pullback"},
+            {"code": "1368", "score": 4.0, "setup_type": "inverse"},
+        ]
+        catchup = [{"code": "2500", "score": 7.0, "setup_type": "catchup_rs"}]
+
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                strong_oversold,
+                [],
+                catchup,
+                inverse,
+                trade_weekday=4,
+                max_count=1,
+            )[0]["code"],
+            "2500",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                strong_oversold,
+                [],
+                [],
+                inverse,
+                trade_weekday=4,
+                max_count=1,
+            )[0]["code"],
+            "1368",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                strong_oversold,
+                [],
+                [],
+                [{"code": "1459", "score": 20.0, "setup_type": "inverse_pullback"}],
+                trade_weekday=4,
+            ),
+            [],
+        )
+
+    def test_daytrade_candidate_selection_prefers_moderate_tuesday_low_breadth_catchup_rs(self):
+        catchup = [
+            {"code": "2586", "score": 25.0, "setup_type": "catchup_rs", "gap_pct": 0.009},
+            {"code": "8136", "score": 9.6, "setup_type": "catchup_rs", "gap_pct": 0.003},
+            {"code": "6516", "score": 6.1, "setup_type": "catchup_rs", "gap_pct": 0.000},
+        ]
+
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                [],
+                catchup,
+                breadth_val=0.30,
+                trade_weekday=1,
+                max_count=1,
+            )[0]["code"],
+            "8136",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                [],
+                catchup,
+                breadth_val=0.30,
+                trade_weekday=2,
+                max_count=1,
+            )[0]["code"],
+            "2586",
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                [],
+                catchup,
+                breadth_val=0.40,
+                trade_weekday=1,
+                max_count=1,
+            )[0]["code"],
+            "2586",
         )
 
     def test_daytrade_candidate_selection_can_replace_tuesday_mid_breadth_primary_with_fallback(self):
