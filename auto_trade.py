@@ -43,7 +43,7 @@ from core.config import (
     EXECUTION_LOG_FILE, TARGET_MARKETS,
     DEBUG_MODE, TRADE_MODE,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
-    SMA_LONG_PERIOD, MAX_POSITIONS,
+    SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
     SLIPPAGE_RATE, STOP_LOSS_ATR, load_insider_exclusion_codes,
     INTRADAY_SNAPSHOT_FILE,
 )
@@ -100,6 +100,8 @@ from core.logic import (
     resolve_daytrade_intraday_stop_mult,
     resolve_daytrade_inverse_buying_power,
     resolve_daytrade_buying_power,
+    resolve_daytrade_selected_leverage,
+    resolve_daytrade_selected_inverse_buying_power_leverage,
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
@@ -173,6 +175,11 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
     bundle = calculate_all_technicals_v12(data_df)
     close = bundle["Close"].iloc[-1]
     sma_long = bundle[f"SMA{SMA_LONG_PERIOD}"].iloc[-1]
+    market_open = np.nan
+    prev_market_sma_trend = np.nan
+    if "1321.T" in bundle["Open"].columns and len(bundle["Open"]) >= 2:
+        market_open = bundle["Open"]["1321.T"].iloc[-1]
+        prev_market_sma_trend = bundle[f"SMA{SMA_TREND_PERIOD}"]["1321.T"].iloc[-2]
     prime_ref = set(get_prime_tickers())
     elite_cols = [ticker for ticker in close.index if ticker in prime_ref and ticker in sma_long.index]
     breadth_val = 0.0
@@ -182,6 +189,9 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
             for ticker in elite_cols
             if pd.notna(close[ticker]) and pd.notna(sma_long[ticker])
         ]))
+    market_ratio = np.nan
+    if not pd.isna(market_open) and not pd.isna(prev_market_sma_trend) and float(prev_market_sma_trend) > 0:
+        market_ratio = float(market_open) / float(prev_market_sma_trend)
 
     top_candidates = select_best_candidates(
         data_df=data_df,
@@ -198,6 +208,7 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
     return {
         "top_candidates": top_candidates,
         "breadth": breadth_val,
+        "market_ratio": market_ratio,
         "latest_close_map": latest_close_map,
     }
 
@@ -619,6 +630,7 @@ def _main_exec():
             print("\n=> 🔍 デイトレード定期スキャン処理を開始します...")
             should_continue_scan = True
             dynamic_lev = 0.0
+            base_dynamic_lev = 0.0
             top_candidates = []
             weekly_profit_guard_active = False
             try:
@@ -655,9 +667,9 @@ def _main_exec():
                         regime=regime,
                     )
                     breadth_val = snapshot["breadth"] if snapshot["breadth"] > 0 else breadth_val
-                    dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
+                    base_dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
                     dynamic_lev = resolve_daytrade_weekly_leverage(
-                        base_leverage=dynamic_lev,
+                        base_leverage=base_dynamic_lev,
                         week_start_equity=account.get("daytrade_week_start_equity", current_total),
                         current_equity=current_total,
                         current_time=server_datetime,
@@ -688,9 +700,23 @@ def _main_exec():
                 should_continue_scan = False
 
             inverse_only = is_inverse_only_candidate_set(top_candidates)
+            selected_base_lev = resolve_daytrade_selected_leverage(
+                base_leverage=base_dynamic_lev,
+                selected_candidates=top_candidates,
+                breadth_val=breadth_val,
+                market_ratio=snapshot.get("market_ratio"),
+                trade_date=server_datetime,
+            )
+            selected_dynamic_lev = resolve_daytrade_weekly_leverage(
+                base_leverage=selected_base_lev,
+                week_start_equity=account.get("daytrade_week_start_equity", current_total),
+                current_equity=current_total,
+                current_time=server_datetime,
+            )
+            selected_dynamic_lev *= resolve_daytrade_breadth_exposure_scale(breadth_val)
             if weekly_profit_guard_active:
                 save_watchlist([])
-            elif should_continue_scan and (dynamic_lev > 0 or inverse_only):
+            elif should_continue_scan and (selected_dynamic_lev > 0 or inverse_only):
                 watchlist = [str(item["code"]) for item in top_candidates[:max(5, MAX_POSITIONS * 4)]]
                 save_watchlist(watchlist)
 
@@ -732,15 +758,21 @@ def _main_exec():
                 day_buying_power = resolve_daytrade_buying_power(
                     current_equity=day_equity,
                     account_cash=account['cash'],
-                    dynamic_leverage=dynamic_lev,
+                    dynamic_leverage=selected_dynamic_lev,
                     current_exposure=current_exposure,
                 )
                 inverse_day_buying_power = 0.0
+                inverse_buying_power_leverage = 1.0
                 if inverse_only:
+                    inverse_buying_power_leverage = resolve_daytrade_selected_inverse_buying_power_leverage(
+                        top_candidates,
+                        breadth_val,
+                    )
                     inverse_day_buying_power = resolve_daytrade_inverse_buying_power(
                         current_equity=day_equity,
                         account_cash=account['cash'],
                         current_exposure=current_exposure,
+                        leverage=inverse_buying_power_leverage,
                     )
                 opened_count = 0
                 for item in selected_candidates:
@@ -751,10 +783,10 @@ def _main_exec():
                     stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
                     stop_price = max(0.01, buy_price - (float(item.get('atr', 0.0)) * stop_mult))
                     candidate_buying_power = day_buying_power
-                    candidate_dynamic_lev = dynamic_lev
+                    candidate_dynamic_lev = selected_dynamic_lev
                     if is_daytrade_inverse_setup_type(item.get("setup_type")):
                         candidate_buying_power = inverse_day_buying_power
-                        candidate_dynamic_lev = 1.0
+                        candidate_dynamic_lev = inverse_buying_power_leverage
                     shares = calculate_lot_size(
                         current_equity=day_equity,
                         atr=float(item.get('atr', 0.0)),
