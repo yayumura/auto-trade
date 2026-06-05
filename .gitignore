@@ -12,6 +12,7 @@ execution_log.csv
 .bot_sim.lock
 logs/
 data_cache/
+tmp/
 opt_results.csv
 scratch/
 data/simulation/

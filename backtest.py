@@ -901,9 +901,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                exit_buffer=0.975, max_hold_days=1,
                                liquidity_limit=0.025, bull_gap_limit=DAYTRADE_MAX_GAP,
                                 bear_gap_limit=BEAR_GAP_LIMIT,
-                                atr_trail_mult=3.0, rsi_threshold=DAYTRADE_MAX_RSI2,
+                               atr_trail_mult=3.0, rsi_threshold=DAYTRADE_MAX_RSI2,
                                 entry_slippage=None, exit_slippage=None,
                                 explicit_trade_cost=0.0, profit_tax_rate=0.0,
+                                evaluation_start_date=None,
                                 return_daily_stats=False,
                                 return_trade_log=False,
                                 verbose=False):
@@ -946,10 +947,29 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     month_done = False
     current_week = ""
     week_start_equity = initial_cash
+    evaluation_started = evaluation_start_date is None
+    if evaluation_start_date is not None:
+        evaluation_start_date = pd.Timestamp(evaluation_start_date).normalize()
 
     for i in range(2, T):
         curr_time = timeline[i]
-        
+
+        if not evaluation_started:
+            if pd.Timestamp(curr_time).normalize() < evaluation_start_date:
+                continue
+            evaluation_started = True
+            cash = float(initial_cash)
+            trade_count = 0
+            monthly_assets = {}
+            trade_results = []
+            daily_stats = {}
+            trade_log = []
+            current_month = ""
+            month_start_equity = float(initial_cash)
+            month_done = False
+            current_week = ""
+            week_start_equity = float(initial_cash)
+
         if curr_time.strftime('%Y-%m') != current_month:
             current_month = curr_time.strftime('%Y-%m')
             month_start_equity = cash

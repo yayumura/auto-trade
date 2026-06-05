@@ -1,9 +1,12 @@
 import argparse
+import json
 import os
 import pickle
 import re
+import shutil
 import sys
 import time
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
@@ -28,6 +31,7 @@ DEFAULT_OUTPUT_PATH = "data_cache/jp_broad/jp_mega_cache.pkl"
 DEFAULT_START_DATE = "20210405"
 DEFAULT_REFRESH_OVERLAP_DAYS = 7
 DEFAULT_MAX_WORKERS = 4
+_REFRESH_BACKUP_TAG = None
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -78,6 +82,21 @@ def parse_args():
         default=5,
         help="Print up to this many concrete failure samples during refresh.",
     )
+    parser.add_argument(
+        "--audit-only",
+        action="store_true",
+        help="Only audit checkpoint vs cache drift and exit without refreshing.",
+    )
+    parser.add_argument(
+        "--list-backups",
+        action="store_true",
+        help="List available full cache snapshots and exit.",
+    )
+    parser.add_argument(
+        "--restore-backup",
+        default="",
+        help="Restore a previously created full cache snapshot (use 'latest' for the newest snapshot) and exit.",
+    )
     return parser.parse_args()
 
 
@@ -118,6 +137,326 @@ def _checkpoint_exists(ticker_code):
     return any(os.path.exists(path) for path in _checkpoint_pickle_candidates(ticker_code))
 
 
+def _cache_root_dir():
+    checkpoint_dir = os.path.abspath(CHECKPOINT_DIR)
+    if os.path.basename(checkpoint_dir.rstrip(os.sep)).lower() == "checkpoints":
+        return os.path.dirname(checkpoint_dir)
+    return checkpoint_dir
+
+
+def _get_refresh_backup_tag():
+    global _REFRESH_BACKUP_TAG
+    if not _REFRESH_BACKUP_TAG:
+        _REFRESH_BACKUP_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return _REFRESH_BACKUP_TAG
+
+
+def _backup_root_dir():
+    return os.path.join(_cache_root_dir(), "backups")
+
+
+def _snapshot_root_dir(snapshot_tag):
+    return os.path.join(_backup_root_dir(), snapshot_tag)
+
+
+def _normalize_snapshot_name(snapshot_name):
+    return str(snapshot_name).strip()
+
+
+def _load_snapshot_manifest(snapshot_tag):
+    manifest_path = os.path.join(_snapshot_root_dir(snapshot_tag), "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _list_snapshot_tags(include_partial=False):
+    root = _backup_root_dir()
+    if not os.path.isdir(root):
+        return []
+    tags = []
+    for entry in sorted(os.listdir(root)):
+        snapshot_root = os.path.join(root, entry)
+        if not os.path.isdir(snapshot_root):
+            continue
+        manifest = _load_snapshot_manifest(entry)
+        if not include_partial and (not manifest or manifest.get("kind") != "full_snapshot"):
+            continue
+        tags.append(entry)
+    return tags
+
+
+def _resolve_snapshot_tag(snapshot_name):
+    snapshot_name = _normalize_snapshot_name(snapshot_name)
+    tags = _list_snapshot_tags(include_partial=False)
+    if not tags:
+        return None
+    if snapshot_name in {"", "latest"}:
+        return tags[-1]
+    if snapshot_name not in tags:
+        raise FileNotFoundError(
+            f"Snapshot '{snapshot_name}' not found. Available snapshots: {', '.join(tags) or '(none)'}"
+        )
+    return snapshot_name
+
+
+def _copy_file_to_snapshot(path, snapshot_tag):
+    if not os.path.exists(path):
+        return None
+
+    snapshot_root = _snapshot_root_dir(snapshot_tag)
+    cache_root = _cache_root_dir()
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(cache_root)
+    try:
+        rel_path = os.path.relpath(abs_path, abs_root)
+    except ValueError:
+        rel_path = os.path.basename(abs_path)
+
+    backup_path = os.path.join(snapshot_root, rel_path)
+    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+    shutil.copy2(abs_path, backup_path)
+    return backup_path
+
+
+def _backup_existing_file(path):
+    if not os.path.exists(path):
+        return None
+
+    return _copy_file_to_snapshot(path, _get_refresh_backup_tag())
+
+
+def _atomic_pickle_dump(path, obj):
+    dir_name = os.path.dirname(path)
+    os.makedirs(dir_name, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=dir_name, prefix=".tmp_", suffix=".pkl")
+    try:
+        os.close(fd)
+        with open(temp_path, "wb") as handle:
+            pickle.dump(obj, handle)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def _date_set(frame):
+    if frame is None or frame.empty or "Date" not in frame.columns:
+        return set()
+    dates = pd.to_datetime(frame["Date"], errors="coerce").dropna().dt.normalize()
+    return set(pd.DatetimeIndex(dates))
+
+
+def _history_is_strictly_longer(candidate, existing):
+    candidate_dates = _date_set(candidate)
+    existing_dates = _date_set(existing)
+    if not candidate_dates:
+        return False
+    if not existing_dates:
+        return True
+    return existing_dates.issubset(candidate_dates) and len(candidate_dates) > len(existing_dates)
+
+
+def _checkpoint_needs_repair_from_cache(ticker_code, history, existing):
+    if history is None or history.empty:
+        return False
+    if existing is None or existing.empty:
+        return True
+
+    ticker_code = str(ticker_code).upper()
+    history_rows = len(history)
+    existing_rows = len(existing)
+
+    if history_rows < 50:
+        return False
+    if ticker_code.endswith("A"):
+        return False
+    if existing_rows <= 10:
+        return True
+    if history_rows >= 200 and existing_rows <= max(30, int(history_rows * 0.05)):
+        return True
+    return False
+
+
+def _snapshot_current_cache_state(output_path=DEFAULT_OUTPUT_PATH, snapshot_tag=None):
+    snapshot_tag = snapshot_tag or _get_refresh_backup_tag()
+    snapshot_root = _snapshot_root_dir(snapshot_tag)
+    os.makedirs(snapshot_root, exist_ok=True)
+
+    copied = []
+    if os.path.exists(output_path):
+        copied_path = _copy_file_to_snapshot(output_path, snapshot_tag)
+        if copied_path:
+            copied.append(copied_path)
+
+    if os.path.isdir(CHECKPOINT_DIR):
+        for filename in sorted(os.listdir(CHECKPOINT_DIR)):
+            path = os.path.join(CHECKPOINT_DIR, filename)
+            if not os.path.isfile(path):
+                continue
+            copied_path = _copy_file_to_snapshot(path, snapshot_tag)
+            if copied_path:
+                copied.append(copied_path)
+
+    manifest = {
+        "kind": "full_snapshot",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "snapshot_tag": snapshot_tag,
+        "source_output_path": os.path.abspath(output_path),
+        "cache_root": os.path.abspath(_cache_root_dir()),
+        "checkpoint_dir": os.path.abspath(CHECKPOINT_DIR),
+        "file_count": len(copied),
+    }
+    manifest_path = os.path.join(snapshot_root, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, ensure_ascii=False)
+    return snapshot_root
+
+
+def _restore_snapshot(snapshot_name, output_path=DEFAULT_OUTPUT_PATH):
+    snapshot_tag = _resolve_snapshot_tag(snapshot_name)
+    if snapshot_tag is None:
+        raise FileNotFoundError("No full cache snapshots are available to restore.")
+
+    snapshot_root = _snapshot_root_dir(snapshot_tag)
+    manifest = _load_snapshot_manifest(snapshot_tag)
+    if not manifest or manifest.get("kind") != "full_snapshot":
+        raise RuntimeError(f"Snapshot '{snapshot_tag}' is not a full snapshot and cannot be restored safely.")
+
+    preserved_tag = f"pre_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    _snapshot_current_cache_state(output_path=output_path, snapshot_tag=preserved_tag)
+
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    if os.path.isdir(CHECKPOINT_DIR):
+        for filename in os.listdir(CHECKPOINT_DIR):
+            path = os.path.join(CHECKPOINT_DIR, filename)
+            if os.path.isfile(path):
+                os.remove(path)
+
+    restored = 0
+    for root, _dirs, files in os.walk(snapshot_root):
+        for filename in files:
+            if filename == "manifest.json":
+                continue
+            src = os.path.join(root, filename)
+            rel_path = os.path.relpath(src, snapshot_root)
+            dst = os.path.join(_cache_root_dir(), rel_path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            restored += 1
+
+    return {
+        "snapshot_tag": snapshot_tag,
+        "snapshot_root": snapshot_root,
+        "restored_files": restored,
+    }
+
+
+def _audit_checkpoint_drift(output_path, ticker_codes, debug_failure_samples=5, repair=False):
+    cached = _load_output_cache_frame(output_path)
+    if cached is None:
+        print("CACHE AUDIT: consolidated cache not found or unreadable; skipping checkpoint drift audit.")
+        return {"missing": 0, "shorter": 0, "aligned": 0, "repaired": 0}
+
+    ticker_codes = sorted({_normalize_ticker_code(code) for code in ticker_codes})
+    missing = []
+    truncated = []
+    aligned = []
+    for ticker_code in ticker_codes:
+        history = _extract_ticker_history_from_output_cache(cached, ticker_code)
+        existing = _load_existing_checkpoint(ticker_code)
+        if history.empty:
+            missing.append(ticker_code)
+        elif existing.empty:
+            missing.append(ticker_code)
+        elif _checkpoint_needs_repair_from_cache(ticker_code, history, existing):
+            truncated.append(ticker_code)
+        else:
+            aligned.append(ticker_code)
+
+    samples = truncated[: max(0, int(debug_failure_samples))]
+    print(
+        "CACHE AUDIT: "
+        f"aligned={len(aligned)} missing={len(missing)} truncated={len(truncated)} "
+        f"latest_cache={str(pd.Timestamp(cached.index.max()).date())}"
+    )
+    if missing:
+        print("CACHE AUDIT missing samples: " + ", ".join(missing[: max(0, int(debug_failure_samples))]))
+    if truncated:
+        print("CACHE AUDIT truncated samples: " + ", ".join(samples))
+
+    repaired = 0
+    if repair and (missing or truncated):
+        repaired = seed_missing_checkpoints_from_output_cache(output_path, ticker_codes)
+        if repaired:
+            print(f"CACHE AUDIT repaired={repaired} checkpoint files from consolidated cache.")
+
+    return {
+        "missing": len(missing),
+        "truncated": len(truncated),
+        "aligned": len(aligned),
+        "repaired": repaired,
+        "missing_samples": missing[: max(0, int(debug_failure_samples))],
+        "truncated_samples": truncated[: max(0, int(debug_failure_samples))],
+    }
+
+
+def _run_cache_audit_only(output_path=DEFAULT_OUTPUT_PATH, debug_failure_samples=5, repair=False):
+    cached = _load_output_cache_frame(output_path)
+    if cached is None:
+        print(f"CACHE AUDIT: consolidated cache not found or unreadable at {output_path}")
+        return {"missing": 0, "shorter": 0, "aligned": 0, "repaired": 0}
+
+    ticker_codes = {
+        _normalize_ticker_code(str(ticker).replace(".T", ""))
+        for ticker in cached.columns.get_level_values(0).unique()
+    }
+    return _audit_checkpoint_drift(
+        output_path=output_path,
+        ticker_codes=sorted(ticker_codes),
+        debug_failure_samples=debug_failure_samples,
+        repair=repair,
+    )
+
+
+def _print_backup_catalog():
+    full_tags = _list_snapshot_tags(include_partial=False)
+    partial_tags = [tag for tag in _list_snapshot_tags(include_partial=True) if tag not in full_tags]
+
+    print("FULL SNAPSHOTS:")
+    if full_tags:
+        for tag in full_tags:
+            manifest = _load_snapshot_manifest(tag) or {}
+            created_at = manifest.get("created_at", "?")
+            file_count = manifest.get("file_count", "?")
+            print(f" - {tag} | created_at={created_at} | files={file_count}")
+    else:
+        print(" - (none)")
+
+    print("PARTIAL BACKUPS:")
+    if partial_tags:
+        for tag in partial_tags:
+            snapshot_root = _snapshot_root_dir(tag)
+            file_count = sum(
+                1
+                for root, _dirs, files in os.walk(snapshot_root)
+                for filename in files
+                if filename != "manifest.json"
+            )
+            print(f" - {tag} | files={file_count}")
+    else:
+        print(" - (none)")
+
+
 def _normalize_ticker_code(ticker_code):
     return str(ticker_code)[:4]
 
@@ -154,7 +493,12 @@ def _save_checkpoint_frame(ticker_code, frame):
     normalized_code = _normalize_ticker_code(ticker_code)
     path = _checkpoint_pickle_path(normalized_code)
     normalized = _normalize_quote_frame(frame, ticker_code)
-    normalized.to_pickle(path)
+    existing = _load_existing_checkpoint(normalized_code)
+    if not existing.empty:
+        _backup_existing_file(path)
+        merged = pd.concat([existing, normalized], ignore_index=True)
+        normalized = merged.drop_duplicates(subset=["Date"], keep="last").sort_values("Date").reset_index(drop=True)
+    _atomic_pickle_dump(path, normalized)
     for legacy_path in _checkpoint_pickle_candidates(normalized_code)[1:]:
         if os.path.exists(legacy_path):
             os.remove(legacy_path)
@@ -213,13 +557,13 @@ def seed_missing_checkpoints_from_output_cache(output_path, ticker_codes):
 
     seeded = 0
     for ticker_code in sorted({_normalize_ticker_code(code) for code in ticker_codes}):
-        if _checkpoint_exists(ticker_code):
-            continue
         history = _extract_ticker_history_from_output_cache(cached, ticker_code)
         if history.empty:
             continue
-        _save_checkpoint_frame(ticker_code, history)
-        seeded += 1
+        existing = _load_existing_checkpoint(ticker_code)
+        if _checkpoint_needs_repair_from_cache(ticker_code, history, existing):
+            _save_checkpoint_frame(ticker_code, history)
+            seeded += 1
     return seeded
 
 
@@ -414,6 +758,22 @@ def fetch_jquants_v2_turbo_revelation(
     Official J-Quants cache refresh with checkpoint-aware incremental updates.
     """
     print("WARNING: Ensure your dataset includes delisted tickers to avoid survivorship bias.")
+    global _REFRESH_BACKUP_TAG
+    _REFRESH_BACKUP_TAG = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if os.path.exists(output_path) or os.path.isdir(CHECKPOINT_DIR):
+        snapshot_root = _snapshot_current_cache_state(output_path=output_path)
+        print(f"Created safety snapshot: {snapshot_root}")
+
+    print("Running preflight cache audit before refresh...")
+    _run_cache_audit_only(
+        output_path=output_path,
+        debug_failure_samples=debug_failure_samples,
+        repair=True,
+    )
+    checkpointed_tickers = _list_checkpointed_tickers()
+    normalized_checkpoint_codes = {_normalize_ticker_code(code) for code in checkpointed_tickers}
+
     api_key = os.getenv("JQUANTS_REFRESH_TOKEN")
     if not api_key:
         api_key = os.getenv("JQUANTS_API_KEY")
@@ -432,18 +792,11 @@ def fetch_jquants_v2_turbo_revelation(
     )
     end_date = datetime.now().strftime("%Y%m%d")
 
-    checkpointed_tickers = _list_checkpointed_tickers()
-    normalized_checkpoint_codes = {_normalize_ticker_code(code) for code in checkpointed_tickers}
     ticker_codes, used_fallback_universe = fetch_ticker_master_with_fallback(
         output_path=output_path,
         checkpointed_tickers=checkpointed_tickers,
         api_key=api_key,
     )
-    if os.path.exists(output_path):
-        seeded = seed_missing_checkpoints_from_output_cache(output_path, ticker_codes)
-        if seeded:
-            print(f"Seeded {seeded} checkpoint files from the existing consolidated cache.")
-            checkpointed_tickers = _list_checkpointed_tickers()
     incremental_mode = (effective_start_date != DEFAULT_START_DATE) and not force_full_refresh
     if force_full_refresh:
         target_tickers = resolve_full_refresh_target_tickers(ticker_codes, effective_start_date)
@@ -550,8 +903,24 @@ def fetch_jquants_v2_turbo_revelation(
     pivot_df = pivot_df.swaplevel(0, 1, axis=1).sort_index(axis=1)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "wb") as handle:
-        pickle.dump(pivot_df, handle)
+    if os.path.exists(output_path):
+        existing_cache = _load_output_cache_frame(output_path)
+        if existing_cache is not None:
+            existing_index = pd.DatetimeIndex(existing_cache.index).normalize()
+            new_index = pd.DatetimeIndex(pivot_df.index).normalize()
+            shrank = (
+                len(new_index) < len(existing_index)
+                or new_index.min() > existing_index.min()
+                or new_index.max() < existing_index.max()
+            )
+            if shrank:
+                backup_path = _backup_existing_file(output_path)
+                raise RuntimeError(
+                    "Refusing to overwrite consolidated JP cache with shorter history. "
+                    f"Existing cache preserved at {backup_path or output_path}."
+                )
+        _backup_existing_file(output_path)
+    _atomic_pickle_dump(output_path, pivot_df)
 
     latest_day = pd.Timestamp(pivot_df.index.max()).date()
     print(f"Cache refresh completed: {output_path} (latest day {latest_day})")
@@ -559,6 +928,23 @@ def fetch_jquants_v2_turbo_revelation(
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.list_backups:
+        _print_backup_catalog()
+        sys.exit(0)
+    if args.restore_backup:
+        restored = _restore_snapshot(args.restore_backup, output_path=args.output_path)
+        print(
+            f"Restored snapshot '{restored['snapshot_tag']}' "
+            f"into {restored['restored_files']} files from {restored['snapshot_root']}."
+        )
+        cached = _load_output_cache_frame(args.output_path)
+        if cached is not None:
+            latest_day = pd.Timestamp(cached.index.max()).date()
+            print(f"Restored consolidated cache latest day {latest_day} at {args.output_path}")
+        sys.exit(0)
+    if args.audit_only:
+        _run_cache_audit_only(output_path=args.output_path, debug_failure_samples=args.debug_failure_samples)
+        sys.exit(0)
     fetch_jquants_v2_turbo_revelation(
         output_path=args.output_path,
         start_date=args.start_date or None,

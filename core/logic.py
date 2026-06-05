@@ -281,22 +281,12 @@ DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_MONDAY_HOT_GAP_MIN = 0.012
 DAYTRADE_CATCHUP_RS_MONDAY_EXTENDED_TREND_MIN_OPEN_VS_SMA_ATR = 1.5
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_EQUITY_NOTIONAL_PCT = 0.75
-DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_WEEKDAY = 1
-DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MIN_SCORE = 8.0
-DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_SCORE = 12.0
-DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_GAP = 0.010
-DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_LEVERAGE = 0.20
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_WEEKDAY = 4
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_FRIDAY_HOT_GAP_MIN = 0.010
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_EQUITY_NOTIONAL_PCT = 0.75
 DAYTRADE_CATCHUP_RS_FRIDAY_EXTENDED_TREND_MIN_OPEN_VS_SMA_ATR = 2.0
 DAYTRADE_CATCHUP_RS_FRIDAY_EXTENDED_TREND_EQUITY_NOTIONAL_PCT = 0.35
-DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAYS = (2, 3, 4)
-DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MIN_SCORE = 6.0
-DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_SCORE = 8.0
-DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_GAP = -0.010
-DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE = 0.35
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_BREADTH_MAX = 0.22
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_GAP = 0.03
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_PREV_RETURN_PCT = 0.0
@@ -1601,75 +1591,6 @@ def resolve_daytrade_buying_power(current_equity, account_cash, dynamic_leverage
     return max(0.0, available_budget)
 
 
-def is_daytrade_tuesday_low_breadth_probe_context(
-    breadth_val,
-    trade_date=None,
-    trade_weekday=None,
-):
-    if _is_invalid_number(breadth_val):
-        return False
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday != DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_WEEKDAY:
-        return False
-    breadth_val = float(breadth_val)
-    active_breadth_ceiling = min(BREADTH_THRESHOLD, DAYTRADE_FALLBACK_BREADTH_THRESHOLD)
-    return DAYTRADE_CATCHUP_BREADTH_THRESHOLD <= breadth_val < active_breadth_ceiling
-
-
-def is_daytrade_wed_fri_low_breadth_gapdown_probe_context(
-    breadth_val,
-    trade_date=None,
-    trade_weekday=None,
-):
-    if _is_invalid_number(breadth_val):
-        return False
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday is None or weekday not in DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAYS:
-        return False
-    breadth_val = float(breadth_val)
-    active_breadth_ceiling = min(BREADTH_THRESHOLD, DAYTRADE_FALLBACK_BREADTH_THRESHOLD)
-    return DAYTRADE_CATCHUP_BREADTH_THRESHOLD <= breadth_val < active_breadth_ceiling
-
-
-def prefer_daytrade_tuesday_low_breadth_catchup_rs_candidate(
-    catchup_candidates,
-    breadth_val,
-    trade_date=None,
-    trade_weekday=None,
-):
-    if not catchup_candidates or not is_daytrade_tuesday_low_breadth_probe_context(
-        breadth_val,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        return catchup_candidates
-
-    top_candidate = catchup_candidates[0]
-    if (
-        top_candidate.get("setup_type") != "catchup_rs"
-        or _is_invalid_number(top_candidate.get("score"))
-        or float(top_candidate.get("score")) < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_SCORE
-    ):
-        return catchup_candidates
-
-    moderate_candidates = [
-        item
-        for item in catchup_candidates
-        if item.get("setup_type") == "catchup_rs"
-        and not _is_invalid_number(item.get("score"))
-        and not _is_invalid_number(item.get("gap_pct"))
-        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MIN_SCORE
-        <= float(item.get("score"))
-        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_SCORE
-        and float(item.get("gap_pct")) <= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_GAP
-    ]
-    if not moderate_candidates:
-        return catchup_candidates
-
-    chosen = max(moderate_candidates, key=lambda item: float(item["score"]))
-    return [chosen] + [item for item in catchup_candidates if item is not chosen]
-
-
 def resolve_daytrade_selected_leverage(
     base_leverage,
     selected_candidates,
@@ -1682,6 +1603,7 @@ def resolve_daytrade_selected_leverage(
         return 0.0
     top_candidate = selected_candidates[0]
     weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+
     if is_daytrade_bull_etf_rebound_market_allowed(breadth_val):
         if top_candidate.get("setup_type") == "bull_etf_rebound":
             if not is_daytrade_bull_etf_code(top_candidate.get("ticker", top_candidate.get("code"))):
@@ -1712,6 +1634,7 @@ def resolve_daytrade_selected_leverage(
             if open_vs_sma_atr > DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MAX_OPEN_VS_SMA_ATR:
                 return 0.0
             return DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE
+
     if not _is_invalid_number(base_leverage) and float(base_leverage) > 0:
         resolved_base_leverage = float(base_leverage)
         if (
@@ -1817,84 +1740,9 @@ def resolve_daytrade_selected_leverage(
                 DAYTRADE_SELECTED_FRAGILE_HOT_MARKET_MAX_LEVERAGE,
             )
         return resolved_base_leverage
-    if is_daytrade_tuesday_low_breadth_probe_context(
-        breadth_val,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        if top_candidate.get("setup_type") != "catchup_rs":
-            return 0.0
-        score = top_candidate.get("score")
-        gap_pct = top_candidate.get("gap_pct")
-        if _is_invalid_number(score) or _is_invalid_number(gap_pct):
-            return 0.0
-        score = float(score)
-        gap_pct = float(gap_pct)
-        if not (
-            DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MIN_SCORE
-            <= score
-            < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_SCORE
-        ):
-            return 0.0
-        if gap_pct > DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_MAX_GAP:
-            return 0.0
-        return DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_LEVERAGE
 
-    if is_daytrade_wed_fri_low_breadth_gapdown_probe_context(
-        breadth_val,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        if top_candidate.get("setup_type") != "catchup_gapdown":
-            return 0.0
-        score = top_candidate.get("score")
-        gap_pct = top_candidate.get("gap_pct")
-        if _is_invalid_number(score) or _is_invalid_number(gap_pct):
-            return 0.0
-        score = float(score)
-        gap_pct = float(gap_pct)
-        if not (
-            DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MIN_SCORE
-            <= score
-            < DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_SCORE
-        ):
-            return 0.0
-        if gap_pct > DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_GAP:
-            return 0.0
-        return DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE
-
-    if is_daytrade_bull_etf_rebound_market_allowed(breadth_val):
-        if top_candidate.get("setup_type") != "bull_etf_rebound":
-            return 0.0
-        if not is_daytrade_bull_etf_code(top_candidate.get("ticker", top_candidate.get("code"))):
-            return 0.0
-        score = top_candidate.get("score")
-        gap_pct = top_candidate.get("gap_pct")
-        prev_return = top_candidate.get("prev_return")
-        prev_rsi2 = top_candidate.get("prev_rsi2")
-        open_vs_sma_atr = top_candidate.get("open_vs_sma_atr")
-        if any(
-            _is_invalid_number(value)
-            for value in [score, gap_pct, prev_return, prev_rsi2, open_vs_sma_atr]
-        ):
-            return 0.0
-        score = float(score)
-        gap_pct = float(gap_pct)
-        prev_return = float(prev_return)
-        prev_rsi2 = float(prev_rsi2)
-        open_vs_sma_atr = float(open_vs_sma_atr)
-        if score < DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_SETUP_SCORE:
-            return 0.0
-        if abs(gap_pct) < DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_GAP:
-            return 0.0
-        if prev_return <= DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_PREV_RETURN_PCT:
-            return 0.0
-        if prev_rsi2 > DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MAX_PREV_RSI2:
-            return 0.0
-        if open_vs_sma_atr > DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MAX_OPEN_VS_SMA_ATR:
-            return 0.0
-        return DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE
-
+    if not _is_invalid_number(base_leverage) and float(base_leverage) > 0:
+        return float(base_leverage)
     return 0.0
 
 
@@ -2902,12 +2750,6 @@ def select_daytrade_candidates(
     strong_oversold = sorted(strong_oversold_candidates or [], key=lambda item: item["score"], reverse=True)
     fallback = sorted(fallback_candidates or [], key=lambda item: item["score"], reverse=True)
     catchup = sorted(catchup_candidates or [], key=lambda item: item["score"], reverse=True)
-    catchup = prefer_daytrade_tuesday_low_breadth_catchup_rs_candidate(
-        catchup,
-        breadth_val=breadth_val,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    )
     inverse = sorted(inverse_candidates or [], key=lambda item: item["score"], reverse=True)
     bull_etf = sorted(bull_etf_candidates or [], key=lambda item: item["score"], reverse=True)
     alt_candidates = [item for item in strong_oversold + fallback + catchup + inverse + bull_etf if item]
@@ -3154,6 +2996,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
     """
     bundle = calculate_all_technicals_v12(data_df)
     trade_date = data_df.index[-1] if len(data_df.index) > 0 else None
+    trade_weekday = resolve_daytrade_weekday(trade_date=trade_date)
     market_open = np.nan
     prev_market_close = np.nan
     prev_market_sma_trend = np.nan
@@ -3326,6 +3169,9 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "setup_type": "primary",
                     "notional_pct": DAYTRADE_MAX_NOTIONAL_PCT,
                     "equity_notional_pct": primary_equity_notional_pct,
+                    "breadth_val": breadth_val,
+                    "market_ratio": market_ratio,
+                    "small_account_probe": None,
                 })
                 continue
 
@@ -3422,8 +3268,18 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         score=score,
                         trade_date=trade_date,
                     ),
+                    "risk_budget_pct": None,
                     "stop_mult": DAYTRADE_FALLBACK_INTRADAY_STOP_MULT,
                     "target_mult": DAYTRADE_FALLBACK_INTRADAY_TARGET_MULT,
+                    "prev_return": fallback_metrics.get("prev_return"),
+                    "prev_rsi2": fallback_metrics.get("prev_rsi2"),
+                    "open_from_prev_low_atr": fallback_metrics.get("open_from_prev_low_atr"),
+                    "open_vs_sma_atr": fallback_metrics.get("open_vs_sma_atr"),
+                    "rs_alpha": rs,
+                    "symbol_trend_ratio": fallback_metrics.get("symbol_trend_ratio"),
+                    "breadth_val": breadth_val,
+                    "market_ratio": market_ratio,
+                    "small_account_probe": None,
                 })
 
         if catchup_market_allowed and turnover_value >= DAYTRADE_CATCHUP_MIN_TURNOVER:
@@ -3503,6 +3359,16 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "setup_type": catchup_metrics["setup_type"],
                     "notional_pct": notional_pct,
                     "equity_notional_pct": equity_notional_pct,
+                    "risk_budget_pct": None,
+                    "prev_return": catchup_metrics.get("prev_return"),
+                    "prev_rsi2": catchup_metrics.get("prev_rsi2"),
+                    "open_from_prev_low_atr": catchup_metrics.get("open_from_prev_low_atr"),
+                    "open_vs_sma_atr": catchup_metrics.get("open_vs_sma_atr"),
+                    "rs_alpha": rs,
+                    "symbol_trend_ratio": catchup_metrics.get("symbol_trend_ratio"),
+                    "breadth_val": breadth_val,
+                    "market_ratio": market_ratio,
+                    "small_account_probe": None,
                     "stop_mult": stop_mult,
                     "target_mult": target_mult,
                 })
@@ -3558,8 +3424,14 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         "setup_type": setup_type,
                         "notional_pct": DAYTRADE_INVERSE_NOTIONAL_PCT,
                         "equity_notional_pct": DAYTRADE_INVERSE_EQUITY_NOTIONAL_PCT,
+                        "risk_budget_pct": None,
                         "stop_mult": stop_mult,
                         "target_mult": target_mult,
+                        "prev_return": inverse_metrics.get("prev_return"),
+                        "prev_rsi2": inverse_metrics.get("prev_rsi2"),
+                        "open_vs_sma_atr": inverse_metrics.get("open_vs_sma_atr"),
+                        "breadth_val": breadth_val,
+                        "market_ratio": inverse_metrics.get("market_ratio"),
                     })
 
         if (
