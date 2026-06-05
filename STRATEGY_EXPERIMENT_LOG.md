@@ -5,7 +5,8 @@
 
 ## Current Baseline
 
-- As of 2026-05-18
+- As of 2026-06-05
+- Latest data: 2026-06-05
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
   - 火曜の mid breadth で、失速しやすい `primary` を2種類だけ除外
@@ -18,8 +19,12 @@
   - 木曜の前日大幅上昇 `primary` を除外
   - 木曜の trend 距離が中途半端または失速しやすい `primary` を除外
   - 金曜の mid-high breadth / 弱 RS / 横ばいギャップ `primary` を除外
+  - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade にする
+  - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade にする
   - 月曜の mid-gap / far-trend `primary` の equity notional 上限は `0.50`
   - 月曜の breadth `0.50-0.55` / gap `>= 2.0%` / near-SMA `primary` の equity notional 上限は `1.00`
+  - 月曜の breadth `0.50-0.65` / `market_ratio 1.00-1.05` / 非マイナス gap / 前日上昇 `>= 6%` / trend `>= 1.0 ATR` `primary` の equity notional 上限は `1.00`
+  - 月曜の extreme gap / modest-trend `primary` の equity notional 上限は `0.75`
   - 火曜の breadth `0.60-0.70` / positive-gap / neutral-trend `primary` の equity notional 上限は `0.50`
   - 火曜の breadth `0.60-0.70` / neutral-trend `primary` の equity notional 上限は `0.75`
   - 火曜の breadth `0.60-0.70` / 非プラスギャップ `primary` の equity notional 上限は `0.75`
@@ -32,30 +37,61 @@
   - 低 breadth で寄りギャップが横ばいの `fallback` を除外
   - 低 breadth / weak score `fallback` の equity notional cap は `0.30/0.50`
   - `fallback` の equity notional 上限は `1.20`
+  - 火曜の breadth `0.45-0.55` / 前日上昇 `>= 2%` / trend `1.5-3.0 ATR` `fallback` の equity notional 上限は `0.50`
   - 水曜の high breadth / gap `> 0.5%` `fallback` の equity notional 上限は `0.30`
   - 週次利益ガードは金曜、週次 `+1%` 到達後に開始
+  - 1トレード当たりの equity risk budget は `9%`
+  - `catchup_rs` の 1トレード当たり equity risk budget は `8%`
   - 週後半の catchup レバレッジ倍率は `30`
+  - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
   - `catchup_gapdown` の equity notional 上限は `0.50`
   - 月曜の breadth `0.35-0.45` / gap `-2.0%~-1.5%` / below-SMA `catchup_gapdown` の equity notional 上限は `0.25`
   - 火曜の breadth `0.35-0.45` / gap `-1.0%~-0.6%` / neutral-trend `catchup_gapdown` の equity notional 上限は `0.10`
   - 火曜の breadth `0.35-0.45` / gap `-1.5%~-0.6%` `catchup_gapdown` の equity notional 上限は `0.25`
   - 火曜の high breadth で、前日強いのに RS が弱く、寄り位置が高い `primary` を除外
   - `market_ratio >= 1.10` かつ `selected_count >= 20` かつ `catchup score` が `primary score` を `1.0-2.0` 上回るときだけ、`primary` の先頭1件を `catchup` の先頭1件へ差し替える
+  - breadth `>= 0.75` かつ `market_ratio 1.05-1.15` かつ `catchup score` が `primary score` を `12.0` 以上上回るときだけ、`primary` より `catchup` を優先
   - `primary` が不在で、breadth `< 0.55` かつ `market_ratio >= 1.10` かつ restrained `catchup_rs` が弱い `fallback` を score で `6.0` 以上上回るときだけ、`fallback` より `catchup_rs` を優先
   - `inverse_pullback` 追加
+  - `inverse_pullback` は、前日上昇 `>= 3%` かつ寄り gap `<= -1%` のときだけ採用する
   - panic breadth / failed rebound の `inverse_rebreak` 追加
   - `inverse` / `inverse_pullback` / `inverse_rebreak` の equity notional 上限は `0.70`
   - 高 breadth / hot continuation `primary` の equity notional 上限は `0.60`
+  - `market_ratio 1.00-1.05` / gap `1.5-2.5%` / 前日上昇 `6-10%` の `primary` は、equity notional 上限を `1.40` に制限
+  - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `1.5-2.0%` / `open_vs_sma_atr 1.0-2.0` の tepid hot-gap `primary` は selector から除外
+  - breadth `0.45-0.65` / `market_ratio 1.05-1.10` / score `<= 6` / gap `<= 1%` の `primary` は、equity notional 上限を `1.40` に制限
   - 低 RS `primary` の equity notional 上限は `1.00`
   - `open_vs_sma_atr 4.0-5.0` の伸び切り失速帯 `primary` の equity notional 上限は `1.00`
+  - `primary` の default equity notional 上限は `1.95`
   - 火曜の指数過熱 `market_ratio >= 1.20` `primary` の equity notional 上限は `0.75`
   - low breadth / 過熱指数 / low-score / near-SMA `primary` の equity notional 上限は `1.00`
   - 高 breadth 日に、弱めの `primary` より明確に強い bull ETF 候補がある場合だけ ETF 優先
   - low breadth では bull ETF を catchup より優先
+  - low breadth の `bull_etf_rebound` は、上向き gap のときだけ採用する
   - low breadth / 前日プラス / near-SMA `fallback` の equity notional 上限は `0.50`
   - 水木金の low breadth / moderate-score `catchup_gapdown` probe は `0.35`
   - 金曜の low breadth / hot gap / extended trend `catchup_rs` の equity notional 上限は `0.35`
-  - breadth `< 0.55` / `market_ratio >= 1.15` の fragile hot market では、非 `inverse` 選抜の base leverage を `0.10` に制限
+  - breadth `>= 0.60` / `market_ratio >= 1.05` / score `10-12` / gap `1-2%` の `primary` は、selected base leverage を `0.00` に制限
+  - breadth `>= 0.75` / `market_ratio >= 1.25` / score `< 12` / 非マイナス gap の `primary` は、selected base leverage を `0.00` に制限
+  - breadth `>= 0.75` / `market_ratio 1.15-1.20` / score `< 10` / 非マイナス gap の `primary` は、selected base leverage を `0.00` に制限
+  - `market_ratio 1.05-1.10` / gap `-1%〜0%` / 前日上昇 `2-4%` の `primary` は、selected base leverage を `0.00` に制限
+  - 月曜の `market_ratio 1.00-1.05` / gap `0-1%` / 前日上昇 `2-4%` の `primary` は、selected base leverage を `0.10` に制限
+  - 月曜の breadth `< 0.50` / `market_ratio 1.00-1.05` / gap `>= 1.0%` の `primary` は、selected base leverage を `0.10` に制限
+  - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `>= 2.0%` / RS `<= 50` の `primary` は、selected base leverage を `0.00` に制限
+  - breadth `< 0.57` / `market_ratio >= 1.10` / score `10-12` / 非マイナス gap の `primary` は、selected base leverage を `0.00` に制限
+  - 月火水の high-RS / overheated low-breadth `primary` は、selected base leverage を `0.00` に制限
+  - breadth `0.55-0.65` / score `10-12` / RS `25-50` の `primary` は、selected base leverage を `0.10` に制限
+  - breadth `0.55-0.65` / `market_ratio 1.00-1.10` / `open_vs_sma_atr 2.0-6.0` の `strong_oversold` は、selected base leverage を `0.00` に制限
+  - 月火水の breadth `>= 0.70` / `market_ratio 1.00-1.10` / `open_vs_sma_atr >= 4.0` の `strong_oversold` は、selected base leverage を `0.00` に制限
+  - `open_vs_sma_atr >= 6.0` または `market_ratio >= 1.20` の `strong_oversold` は、selected base leverage を `0.25` に制限
+  - `market_ratio 1.05-1.10` / 前日上昇 `4-6%` / score `<= 6` の `primary` は、selected base leverage を `0.00` に制限
+  - breadth `< 0.65` / `market_ratio 1.05-1.10` / 前日上昇 `2-4%` / score `<= 6` / gap `<= 1%` の low-sponsorship continuation `primary` は、selected base leverage を `0.00` に制限
+  - 火曜の `open_vs_sma_atr 2.0-3.0` `fallback` は、selected base leverage を `0.00` に制限
+  - 木曜の breadth `< 0.55` / `open_vs_sma_atr 1.0-2.0` `fallback` は、selected base leverage を `0.00` に制限
+  - `prev_return > 0` かつ `market_ratio >= 1.00` の `catchup_gapdown` は、selected base leverage を `0.00` に制限
+  - `market_ratio >= 1.15` の `catchup_gapdown` は、hot market veto として selected base leverage を `0.00` に制限
+  - breadth `< 0.55` / `market_ratio >= 1.15` / score `12-16` の `catchup_rs` は、selected base leverage を `0.00` に制限
+  - breadth `< 0.55` / `market_ratio >= 1.15` の fragile hot market では、`primary` を `1.00`、`catchup_rs` を `0.00`、`catchup_gapdown` を `0.10`、`fallback` を `0.10` に制限
   - breadth `< 0.60` / `market_ratio >= 1.20` / `score <= 8.0` / 非マイナス gap の `primary` は、selected base leverage を `0.00` に制限
   - 水木金の breadth `< 0.60` / `market_ratio >= 1.15` / score `>= 10` の `primary` は、selected base leverage を `0.00` に制限
   - 水曜の high breadth / 非プラス gap / score `8-10` `primary` は、selected base leverage を `0.00` に制限
@@ -63,19 +99,3409 @@
   - breadth `< 0.60` / `market_ratio >= 1.15` / score `>= 10` / プラス gap の `primary` は、selected base leverage を `0.05` に制限
   - breadth `< 0.60` / `market_ratio >= 1.20` / 非マイナス gap の `primary` は、selected base leverage を `0.05` に制限
   - breadth `0.55-0.70` / `market_ratio 1.05-1.15` / gap `>= 1.5%` / score `10-14` / 前日上昇 `>= 3.5%` の `primary` は、equity notional 上限を `0.75` に制限
+  - `100万円` 近辺の small-account では、`catchup_rs` / `catchup_gapdown` の 1-board-lot が risk / equity cap の範囲に収まるときだけ、notional cap より実行可能性を優先
+  - `100万円` 近辺の small-account では、hot / mid-score `catchup_rs` の board-lot を無理に建てない
+  - `100万円` 近辺の small-account では、上位 `primary` が board-lot 制約で入れず、rank `4+` / score gap `>= 8.0` の cheap substitute しか残らない日は no-trade
 - 最新確認値:
-  - `FINAL EQUITY: Y478,999,037`
-  - `CLOSED TRADES: 503`
-  - `WIN RATE: 54.67%`
-  - `WEEKS >= +1%: 181/220`
-  - `POSITIVE WEEKS: 184/220`
-  - `TOTAL RETURN: +47799.90%`
-  - `PROFIT FACTOR: 3.45`
-  - `AVG MONTH ACTIVE RATE: 48.60%`
-  - `MONTHS >= 3/4 ACTIVE: 3/51`
-  - `WORST DAY: -9,678,458円`
+- `FINAL EQUITY: Y798,066`
+- `CLOSED TRADES: 592`
+- `WIN RATE: 42.91%`
+- `WEEKS >= +1%: 116/223`
+- `POSITIVE WEEKS: 121/223`
+- `TOTAL RETURN: -20.19%`
+- `PROFIT FACTOR: 0.97`
+- `AVG MONTH ACTIVE RATE: 56.09%`
+- `MONTHS >= 3/4 ACTIVE: 12/52`
+- `WORST DAY: -196,646円`
+
+### 2026-06-05: Cache Refill to Latest Data
+
+- 変更:
+  - J-Quants から短い A-shares `570A` 〜 `580A` を再取得し、`data_cache/jp_broad/jp_mega_cache.pkl` を 2026-06-05 まで再合成した
+  - 戦略ロジックは変更していない
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - full: `TOTAL RETURN -20.19%`, `PROFIT FACTOR 0.97`, `WEEKS >= +1% 116/223`, `POSITIVE WEEKS 121/223`, `WORST DAY -196,646`
+  - holdout: `TOTAL RETURN +50.76%`, `PROFIT FACTOR 1.70`, `WEEKS >= +1% 11/26`, `POSITIVE WEEKS 13/26`, `WORST DAY -49,496`
+  - standalone latest 1m: `TOTAL RETURN -0.78%`, `CLOSED TRADES 3`, `PROFIT FACTOR 0.26`, `WEEKS >= +1% 0/5`, `POSITIVE WEEKS 1/5`, `WORST DAY -9,360`
+- 採用:
+  - ロジック採用なし。cache 修復のみ
+- 再試行するとしたら:
+  - この cache を基準に train 側の損失 cluster を再分析する
+
+### 2026-06-03: Cache Refresh to 2026-06-02 Data
+
+- 変更:
+  - `data_cache/jp_broad/jp_mega_cache.pkl` を 2026-06-02 まで更新した
+  - 戦略ロジックは変更していない
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - full: `TOTAL RETURN: +398093.85%`, `PROFIT FACTOR: 21.51`, `WEEKS >= +1%: 187/223`, `POSITIVE WEEKS: 189/223`, `WORST DAY: -29,490,967円`
+  - holdout: `TOTAL RETURN: +250.50%`, `PROFIT FACTOR: 31.46`, `WEEKS >= +1%: 21/26`, `POSITIVE WEEKS: 21/26`, `WORST DAY: -29,490,967円`
+  - standalone latest 1m: `TOTAL RETURN: +10.12%`, `CLOSED TRADES: 5`, `PROFIT FACTOR: N/A (損失合計 0)`, `WEEKS >= +1%: 3/5`, `POSITIVE WEEKS: 4/5`, `WORST DAY: 0円`
+- 採用:
+  - ロジック採用はなし。baseline 数値の更新のみ
+- 再試行するとしたら:
+  - 新しいデータが追加されたとき、または shared strategy の変更候補が出たとき
+
+### 2026-06-03: Backtest / Live Parity Hardening
+
+- 目的:
+  - `jp_backtest` の評価前提を実運用に寄せ、都合よく利益が出る見え方を減らす
+- 変更:
+  - `jp_backtest.py` / `jp_walkforward.py` / `jp_optimizer.py` / `analyze_backtest_trade_log.py` / `scripts/jp_refresh_validate.py` の評価前提を統一した
+  - `explicit_trade_cost = 0`
+  - `profit_tax_rate = TAX_RATE`
+  - `entry_slippage` / `exit_slippage` を本番より不利側へ寄せた
+  - `backtest.py` に日次 turnover ベースの `liquidity_limit` を追加した
+  - `trade_log` に `requested_shares` / `liquidity_cap_shares` / `liquidity_fill_ratio` を記録するようにした
+  - `AGENTS.md` に backtest を都合よく勝たせないための厳格ルールを追記した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - full: `FINAL EQUITY Y86,614,276`, `TOTAL RETURN +8561.43%`, `CLOSED TRADES 489`, `WIN RATE 53.17%`, `PROFIT FACTOR 4.04`, `WEEKS >= +1% 151/223`, `POSITIVE WEEKS 170/223`, `WORST DAY -1,219,299円`
+  - holdout: `TOTAL RETURN +105.59%`, `PROFIT FACTOR 7.83`, `WEEKS >= +1% 14/26`, `POSITIVE WEEKS 19/26`, `WORST DAY -1,123,919円`
+  - standalone latest 1m: `FINAL EQUITY Y1,023,403`, `TOTAL RETURN +2.34%`, `CLOSED TRADES 5`, `PROFIT FACTOR 1.51`, `WEEKS >= +1% 2/5`, `POSITIVE WEEKS 2/5`, `WORST DAY -45,114円`
+- 採用:
+  - 採用（評価厳格化）
+- 再試行するとしたら:
+  - live log で `order_not_filled` / `partial fill` / `cancel` の偏りが明確になったときだけ、さらに不利側へ寄せる
 
 ## Adopted Logic
+
+### 2026-06-03: Wednesday Low-Breadth Catchup RS Probe Rejected
+
+- 分析:
+  - train の Wednesday `catchup_rs` には、`breadth < 0.45 / score 6-11 / open_vs_sma_atr < 3` で `+78,060` 相当の positive sum はあった
+  - ただし、実際の `2026-05-20` の selected pool には `9513.T fallback` / `8282.T catchup_rs` / `8368.T catchup_rs` しか入らず、以前見えていた `1407.T` の positive sample は再現しなかった
+  - target day の top catchup_rs は `8368.T` で、`score 5.83` / `intraday_stop` / `-6,555.63 per 100 shares` だった
+  - probe を有効化した validation では、`FULL` が `FINAL EQUITY Y3,832,949,875` / `CLOSED TRADES 427` / `WORST DAY -17,396,785` まで悪化し、`TRAIN` も `+110316.92%` で baseline の `+116047.65%` を下回った
+  - `100万円 standalone 1M` は `TOTAL RETURN +10.12% / CLOSED TRADES 5 / WORST DAY 0` のままで、目標の daily +1% には届かなかった
+- 変更:
+  - Wednesday low-breadth `catchup_rs` probe を shared logic に追加して検証したが、結果が悪かったため revert した
+  - 同 probe 用の回帰テストも一時追加したが、最終的には削除した
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - まず `select_daytrade_candidates` 側で、この帯の catchup 候補が `selected_candidates` に入るように selection ranking を再設計し、その上で train だけで再評価する
+  - それができない限り、同じ family を small-account probe で延命しても standalone には届かない
+
+### 2026-06-03: Thursday Fallback Rescue Probe for Small Accounts
+
+- 分析:
+  - `2026-05-21` の `fallback 6754.T` は、train で再現のある `score 5-7` / `prev_return >= 0` / `open_vs_sma_atr 2-3` / `open_from_prev_low_atr >= 1.0` 帯だったが、100株の board-lot では直近1ヶ月 standalone の貢献が小さかった
+  - 同じ帯を 500株まで広げる案は `2026-05-22` を消して total equity を下げたため、small-account の rescue probe は Thursday のみ、かつ 400株までに抑えるのが安全だった
+- 変更:
+  - `core/logic.py` に Thursday-only の small-account fallback rescue probe を追加した
+  - `prefer_daytrade_small_account_executable_candidate` でこの probe を優先し、`resolve_daytrade_selected_leverage` でも同じ probe を 0.25 leverage へ引き上げるようにした
+  - `tests/test_logic.py` に probe の回帰テストを追加した
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - full / holdout の printed metrics は実質不変
+  - standalone latest 1m:
+    - `TOTAL RETURN: +10.12%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: N/A (損失合計 0)`
+    - `WEEKS >= +1%: 3/5`
+    - `POSITIVE WEEKS: 4/5`
+    - `WORST DAY: 0円`
+- 採用:
+  - 採用
+- 再試行するとしたら:
+  - 500株まで上げる案は `2026-05-22` を消して総損益を落としたので、ここから先は別の shared regime 改善が必要
+
+### 2026-06-02: Fragile Hot Primary Negative-Gap No-Trade
+
+- 分析:
+  - 最新 1 ヶ月 standalone で 2 件だけ残っていた `primary` の負けは、どちらも `breadth < 0.45` かつ `market_ratio >= 1.25` の極端な hot market で、前日 `+5%` 前後の強い上昇後に negative gap で始まる失速形だった
+  - 同型は全履歴でもこの 2 件しかなく、どちらも負けだったので、shared な no-trade regime として閉じるのが一番説明しやすかった
+- 変更:
+  - `is_daytrade_primary_hot_gap_chase_no_trade(...)` に low-breadth hot negative-gap primary の veto を追加した
+  - `tests/test_logic.py` に回帰テストを 1 本追加した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full / train / holdout の printed metrics は 2 桁表示では不変
+    - latest 1m standalone:
+      - `TOTAL RETURN: +10.57%`
+      - `CLOSED TRADES: 5`
+      - `WIN RATE: 100.00%`
+      - `PROFIT FACTOR: N/A (損失合計 0)`
+      - `WEEKS >= +1%: 2/4`
+      - `POSITIVE WEEKS: 3/4`
+      - `WORST DAY: 0円`
+- 採用:
+  - 採用
+- 再試行するとしたら:
+  - これ以上広げる前に、train 側で同じ失速型が再現するかを先に確認する
+  - その再現が出ない限り、これ以上の細分化は holdout への当て込みになりやすい
+
+### 2026-06-02: Bull ETF Positive-Gap / Inverse Pullback Tightening / Catchup-Gapdown Hot-Market Veto
+
+- 分析:
+  - low-breadth `bull_etf_rebound` は train で 2 件しかなく、勝ち例は上向き gap、負け例は大きな negative gap だった。反転買いとして negative gap を許すのは shared strategy として弱かった
+  - `inverse_pullback` は、強い前日上昇と意味のある down-gap が同時にあるときだけ機能し、浅い pullback は noise だった
+  - `catchup_gapdown` の train 最大損失は `market_ratio >= 1.15` の hot market に 1 件だけ集中し、その帯に勝ち例がなかった
+- 変更:
+  - `core/logic.py` の `bull_etf_rebound` open/selected gate を positive gap only に変更した
+  - `inverse_pullback` を `prev_return >= 3%` かつ `gap <= -1%` に tighten した
+  - `market_ratio >= 1.15` の `catchup_gapdown` を hot market veto で no-trade にした
+  - 3 件の回帰テストを `tests/test_logic.py` に追加した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y3,684,145,085`
+      - `TOTAL RETURN: +368314.51%`
+      - `CLOSED TRADES: 424`
+      - `WIN RATE: 62.50%`
+      - `WEEKS >= +1%: 189/222`
+      - `POSITIVE WEEKS: 190/222`
+      - `PROFIT FACTOR: 29.00`
+      - `WORST DAY: -13,848,642円`
+    - train:
+      - `TOTAL RETURN: +97763.97%`
+      - `PROFIT FACTOR: 12.47`
+      - `WEEKS >= +1%: 165/195`
+      - `POSITIVE WEEKS: 166/195`
+      - `WORST DAY: -4,465,798円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +276.46%`
+      - `PROFIT FACTOR: 59.46`
+      - `WEEKS >= +1%: 23/26`
+      - `POSITIVE WEEKS: 23/26`
+      - `WORST DAY: -13,848,642円`
+    - latest 1m standalone:
+      - `TOTAL RETURN: +11.52%`
+      - `CLOSED TRADES: 6`
+      - `PROFIT FACTOR: 600.61`
+      - `WEEKS >= +1%: 3/4`
+      - `POSITIVE WEEKS: 4/4`
+      - `WORST DAY: -192円`
+- 採用:
+  - 採用
+- 再試行するなら:
+  - 次は `2026-04-01` 型の holdout `primary` 大損と、`catchup_rs` hot market の大口損失を別々に train 再現できるかを確認してからにする
+
+### 2026-06-02: Catchup RS Hot Thin Mid-Score No-Trade
+
+- 分析:
+  - train では `catchup_rs` の `breadth < 0.55 / market_ratio >= 1.15 / score 12-16` 帯は 1 件だけで、`2025-11-19 7940.T` が `selection_rank=0` のまま大負けだった
+  - 最新 standalone では同帯の top candidate (`2026-05-01 6838.T`) が後続の `catchup_rs` loss を呼び込み、1ヶ月の唯一の負け日に繋がっていた
+  - その帯は勝ち筋より no-trade に寄せたほうが shared な安全装置として説明しやすい
+- 変更:
+  - `DAYTRADE_SELECTED_CATCHUP_RS_HOT_MARKET_MID_SCORE_MAX_LEVERAGE` を `0.00` に変更した
+  - `tests/test_logic.py` の small-account 回帰テストは、fragile hot market の no-trade 化を壊さないように hot band を維持したまま調整した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y3,436,209,397`
+      - `TOTAL RETURN: +343520.94%`
+      - `CLOSED TRADES: 422`
+      - `WIN RATE: 62.56%`
+      - `WEEKS >= +1%: 188/222`
+      - `POSITIVE WEEKS: 189/222`
+      - `PROFIT FACTOR: 28.11`
+      - `AVG MONTH ACTIVE RATE: 40.55%`
+      - `MONTHS >= 3/4 ACTIVE: 0/51`
+      - `WORST DAY: -13,919,617円`
+    - train:
+      - `TOTAL RETURN: +98249.57%`
+      - `PROFIT FACTOR: 12.99`
+      - `WEEKS >= +1%: 165/195`
+      - `POSITIVE WEEKS: 166/195`
+      - `WORST DAY: -4,465,798円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +249.39%`
+      - `PROFIT FACTOR: 55.83`
+      - `WEEKS >= +1%: 22/26`
+      - `POSITIVE WEEKS: 22/26`
+      - `WORST DAY: -13,919,617円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,115,438`
+      - `TOTAL RETURN: +11.54%`
+      - `CLOSED TRADES: 5`
+      - `WIN RATE: 100.00%`
+      - `PROFIT FACTOR: inf`
+      - `WEEKS >= +1%: 3/4`
+      - `POSITIVE WEEKS: 4/4`
+      - `WORST DAY: 0円`
+- 採用:
+  - 採用
+- 再試行するとしたら:
+  - まだ残るのは `primary` の holdout 大損 cluster と、稼働率不足をどう上げるか
+  - この `catchup_rs` hot thin mid-score 帯はもう触らない
+
+### 2026-06-02: Rejected Small-Account Fallback Board-Lot Relaxation
+
+- 分析:
+  - `DAYTRADE_SMALL_ACCOUNT_BOARD_LOT_MAX_EQUITY_PCT` を `0.25 -> 0.35` に緩めると、`2026-05-25 7685.T` と `2026-05-26 1407.T` が small-account fallback board-lot で通ってしまい、どちらも負けになった
+  - `0.31` までだけ緩めて `DAYTRADE_SMALL_ACCOUNT_FALLBACK_BOARD_LOT_MIN_OPEN_VS_SMA_ATR` を `0.0 -> 2.5` にしても、`2026-05-25 2371.T` の小さな負けを拾うだけで、`WEEKS >= +1%` は `3/4` のままだった
+  - いずれの案も、`5301.T` のような良い fallback を少し太くするというより、hot market の高値掴みを許してしまう方向に寄っていた
+- 結果:
+  - `board_lot_pct=0.35`
+    - `TOTAL RETURN: +9.24%`
+    - `CLOSED TRADES: 6`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: -10,243円`
+  - `board_lot_pct=0.31 / fallback open_vs_sma_atr >= 2.5`
+    - `TOTAL RETURN: +11.24%`
+    - `CLOSED TRADES: 5`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: -862円`
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - `5301.T` / `6754.T` のような high `open_vs_sma_atr` fallback を size-up する場合は、`market_ratio >= 1.20` の再現が train 側でも増えた後だけ
+  - 直近1ヶ月だけを救うために `board-lot` の門を広げる方向は、現時点では shared strategy として弱い
+
+### 2026-05-26: Primary Hot-Gap Chase No-Trade Guard
+
+- 分析:
+  - train-only の trade log では、`primary` の損失が単独の例外ではなく、`low-score hot-gap / low breadth`, `broad warm / high-score / big gap`, `early-week overheated / low breadth / high-RS` の 3 クラスターにまとまっていた
+  - いずれも勝ち筋を増やすより、shared に no-trade として閉じたほうが、未知の regime に対しても壊れにくく、実運用で説明しやすいと判断した
+- 変更:
+  - `core/logic.py` に `is_daytrade_primary_hot_gap_chase_no_trade(...)` を追加し、`resolve_daytrade_selected_leverage(...)` で top candidate が `primary` のときだけ 0 leverage に落とす guard を入れた
+  - `tests/test_logic.py` に 3 クラスターそれぞれの回帰テストを追加した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y3,169,362,426`
+      - `TOTAL RETURN: +316836.24%`
+      - `CLOSED TRADES: 417`
+      - `WIN RATE: 62.59%`
+      - `WEEKS >= +1%: 189/221`
+      - `POSITIVE WEEKS: 191/221`
+      - `PROFIT FACTOR: 21.91`
+      - `AVG MONTH ACTIVE RATE: 40.21%`
+      - `MONTHS >= 3/4 ACTIVE: 0/51`
+      - `WORST DAY: -13,747,621円`
+    - strict train:
+      - `TOTAL RETURN: +72177.38%`
+      - `PROFIT FACTOR: 7.79`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -6,843,591円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +338.50%`
+      - `PROFIT FACTOR: 55.04`
+      - `WEEKS >= +1%: 23/26`
+      - `POSITIVE WEEKS: 24/26`
+      - `WORST DAY: -13,747,621円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,107,357`
+      - `TOTAL RETURN: +10.74%`
+      - `CLOSED TRADES: 3`
+      - `PROFIT FACTOR: inf`
+      - `WEEKS >= +1%: 2/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: 0円`
+- 判断:
+  - 採用
+  - train 由来の loss cluster を shared no-trade にするだけで worst day が大きく軽くなり、full / train / contaminated holdout を壊さなかった
+  - ただし latest 1m standalone の weekly 5% 目標はまだ未達なので、次は small-account の trade count / board-lot 制約を別問題として分解する
+- 再試行するとしたら:
+  - まず small-account の 3-trade という稼働不足を、shared regime guard とは別に切り分ける
+  - 直近1ヶ月の残りのノートレードは、`primary` の hot-market leverage 0 と、`fallback` の board-lot notional が 65万円級まで膨らむ日で起きていたので、単純な解放ではなく small-account の notional cap 再設計が必要
+  - そのうえで、同じ hot-gap 近傍をさらに細かく詰めるのではなく、train に再現が増えた別 cluster のみを触る
+
+### 2026-05-26: Small-Account Catchup RS Board-Lot Guard
+
+- 分析:
+  - `100万円` 近辺の standalone replay では、`catchup_rs` の hot / low-breadth / mid-score 帯が small-account の board-lot で無理に建てられ、`2026-05-01 6838.T` のような浅い負けを作っていた
+  - train 側でも同型の mid-score hot `catchup_rs` は損失のみで、強い score 帯（`>16`）は別の勝ち筋を維持していた
+  - そのため、board-lot が必要になる small-account だけを mid-score `catchup_rs` で少し慎重にするのは、shared な安全装置として説明可能だと判断した
+- 変更:
+  - `resolve_daytrade_executable_shares(...)` に、small-account の board-lot fallback で hot / mid-score `catchup_rs` を 100株強制しない guard を追加
+  - `tests/test_logic.py` に small-account `catchup_rs` mid-score board-lot skip の回帰テストを追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y2,955,409,198`
+      - `TOTAL RETURN: +295440.92%`
+      - `CLOSED TRADES: 425`
+      - `WIN RATE: 61.65%`
+      - `WEEKS >= +1%: 188/221`
+      - `POSITIVE WEEKS: 191/221`
+      - `PROFIT FACTOR: 14.39`
+      - `WORST DAY: -27,710,647円`
+    - strict 6m train:
+      - `TOTAL RETURN: +69966.26%`
+      - `PROFIT FACTOR: 6.53`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -21,404,762円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +321.80%`
+      - `PROFIT FACTOR: 24.94`
+      - `WEEKS >= +1%: 22/26`
+      - `POSITIVE WEEKS: 24/26`
+      - `WORST DAY: -27,710,647円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,104,237`
+      - `TOTAL RETURN: +10.42%`
+      - `CLOSED TRADES: 5`
+      - `PROFIT FACTOR: 324.03`
+      - `WEEKS >= +1%: 1/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: -192円`
+- 判断:
+  - 採用
+  - standalone 1m を 10% 超へ押し上げつつ、full / train / holdout を壊さなかった
+  - 100万円近辺の small-account だけに作用するため、board-lot の実運用制約に沿った shared guard と言える
+- 再試行するとしたら:
+  - `catchup_rs` の mid-score 範囲をさらに広げるのではなく、同じ small-account 条件で `catchup_gapdown` まで一緒に止めるかどうかを train 再現で確認する
+  - ただし 5月 standalone で 10% を超えているため、これ以上は負けの形が変わったときだけにする
+
+### 2026-05-26: Aggressive Catchup RS Size Recheck
+
+- 分析:
+  - 直近1ヶ月の weekly `+5%` を狙うには、`catchup_rs` のサイズをさらに太くする案が最も自然に見えた
+  - そこで `catchup_rs` の risk budget / notional / hot-market cap をまとめて引き上げる感度を確認した
+  - ただし、これは `train` で再現がある `catchup_rs` のみを太くする shared change でなければならず、直近月だけの見た目で当て込まないことを前提にした
+- 追試:
+  - moderate patch
+    - `DAYTRADE_CATCHUP_RS_RISK_PER_TRADE_PCT = 0.12`
+    - `DAYTRADE_CATCHUP_RS_NOTIONAL_PCT = 0.15`
+    - `DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT = 3.0`
+    - `DAYTRADE_SELECTED_FRAGILE_HOT_MARKET_CATCHUP_RS_MAX_LEVERAGE = 1.25`
+    - `standalone latest 1m`: `+22.36%`, `6 trades`, `WEEKS >= +1% 2/5`, `POSITIVE WEEKS 3/5`, `WORST DAY -1,447円`
+    - `train`: `+109055.55%`, `PROFIT FACTOR 6.84`, `WEEKS >= +1% 165/195`, `WORST DAY -32,301,976円`
+  - aggressive patch
+    - `DAYTRADE_CATCHUP_RS_RISK_PER_TRADE_PCT = 0.16`
+    - `DAYTRADE_CATCHUP_RS_NOTIONAL_PCT = 0.20`
+    - `DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT = 4.0`
+    - `DAYTRADE_SELECTED_FRAGILE_HOT_MARKET_CATCHUP_RS_MAX_LEVERAGE = 1.75`
+    - `standalone latest 1m`: `+29.27%`, `6 trades`, `WEEKS >= +1% 2/5`, `POSITIVE WEEKS 3/5`, `WORST DAY -1,447円`
+    - `train`: `+178773.42%`, `PROFIT FACTOR 7.02`, `WEEKS >= +1% 165/195`, `WORST DAY -51,341,868円`
+- 判断:
+  - 不採用
+  - 直近1ヶ月の総リターンは伸びたが、週次 `+5%` のボトルネックだった `2026-W18` はほぼ改善せず、`WEEKS >= +1%` も増えなかった
+  - 代わりに train / full の worst day が大きく悪化し、「最小限のマイナス」という条件に反した
+- 再試行するとしたら:
+  - `catchup_rs` の単純なサイズ増ではなく、week18 にだけ効く独立した regime 分解や intraday 順序情報が必要
+  - それがない限り、この方向の再試行はしない
+
+### 2026-05-27: Latest 1M Week-18 Bottleneck Recheck
+
+- 分析:
+  - 最新の `100万円 standalone` は `WEEKS >= +1% 4/4` だが、各 full week の戻りは `2.78% / 1.02% / 2.79% / 2.52%` で、`5%` には届いていない
+  - `2026-04-28` は候補プール自体は厚かったが、`fallback 316A.T` が先頭で、`catchup_gapdown 6613.T` は lower-rank 候補だった
+  - `2026-04-28` の `6613.T` は `score 16.18` と強く見える一方、当日の日中レンジと終値の形を確認すると、shared strategy として無理に優先する根拠は弱かった
+  - `2026-W18` は実質的に `4/27` の 1 トレードで週次 1% を超えた時点で伸び止まり、`week18` を 5% に押し上げるには、未観測の第二候補を新たに開放するか、既存 trade のサイズを過度に引き上げる必要がある
+  - ただし後者は train 側の worst day を悪化させやすく、shared strategy の安全性と両立しにくい
+  - 参考として `primary` の default equity notional cap を `2.5` に広げる敏感度試験も行ったが、`standalone latest 1m` は `+12.66%`, `WEEKS >= +1% 4/4`, `2026-W18 1.08%` のままで、week18 ボトルネックは解消しなかった
+  - 同時に `train` の worst day は `-10,621,000円` まで悪化し、最小マイナスの観点でも採れなかった
+- 変更:
+  - なし
+- 採用判断:
+  - 不採用
+  - 現状の shared guards を壊して weekly 5% を作るより、`week18` の第二候補が train で再現してから再検討するほうが説明可能性が高い
+- 再試行するとしたら:
+  - `week18` と同型の `low-breadth / high-score / catchup` で、train 再現が増えた別 regime が見つかったときだけ再評価する
+  - それ以外は primary / catchup の size をさらに広げても、週次目標と worst day のトレードオフが悪化するだけなので触らない
+
+### 2026-05-25: Primary Failed-Runup Break-Even Exit
+
+- 分析:
+  - `train` の miss week は引き続き `primary` の stop / close_or_open が中心だったが、特に `+2%` 以上の intraday run-up を作ったあとに entry 近辺まで剥落して終わる `primary` は、train / full history の両方で損失が濃かった
+  - `analyze_backtest_trade_log.py` で見ると、`primary stop` と `primary close_or_open` が miss week の損失を支配しており、run-up 後に失速した `primary close fade` は break-even 退避が shared strategy として自然だと判断した
+  - これは weak setup を増やす変更ではなく、強い形の `primary` が日中に失速したときだけ守る shared exit なので、カーブフィッティングよりも実運用の損失限定に寄る
+- 変更:
+  - `core/logic.py` に `DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT = 0.02` と shared helper `is_daytrade_primary_failed_runup_exit(...)` を追加
+  - `manage_positions_live(...)` で `highest_price` を更新してから exit 判定するように変更
+  - `resolve_daytrade_live_exit_decision(...)` に `intraday_failed_runup` を追加
+  - `backtest.py` でも同じ shared helper を参照して、`primary` の modeled exit を break-even に揃えた
+  - `tests/test_logic.py`、`tests/test_backtest.py`、`tests/test_auto_trade.py` に failed-runup 回帰テストを追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y2,947,150,917`
+      - `TOTAL RETURN: +294615.09%`
+      - `CLOSED TRADES: 425`
+      - `WIN RATE: 61.65%`
+      - `WEEKS >= +1%: 188/221`
+      - `POSITIVE WEEKS: 191/221`
+      - `PROFIT FACTOR: 14.24`
+      - `AVG MONTH ACTIVE RATE: 41.03%`
+      - `MONTHS >= 3/4 ACTIVE: 0/51`
+      - `WORST DAY: -27,624,696円`
+    - strict train:
+      - `TOTAL RETURN: +69792.17%`
+      - `PROFIT FACTOR: 6.45`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -21,404,762円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +321.67%`
+      - `PROFIT FACTOR: 24.76`
+      - `WEEKS >= +1%: 22/26`
+      - `POSITIVE WEEKS: 24/26`
+      - `WORST DAY: -27,624,696円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,100,262`
+      - `TOTAL RETURN: +10.03%`
+      - `CLOSED TRADES: 5`
+      - `PROFIT FACTOR: 24.33`
+      - `WEEKS >= +1%: 1/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: -4,167円`
+  - `python -m pytest tests -q` -> `123 passed`
+- 判断:
+  - 採用
+  - `train` の `primary` stop / close_or_open 系の損失を shared exit で浅くでき、`train` PF が `5.70 -> 6.45` へ改善した
+  - latest 1m standalone の `+10.03%` は維持できた
+  - contaminated holdout は veto 確認として見ても悪化しておらず、shared exit としての採用を邪魔しなかった
+- 再試行するとしたら:
+  - `+2%` という閾値の近傍だけを train で再確認し、`primary` の break-even 退避が早すぎて伸びを潰していないかを見る
+  - それ以外の setup には波及させず、あくまで run-up を作った `primary` の失速保護として扱う
+
+### 2026-05-25: Fragile Hot Market Setup-Specific Caps
+
+- 分析:
+  - 最新データは `2026-05-21` で固定したまま、strict `train` / contaminated `holdout` / latest `100万円 standalone` を同じ shared strategy で確認した
+  - `train` の miss week は引き続き `primary` の stop / close_or_open が中心だったため、ここでは broad な低品質削減ではなく、fragile hot market だけを setup 別に分ける方針を取った
+  - 単一の fragile hot market cap では、強い `primary` まで blunt に抑え込んでしまう一方、`catchup_rs` / `catchup_gapdown` / `fallback` の弱い continuation には十分な抑制を掛け切れなかった
+  - そのため、shared strategy のまま `primary` と各 catchup/fallback を分離した setup-specific cap に切り替えるのが、カーブフィッティングではなく説明可能な安全装置として妥当だと判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` の fragile hot market branch を setup-specific cap に変更
+    - `primary: 1.00`
+    - `catchup_rs: 0.75`
+    - `catchup_gapdown: 0.10`
+    - `fallback: 0.10`
+  - `tests/test_logic.py` に、fragile hot market での setup 別 cap 回帰テストを追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y2,373,747,569`
+      - `TOTAL RETURN: +237274.76%`
+      - `CLOSED TRADES: 431`
+      - `WIN RATE: 61.48%`
+      - `WEEKS >= +1%: 188/221`
+      - `POSITIVE WEEKS: 190/221`
+      - `PROFIT FACTOR: 9.77`
+      - `WORST DAY: -23,263,097円`
+    - strict 6m train:
+      - `TOTAL RETURN: +58596.49%`
+      - `PROFIT FACTOR: 5.70`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -16,896,728円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +304.41%`
+      - `PROFIT FACTOR: 13.26`
+      - `WEEKS >= +1%: 22/26`
+      - `POSITIVE WEEKS: 23/26`
+      - `WORST DAY: -23,263,097円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,100,262`
+      - `TOTAL RETURN: +10.03%`
+      - `CLOSED TRADES: 5`
+      - `PROFIT FACTOR: 24.33`
+      - `WEEKS >= +1%: 1/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: -4,167円`
+  - `python -m pytest tests -q` -> `119 passed`
+- 判断:
+  - 採用
+  - latest 1m standalone で 10% を超え、strict `train` と contaminated `holdout` を大きく壊さずに、shared strategy のまま small-account の fragility を分離できたため
+  - broad な一律 cap ではなく setup-specific cap にしたことで、本番運用で説明しやすい形を保てた
+- 再試行するとしたら:
+  - 次は `catchup_rs 0.75` の近傍だけを train で確認し、`fallback` をさらに広げるより weak setup の no-trade を優先する
+  - contaminated holdout を採用理由に使わず、train に再現例が十分ある shared cap だけを検討する
+
+### 2026-05-25: High-RS Overheated Low-Breadth Primary No-Trade
+
+- 分析:
+  - `primary` の中で、`breadth < 0.65` / `market_ratio >= 1.20` / `score >= 11` / `rs_alpha >= 70` / 月火水の帯は、full history で見ると損失しか出ていなかった
+  - train では `2025-11-04 4464.T`、contaminated holdout では `2025-12-08 7746.T`、latest 1ヶ月では `2026-05-19 6779.T` がそれぞれ同型の損失だった
+  - hot market に対して breadth が薄く、RS が高いのに、実運用では伸び切りや急落で返される型なので、shared strategy としては薄く乗るより no-trade の方が説明しやすく、下振れも浅くできると判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、上記条件の `primary` no-trade guard を追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y2,379,512,195`
+      - `TOTAL RETURN: +237851.22%`
+      - `CLOSED TRADES: 427`
+      - `WIN RATE: 61.83%`
+      - `WEEKS >= +1%: 188/221`
+      - `POSITIVE WEEKS: 191/221`
+      - `PROFIT FACTOR: 10.89`
+      - `AVG MONTH ACTIVE RATE: 41.22%`
+      - `MONTHS >= 3/4 ACTIVE: 0/51`
+      - `WORST DAY: -23,121,637円`
+    - strict 6m train:
+      - `TOTAL RETURN: +59002.32%`
+      - `PROFIT FACTOR: 5.85`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -16,896,728円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +302.61%`
+      - `PROFIT FACTOR: 16.07`
+      - `WEEKS >= +1%: 22/26`
+      - `POSITIVE WEEKS: 24/26`
+      - `WORST DAY: -23,121,637円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,100,262`
+      - `TOTAL RETURN: +10.03%`
+      - `CLOSED TRADES: 5`
+      - `PROFIT FACTOR: 24.33`
+      - `WEEKS >= +1%: 1/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: -4,167円`
+  - `python -m pytest tests -q` -> `119 passed`
+- 判断:
+  - 採用
+  - full / holdout の PF と worst day を改善しながら、latest 1m standalone の 10% 超は維持できた
+  - broad な holdout 当て込みではなく、train / contaminated holdout / latest の全てで損失しか出ていない shared hot pocket を閉じた
+- 再試行するとしたら:
+  - この no-trade 帯の `score` / `rs_alpha` / breadth の片側だけを少し緩めた時に、どこから full PF が落ちるかを見る
+  - contaminated holdout を採用理由に使わず、train 再現と full PF の両方でのみ次の判断をする
+
+### 2026-05-25: Low Open-vs-SMA Fragile Hot `primary` Guard Rejected
+
+- 分析:
+  - 直近 1ヶ月 standalone では、`2026-05-15 6707.T` の `primary` loss が `open_vs_sma_atr 0.174`、`rs_alpha 11.73`、`score 6.03` で目立った
+  - ただし `train` 側を同じ共有ロジックで再確認すると、`breadth < 0.55` / `market_ratio >= 1.15` の `primary` fragile hot market 例は見当たらず、同じ形を train で裏付けられなかった
+  - そのため、ここに追加の no-trade guard を入れると latest standalone への当て込みになりやすく、shared strategy の原則に反すると判断した
+- 結論:
+  - 不採用
+  - 現行の setup-specific fragile cap を維持し、次の clean holdout か train 側で再現例が増えた場合のみ再検討する
+- 再試行するとしたら:
+  - `train` で `primary` fragile hot market の再現例が増え、同じ `open_vs_sma_atr` / `rs_alpha` 近傍が一貫して弱いと確認できた場合のみ
+
+### 2026-05-25: Friday Low-Breadth Hot `primary` Guard Rejected
+
+- 分析:
+  - 直近 1ヶ月 standalone の `2026-05-15 6707.T` は金曜の低 breadth / hot market `primary` で大きく負けた
+  - そこで、`train` 側で同じ曜日・同じ市場地合いの `primary` を確認したが、`breadth < 0.55` / `market_ratio >= 1.15` の金曜 `primary` は見つからなかった
+  - 追加の金曜専用ガードは、train に根拠がない holdout 当て込みになると判断した
+- 結論:
+  - 不採用
+  - 現行の setup-specific fragile cap を維持する
+- 再試行するとしたら:
+  - train で金曜 low-breadth hot `primary` の再現例が積み上がり、勝ち筋と負け筋の分岐が確認できたときだけ
+
+### 2026-05-22: Small-Account Board-Lot Catchup Floor / Cheap `primary` Substitute Skip
+
+- 分析:
+  - 今回のテーマは、strict 6m split を維持したまま、`100万円 standalone` の再現性を改善することだった
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` と standalone debug replay を見ると、latest 1m の赤字は setup quality だけでなく、small-account の board-lot 粒度で shared caps が実行不能になっていることが主因だった
+  - 特に:
+    - `catchup_rs` / `catchup_gapdown` は、risk / equity cap 的には 1-board-lot を許容できるのに、notional cap のみで `shares < 100` となって no-trade 化
+    - 一方 `primary` は、上位候補が board-lot 制約で入れない日に、score が大きく落ちた cheap substitute まで順位を下げて拾うと質が崩れていた
+  - これは latest 1m 固有の閾値当て込みではなく、`100万円` 初期条件での shared capital allocation と board-lot 実行可能性の接続問題だと判断した
+- 変更:
+  - `resolve_daytrade_executable_shares` を追加し、shared sizing helper として本番 / backtest 両方から参照
+  - `100万円` 近辺の small-account では、`catchup_rs` / `catchup_gapdown` に限り、risk budget と equity cap を守れる 1-board-lot を notional cap より優先できるようにした
+  - `100万円` 近辺の small-account では、上位 `primary` が入れず、rank `4+` / score gap `>= 8.0` の cheap substitute しか残らない場合は no-trade にした
+  - `tests/test_logic.py` に、small-account board-lot floor と cheap substitute skip の回帰テストを追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `TOTAL RETURN +215171.09% -> +215171.09%`
+      - `PROFIT FACTOR 8.88 -> 8.88`
+      - `WEEKS >= +1% 187/221 -> 187/221`
+      - `POSITIVE WEEKS 190/221 -> 190/221`
+      - `WORST DAY -23,263,097円 -> -23,263,097円`
+    - strict 6m train:
+      - `TOTAL RETURN +58596.49% -> +58596.49%`
+      - `PROFIT FACTOR 5.70 -> 5.70`
+      - `WEEKS >= +1% 166/195 -> 166/195`
+      - `POSITIVE WEEKS 167/195 -> 167/195`
+      - `WORST DAY -16,896,728円 -> -16,896,728円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN +266.75% -> +266.75%`
+      - `PROFIT FACTOR 11.55 -> 11.55`
+      - `WEEKS >= +1% 21/26 -> 21/26`
+      - `POSITIVE WEEKS 23/26 -> 23/26`
+      - `WORST DAY -23,263,097円 -> -23,263,097円`
+    - latest 1m standalone:
+      - `FINAL EQUITY 997,003円 -> 1,015,065円`
+      - `TOTAL RETURN -0.30% -> +1.51%`
+      - `CLOSED TRADES 4 -> 4`
+      - `PROFIT FACTOR 0.41 -> 4.51`
+      - `WEEKS >= +1% 0/4 -> 1/4`
+      - `POSITIVE WEEKS 1/4 -> 1/4`
+      - `WORST DAY -4,773円 -> -4,167円`
+  - standalone trade log では、
+    - `2026-05-08 6838.T catchup_rs` が 1-board-lot floor で実行され `+17,264円`
+    - `2026-05-19` の low-score cheap `primary` substitute は no-trade 化
+    - となり、small-account の質低下だけを局所的に減らせた
+  - `python -m pytest tests -q` -> `119 passed`
+- 判断:
+  - 採用
+  - strict `train` / contaminated holdout / full history を全く壊さず、実運用初期条件の `100万円 standalone` だけを structural に改善できたため
+  - まだ目標の latest 1m `+10%` には届かないが、今回は latest 月だけに当てた閾値ではなく、board-lot 粒度という execution reality に沿った shared change に限定した
+- 再試行するとしたら:
+  - 次は small-account で no-trade になった `fallback` を無理に通すのではなく、train 側で再現例が十分ある affordable setup だけを shared に増やせるかを見る
+  - `catchup_rs` の 1-board-lot floor を広げるなら、latest 1m ではなく train candidate 群で十分な再現例を先に集める
+
+### 2026-05-22: Low-Sponsorship Tepid Hot-Gap Weak-RS `primary` No-Trade
+
+- 分析:
+  - 今回のテーマは、strict 6m split
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - を固定したまま、未達週を落とさずに `primary` の損失集中を shallow にすることだった
+  - 直前に不採用だった broad な `low-breadth tepid hot-gap` cap は、勝ち筋まで blunt に削っていた
+  - 同じ residual を strict `train` で RS まで分けると、
+    - breadth `< 0.60`
+    - `market_ratio 1.00-1.05`
+    - gap `>= 2.0%`
+    - `rs_alpha <= 50`
+    - の `primary`
+    - が `8 trades / 1 win / -7.59M`
+    - で、低スポンサーの先走り continuation だけが一貫して弱かった
+  - contaminated 6m holdout と latest 1m standalone にはこの exact cluster が出ておらず、latest 見た目合わせではなく strict `train` 由来の shared quality guard と解釈できた
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `< 0.60`
+    - `market_ratio 1.00-1.05`
+    - gap `>= 2.0%`
+    - `rs_alpha <= 50`
+    - の `primary` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、RS と `market_ratio` 境界の回帰テストを追加
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY: Y2,300,177,241` -> `Y2,152,710,852`
+      - `TOTAL RETURN: +229917.72%` -> `+215171.09%`
+      - `PROFIT FACTOR: 8.62` -> `8.88`
+      - `WEEKS >= +1%: 187/221` -> `187/221`
+      - `POSITIVE WEEKS: 190/221` -> `190/221`
+      - `WORST DAY: -24,861,595円` -> `-23,263,097円`
+    - strict 6m train:
+      - `TOTAL RETURN: +62617.44%` -> `+58596.49%`
+      - `PROFIT FACTOR: 5.38` -> `5.70`
+      - `WEEKS >= +1%: 166/195` -> `166/195`
+      - `POSITIVE WEEKS: 167/195` -> `167/195`
+      - `WORST DAY: -18,059,008円` -> `-16,896,728円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +266.75%` -> `+266.75%`
+      - `PROFIT FACTOR: 11.54` -> `11.55`
+      - `WEEKS >= +1%: 21/26` -> `21/26`
+      - `POSITIVE WEEKS: 23/26` -> `23/26`
+      - `WORST DAY: -24,861,595円` -> `-23,263,097円`
+    - latest 1m standalone:
+      - `TOTAL RETURN: -0.30%` -> `-0.30%`
+      - `PROFIT FACTOR: 0.41` -> `0.41`
+      - `WEEKS >= +1%: 0/4` -> `0/4`
+      - `POSITIVE WEEKS: 1/4` -> `1/4`
+  - `python jp_backtest.py --holdout-months 1`
+    - contaminated 1m holdout:
+      - `TOTAL RETURN: +0.51%` -> `+0.52%`
+      - `PROFIT FACTOR: 1.33` -> `1.33`
+      - `WEEKS >= +1%: 1/4` -> `1/4`
+      - `POSITIVE WEEKS: 2/4` -> `2/4`
+      - `WORST DAY: -19,690,069円` -> `-18,425,569円`
+  - `python analyze_backtest_trade_log.py --holdout-months 6`
+    - `miss weeks 28` は不変
+    - miss-week 内の `primary` 損益は `-24.78M` から `-19.76M` へ改善
+    - train worst day は `2025-08-12 -16.90M` まで縮小
+  - `python -m pytest tests -q` -> `119 passed`
+- 判断:
+  - 採用
+  - strict `train` の週次本数を落とさず、PF と worst day を改善でき、contaminated holdout にも悪化 veto が出なかったため
+  - total return と稼働率はやや落ちたが、広い `tepid hot-gap` を blunt に削るのではなく、低スポンサーの continuation だけを shared に落とした説明可能性を優先した
+  - latest 1m standalone の赤字は未解消で、今回の cluster とは別問題として残っている
+- 再試行するとしたら:
+  - broad な `low-breadth tepid hot-gap` cap `0.10-0.35` 近傍へは戻らない
+  - 次に触るなら、latest standalone の `2026-05-19` 型 low-breadth / overheated / flat-gap `primary` に、strict `train` の再現例か live intraday 根拠が十分たまったときだけに限定する
+
+### 2026-05-22: Monday Extreme-Gap / Modest-Trend `primary` Tight Cap Recheck
+
+- 分析:
+  - 今回のテーマは、strict 6m split
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - を固定したまま、未達週を崩さずに損失集中をもう一段浅くできるかを見直すことだった
+  - 追加分析の途中で、`analyze_backtest_trade_log.py --output-trades-csv` は full replay を書き出す仕様だと分かったため、候補クラスタは必ず strict `train` へ切り直して再確認した
+  - その結果、火曜 `neutral-trend positive-gap` は strict `train` ではプラス寄りに戻り、不採用候補から外れた一方、既採用だった月曜 `extreme gap / modest-trend primary` は、逐次適用後の strict `train` でも
+    - `7 trades / 3 wins`
+    - `pnl_pct_equity 合計 -4.87`
+    - `平均 -0.70%`
+    - のままで、`1.25` cap でも still too large だと確認できた
+  - 特に `2025-10-20 3370.T` は同クラスタの `close_exit` で、旧 baseline の train worst day `-19.59M` の主因だった
+- 変更:
+  - `DAYTRADE_PRIMARY_MONDAY_EXTREME_GAP_MODEST_TREND_EQUITY_NOTIONAL_PCT` を `1.25 -> 0.75` へ tightening
+  - 新しい枝や selector 追加は行わず、既存の shared fragility cap だけを再調整した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `FINAL EQUITY Y2,236,664,773 -> Y2,300,177,241`
+      - `TOTAL RETURN +223566.48% -> +229917.72%`
+      - `PROFIT FACTOR 8.25 -> 8.62`
+      - `WEEKS >= +1% 187/221 -> 187/221`
+      - `POSITIVE WEEKS 190/221 -> 190/221`
+      - `WORST DAY -24,175,514円 -> -24,861,595円`
+    - strict 6m train:
+      - `TOTAL RETURN +60884.34% -> +62617.44%`
+      - `PROFIT FACTOR 4.95 -> 5.38`
+      - `WEEKS >= +1% 166/195 -> 166/195`
+      - `POSITIVE WEEKS 167/195 -> 167/195`
+      - `WORST DAY -19,586,479円 -> -18,059,008円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN +266.76% -> +266.75%`
+      - `PROFIT FACTOR 11.54 -> 11.54`
+      - `WEEKS >= +1% 21/26 -> 21/26`
+      - `POSITIVE WEEKS 23/26 -> 23/26`
+      - `WORST DAY -24,175,514円 -> -24,861,595円`
+    - latest 1m standalone:
+      - `TOTAL RETURN -0.30% -> -0.30%`
+      - `PROFIT FACTOR 0.41 -> 0.41`
+      - `WEEKS >= +1% 0/4 -> 0/4`
+      - `POSITIVE WEEKS 1/4 -> 1/4`
+  - `python analyze_backtest_trade_log.py --holdout-months 6`
+    - `miss weeks 28` は不変
+    - train worst day は `2025-08-12 -18.06M` へ移り、`2025-10-20` の日次損失は `-11.85M` まで縮小した
+- 判断:
+  - 採用
+  - 未達週本数を落とさず、strict `train` の PF と worst day を改善できたため
+  - contaminated holdout の absolute worst day はやや悪化したが、採用判断の主軸である strict `train` の損失集中改善を優先し、`holdout` は veto を出すほどの崩れではないと判断した
+- 再試行するとしたら:
+  - 次は live intraday log が揃ったときに、`primary close_exit` の fade を shared exit で切れるかを優先して見る
+  - latest 1m standalone の赤字は未解消のため、`tuesday_overheated` 周辺は新しい strict `train` 再現例が溜まってから再点検する
+
+### 2026-05-22: Tepid-Market Hot-Gap `primary` Tight Cap Recheck (Not Adopted)
+
+- 分析:
+  - strict `train` で、逐次適用後も実際に `tepid_market_hot_gap` cap が効いていた trade は
+    - `4 trades / 0 wins`
+    - `pnl_pct_equity 合計 -8.18`
+    - `平均 -2.05%`
+    - と弱く、既存 `1.40` cap は still too loose に見えた
+  - ただしこの帯は `2026-05-20` に近傍の selector skip / broader chase 再設計を既に何度か触っているため、今回は既存 cap の tightening だけに限定して確認した
+- 変更:
+  - `DAYTRADE_PRIMARY_TEPID_MARKET_HOT_GAP_EQUITY_NOTIONAL_PCT` を `1.40 -> 0.75` へ tightening
+- 結果:
+  - 月曜 `extreme gap / modest-trend` cap を `0.75` へ tighten した採用候補状態に対してさらに重ねると、
+    - full:
+      - `TOTAL RETURN +229917.72% -> +234281.70%`
+      - `PROFIT FACTOR 8.62 -> 8.69`
+      - `WEEKS >= +1% 187/221 -> 187/221`
+      - `WORST DAY -24,861,595円 -> -25,328,413円`
+    - strict 6m train:
+      - `TOTAL RETURN +62617.44% -> +63806.63%`
+      - `PROFIT FACTOR 5.38 -> 5.46`
+      - `WEEKS >= +1% 166/195 -> 166/195`
+      - `WORST DAY -18,059,008円 -> -18,401,646円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN +266.75% -> +266.76%`
+      - `PROFIT FACTOR 11.54 -> 11.54`
+      - `WEEKS >= +1% 21/26 -> 21/26`
+      - `WORST DAY -24,861,595円 -> -25,328,413円`
+    - latest 1m standalone:
+      - `TOTAL RETURN -0.30% -> -0.30%`
+      - `PROFIT FACTOR 0.41 -> 0.41`
+- 判断:
+  - 不採用
+  - return / PF は伸びたが、未達週も latest 1m standalone も改善しないまま、full / train / contaminated holdout の absolute worst day を押し広げたため
+  - 今回の優先順位では、損失集中の圧縮を削ってまで積み増す段階ではないと判断した
+- 再試行するとしたら:
+  - 同じ `0.75` 近傍の cap 値再調整は行わない
+  - 次に触るなら、この帯そのものではなく exit 側の順序情報が揃ったときの shared fade defense に寄せる
+
+### 2026-05-22: Broad-Warm Dominant `catchup` Selector Replacement
+
+- 分析:
+  - 今回のテーマは、strict 6m split を
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - で固定したまま、まず未達週、その次に損失集中を洗い直すことだった
+  - `train` baseline は
+    - `WEEKS >= +1%: 166/195`
+    - `POSITIVE WEEKS: 167/195`
+    - `miss weeks 28`
+    - `negative 27`
+    - `miss_no_trade 0`
+    - で、課題は no-trade ではなく `primary` continuation の deep-loss week だった
+  - trade log を見ると、broad で warm な tape でも selector が `primary` を hard-prioritize しすぎる日があり、上位 `catchup` のほうが shared に素直な candidate なのに取り切れていない日が残っていた
+  - 一方で、`strong_oversold` や広い `catchup` rotation を同時に広げると、raw score 尺度の違いで `primary` の本来の edge まで壊しやすいことも確認した
+- 変更:
+  - `primary` を常時弱めるのではなく、breadth `>= 0.75` かつ `market_ratio 1.05-1.15` の broad warm tape に限定した
+  - そのうえで、top `catchup` score が top `primary` score を `12.0` 以上上回るときだけ、`primary` より `catchup` を優先する selector replacement を shared logic に追加した
+  - `tests/test_logic.py` に、broad warm tape での dominant `catchup` replacement 回帰を追加した
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y2,263,896,443` -> `Y2,236,664,773`
+    - `TOTAL RETURN: +226289.64%` -> `+223566.48%`
+    - `PROFIT FACTOR: 8.07` -> `8.25`
+    - `WEEKS >= +1%: 187/221` -> `187/221`
+    - `POSITIVE WEEKS: 190/221` -> `190/221`
+    - `WORST DAY: -24,465,507円` -> `-24,175,514円`
+  - strict 6m train:
+    - `FINAL EQUITY: Y617,274,042` -> `Y609,843,363`
+    - `TOTAL RETURN: +61627.40%` -> `+60884.34%`
+    - `PROFIT FACTOR: 4.76` -> `4.95`
+    - `WEEKS >= +1%: 166/195` -> `166/195`
+    - `POSITIVE WEEKS: 167/195` -> `167/195`
+    - `WORST DAY: -19,825,603円` -> `-19,586,479円`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +266.76%` -> `+266.76%`
+    - `PROFIT FACTOR: 11.54` -> `11.54`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -24,465,507円` -> `-24,175,514円`
+  - walk-forward:
+    - `POSITIVE WINDOWS: 6/6`
+    - `HOLDOUT WEEKS >= +1%: 147/155`
+    - `POSITIVE WEEKS: 149/155`
+    - `AVG HOLDOUT PF: 11.63`
+- 検証:
+  - `python -m pytest tests/test_logic.py tests/test_backtest.py -q` -> `71 passed`
+  - `python -m pytest tests -q` -> `118 passed`
+  - `python jp_backtest.py --holdout-months 6`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 6`
+- 判断:
+  - 採用
+  - 週次達成本数を落とさず、`train` と full の PF を改善し、worst day もわずかに浅くできた
+  - contaminated holdout でも悪化 veto は出ず、shared selector の priority repair として説明可能性がある
+- 再試行するとしたら:
+  - 同じ broad warm tape 近傍で score advantage `10-14` を細かく詰めない
+  - 次に進めるなら、new clean holdout を積み上げつつ、live / intraday log から `primary close-loss fade` を shared exit 側で浅くできる根拠が揃ったときだけに限定する
+
+### 2026-05-22: Underconfirmed Second-Day Chase `primary` Filter / Size Cap (Not Adopted)
+
+- 分析:
+  - strict 6m split は
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - のまま固定した
+  - `train` の `primary close_exit` を掘ると、`prev_return 6-8%` / `gap >= 2%` / `open_vs_sma_atr >= 0` / `market_ratio < 1.10` の second-day chase cluster が 7 件あり、`6敗1勝`, 合計 `-9,366,032円` だった
+  - ただし contaminated holdout にはこの exact cluster がなく、さらに `analyze_intraday_logs.py` を回しても
+    - `daytrade_decisions.csv`
+    - `intraday_snapshots.csv`
+    - `daytrade_exit_log.csv`
+    - がすべて missing で、shared exit 側の profit-protection 仮説はまだ blocked だった
+- 変更:
+  - まず selector 側で、上記 cluster の `primary` を outright に除外した
+  - そのあと除外が別の弱い代替候補を呼び込みやすいと分かったため、同じ cluster を selector では消さず、`equity notional cap 1.00` に落とす案も比較した
+- 結果:
+  - outright filter:
+    - full:
+      - `TOTAL RETURN: +223566.48%` -> `+187118.69%`
+      - `PROFIT FACTOR: 8.25` -> `7.41`
+      - `WEEKS >= +1%: 187/221` -> `186/221`
+      - `WORST DAY: -24,175,514円` -> `-20,235,853円`
+    - strict 6m train:
+      - `TOTAL RETURN: +60884.34%` -> `+50947.53%`
+      - `PROFIT FACTOR: 4.95` -> `4.13`
+      - `WEEKS >= +1%: 166/195` -> `165/195`
+      - `POSITIVE WEEKS: 167/195` -> `166/195`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN: +266.76%` -> `+266.75%`
+      - `WEEKS >= +1%: 21/26` -> `21/26`
+  - `equity notional cap 1.00`:
+    - full:
+      - `TOTAL RETURN: +223566.48%` -> `+223283.57%`
+      - `PROFIT FACTOR: 8.25` -> `8.25`
+      - `WEEKS >= +1%: 187/221` -> `187/221`
+      - `WORST DAY: -24,175,514円` -> `-24,140,149円`
+    - strict 6m train:
+      - `TOTAL RETURN: +60884.34%` -> `+60807.57%`
+      - `PROFIT FACTOR: 4.95` -> `4.95`
+      - `WEEKS >= +1%: 166/195` -> `166/195`
+      - `POSITIVE WEEKS: 167/195` -> `167/195`
+    - latest 1m standalone:
+      - `TOTAL RETURN: -0.30%` -> `-0.30%`
+      - `PROFIT FACTOR: 0.41` -> `0.41`
+      - `WEEKS >= +1%: 0/4` -> `0/4`
+- 判断:
+  - 不採用
+  - cluster 自体の脆さは確認できたが、selector で消すと代替候補がさらに悪く、size cap だけでは baseline を上回る改善にならなかった
+  - 直近 standalone の赤字も、この cluster とは別の `low breadth + hot market` 側で、`train` に十分な再現例がなかった
+- 再試行するとしたら:
+  - `prev_return 6-8%` / `gap >= 2%` の日足 cluster だけを根拠に、selector 除外や notional cap を同じ発想で繰り返さない
+  - 次に進めるなら、populated な intraday log を溜めたうえで `primary close-fade` の shared exit / profit-protection を設計するときだけに限定する
+
+### 2026-05-22: Broad Hot-Tape Strong-Oversold / Catchup Selector Rotation (Not Adopted)
+
+- 分析:
+  - `primary` の deep-loss day を family 入れ替えで逃がせるかを確認するため、broad hot tape で `strong_oversold` と `catchup` を広めに selector rotation する案を比較した
+  - ただし `primary` と他 family の raw score は同一尺度ではなく、広く差し替えると「悪い `primary` を避ける」より先に「良い `primary` を壊す」リスクが高かった
+- 変更:
+  - `strong_oversold` と `catchup` の両方を使った広い replacement 条件を一時実装した
+  - あわせて `strong_oversold` 単独 replacement も確認し、broad warm tape での replacement 範囲を比較した
+- 結果:
+  - strong_oversold + catchup の広い rotation:
+    - full:
+      - `FINAL EQUITY: Y2,263,896,443` -> `Y794,535,649`
+      - `PROFIT FACTOR: 8.07` -> `3.60`
+      - `WEEKS >= +1%: 187/221` -> `182/221`
+    - strict 6m train:
+      - `WEEKS >= +1%: 166/195` -> `161/195`
+    - contaminated 6m holdout:
+      - `WEEKS >= +1%: 21/26` -> `17/26`
+  - `strong_oversold` 単独 replacement も、週次本数は維持できる近傍があった一方で、PF と holdout 側の質を current candidate 以上に押し上げられなかった
+- 判断:
+  - 不採用
+  - 深い負けを避ける前に shared `primary` edge を過剰に崩しており、ゼロベース再設計としても「family の大回転」より selector priority の限定修正のほうが頑健と判断した
+- 再試行するとしたら:
+  - `strong_oversold` と `catchup` の広い cross-family replacement を同じ発想で再試行しない
+  - 次に cross-family を触るなら、family score の再較正か、intraday exit 情報で `primary` の崩れ方を直接説明できるときに限定する
+
+### 2026-05-22: Live Month-State Rollover and Mark-to-Market Risk Guard Repair
+
+- 分析:
+  - 今回のテーマは、strict 6m split
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - を固定したまま、売買ルールではなく live 実行レイヤーの state 整合性を詰めることだった
+  - `same-day re-entry` や週次ガードの persisted state 自体は `merge_account_state()` で毎ループ復元されていたが、`month_start_equity` は起動時のローカル変数をそのまま握り続けていた
+  - そのため、bot を月跨ぎで止めずに動かした場合、`current_month` は account json 側で進んでも、live ループ内の monthly drawdown 判定だけ古い月初資産を使い続けるリスクがあった
+  - また monthly / weekly risk 判定に使う `current_total` も、mark-to-market 前の portfolio を使っており、特に simulation では 1 loop ぶん stale な評価額に寄りやすかった
+- 変更:
+  - `auto_trade.py` に `ensure_daytrade_month_state()` を追加し、server time ベースで
+    - `current_month`
+    - `month_start_equity`
+    - を更新するようにした
+  - 起動時だけでなく各 loop でも、portfolio を mark-to-market したあとに
+    - `current_total`
+    - month state
+    - week state
+    - monthly risk block
+    - を再計算する順へ修正した
+  - `tests/test_auto_trade.py` に
+    - month state 初期化
+    - 同月では reset しないこと
+    - 月跨ぎでは server time で reset すること
+    - を追加した
+- 結果:
+  - strategy baseline 指標は不変
+  - 月跨ぎ連続稼働でも monthly risk guard が古い月初資産を握り続けないようになった
+  - monthly / weekly state は、board / realtime buffer 反映後の mark-to-market 評価額で更新されるようになった
+  - 検証:
+    - `python -m pytest tests/test_auto_trade.py tests/test_logic.py -q` -> `65 passed`
+    - `python -m pytest tests -q` -> `116 passed`
+- 判断:
+  - 採用
+  - これは成績改善ではなく、live 実行の risk state を shared strategy 前提に合わせる runtime safety fix として採用した
+- 再試行するとしたら:
+  - 次に触るのは、month rollover のような state 管理ではなく、populated な live intraday log を前提に shared exit / partial de-risk を設計するとき
+  - contaminated holdout を見ながら月次リスク閾値そのものを細かく触る方向へは進まない
+
+### 2026-05-22: Live Daytrade Shared Exit Parity Repair
+
+- 分析:
+  - 今回のテーマは、strict 6m split を
+    - `latest cache: 2026-05-21`
+    - `train=2021-05-19` から `2025-11-24`
+    - `contaminated holdout=2025-11-25` から `2026-05-21`
+    - のまま固定しつつ、未達週分析ではなく `live / backtest` の shared-strategy parity を点検することだった
+  - `daytrade` の live exit を追うと、`manage_positions_live()` が shared intraday stop / target を見ず、`AFTERNOON` 以降は実質一律 flatten になっていた
+  - `MarketPhase.AFTERNOON` は `12:30` 開始なので、このままでは backtest が持っている intraday stop / target の出口と live 実行が乖離し、「後場寄りからすぐ全決済」という別戦略になっていた
+  - また、closing-time の break が exit 処理より前にあり、将来 flatten 時刻を動かしたときに EOD 処理が抜けるリスクもあった
+- 変更:
+  - `core/logic.py` に live 用の shared helper を追加し、position に保存された entry context から
+    - stop price
+    - target price
+    - `intraday_stop / intraday_target / daytrade_flatten`
+    - を同じルールで解決するようにした
+  - `manage_positions_live()` は「全 flatten」ではなく
+    - intraday stop 到達
+    - intraday target 到達
+    - `14:30` 以降の force flatten
+    - のどれかでだけ closed position を返すように修正した
+  - さらに live 売り注文の戻り値を見て
+    - 未約定なら保有継続
+    - 部分約定なら shares を減らして保有継続
+    - 全約定だけ local portfolio から除去
+    - とする safety fallback を追加した
+  - `auto_trade.py` では
+    - `DAYTRADE_FORCE_FLATTEN_TIME = 14:30`
+    - same-day re-entry guard
+    - target mult / target price / target までの距離の observability
+    - live full exit は実約定価格をそのまま exit log へ使い、simulation だけ slippage model を使うよう整理
+    - live partial fill も `filled_shares` / `remaining_shares` 付きの exit event として `daytrade_exit_log.csv` に残すようにした
+    - closing-time break を exit 処理後へ移動
+    - を追加した
+  - `README.md`、`tests/test_logic.py`、`tests/test_auto_trade.py` もこの前提へ更新した
+- 結果:
+  - strategy baseline 指標は不変
+    - 今回は backtest の entry / sizing / shared selector を変えておらず、採用理由は成績改善ではなく本番実行の shared parity 復元
+  - live 側でも intraday stop / target が shared helper を通るため、backtest と別の出口戦略になる問題を解消した
+  - 検証:
+    - `python -m pytest tests/test_logic.py tests/test_auto_trade.py tests/test_analyze_intraday_logs.py -q` -> `66 passed`
+    - `python -m pytest tests -q` -> `110 passed`
+    - `python analyze_intraday_logs.py --top-n 5` -> `daytrade_decisions.csv` / `intraday_snapshots.csv` / `daytrade_exit_log.csv` は引き続き `missing`
+- 判断:
+  - 採用
+  - これは curve fit ではなく、shared strategy を live 実行レイヤーへ戻すための parity fix として採用した
+- 再試行するとしたら:
+  - 次に触るのは、populated な live intraday log が溜まり
+    - `14:30` flatten が遅すぎる / 早すぎる
+    - target 到達前後の give-back に shared partial de-risk が必要
+    - を順序情報で判断できるときに限る
+  - それまでは、同じ問題に対して日足 OHLC 条件を足す方向へ戻らない
+
+### 2026-05-22: Low-Breadth Tepid Hot-Gap `primary` Shared Leverage Cap (Not Adopted)
+
+- 分析:
+  - 今回のテーマは、strict 6m `train=2021-05-19` から `2025-11-24` の未達週を改めて分解し、no-trade ではなく `primary` の損失集中を shared に浅くできるかを確認することだった
+  - baseline の `train` では
+    - `WEEKS >= +1%: 166/195`
+    - `POSITIVE WEEKS: 167/195`
+    - `miss weeks 28`
+    - `negative 27`
+    - `miss_no_trade 0`
+    - で、依然として主課題は trade 不足ではなく `primary` の deep-loss week だった
+  - full trade log を broad bin で見直すと、既採用の `tepid hot-gap modest-trend` selector skip の外側に
+    - breadth `< 0.60`
+    - `market_ratio 1.00-1.05`
+    - gap `>= 2.0%`
+    - `open_vs_sma_atr 0-2`
+    - の residual `primary`
+    - `9 trades / 3 wins / -8.02M / PF 0.03`
+    - が残っていた
+  - これは「市場確認が弱いのに個別だけ先走る continuation」の shared residual と見なし、追加の hard filter ではなく selected leverage cap として浅く試す余地があると判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、上の residual cluster を `primary probe` として落とす案を試した
+  - leverage cap は `0.10 / 0.25 / 0.35` の3段だけ確認し、広いグリッド探索には広げなかった
+- 結果:
+  - `cap 0.10`
+    - full:
+      - `TOTAL RETURN +226289.64% -> +111761.57%`
+      - `PROFIT FACTOR 8.07 -> 6.85`
+      - `WEEKS >= +1% 187/221 -> 182/221`
+      - `POSITIVE WEEKS 190/221 -> 186/221`
+      - `WORST DAY -24,465,507円 -> -12,087,757円`
+    - strict 6m train:
+      - `TOTAL RETURN +61627.40% -> +30401.58%`
+      - `PROFIT FACTOR 4.76 -> 3.67`
+      - `WEEKS >= +1% 166/195 -> 161/195`
+      - `POSITIVE WEEKS 167/195 -> 163/195`
+      - `WORST DAY -19,825,603円 -> -9,795,748円`
+  - `cap 0.25`
+    - full:
+      - `TOTAL RETURN +226289.64% -> +198562.95%`
+      - `PROFIT FACTOR 8.07 -> 8.13`
+      - `WEEKS >= +1% 187/221 -> 185/221`
+      - `POSITIVE WEEKS 190/221 -> 189/221`
+      - `WORST DAY -24,465,507円 -> -21,466,555円`
+    - strict 6m train:
+      - `TOTAL RETURN +61627.40% -> +54067.67%`
+      - `PROFIT FACTOR 4.76 -> 4.82`
+      - `WEEKS >= +1% 166/195 -> 164/195`
+      - `POSITIVE WEEKS 167/195 -> 166/195`
+      - `WORST DAY -19,825,603円 -> -17,399,241円`
+  - `cap 0.35`
+    - full:
+      - `TOTAL RETURN +226289.64% -> +213293.62%`
+      - `PROFIT FACTOR 8.07 -> 8.06`
+      - `WEEKS >= +1% 187/221 -> 187/221`
+      - `POSITIVE WEEKS 190/221 -> 190/221`
+      - `WORST DAY -24,465,507円 -> -23,065,053円`
+    - strict 6m train:
+      - `TOTAL RETURN +61627.40% -> +58085.10%`
+      - `PROFIT FACTOR 4.76 -> 4.75`
+      - `WEEKS >= +1% 166/195 -> 166/195`
+      - `POSITIVE WEEKS 167/195 -> 167/195`
+      - `WORST DAY -19,825,603円 -> -18,688,507円`
+    - contaminated 6m holdout:
+      - `TOTAL RETURN +266.76% -> +266.75%`
+      - `PROFIT FACTOR 11.54 -> 11.55`
+      - `WEEKS >= +1% 21/26 -> 21/26`
+      - `POSITIVE WEEKS 23/26 -> 23/26`
+- 判断:
+  - 不採用
+  - `0.10` と `0.25` は downside 改善と引き換えに週次本数を落としすぎた
+  - `0.35` は week count を維持したが、`train` / full の return と PF を baseline 超えにできず、未達週も1本も増やせなかった
+  - contaminated holdout に悪化 veto は無かったが、clean holdout が無い現状で「週次不変・return 低下・downside やや改善」だけを理由に採用する根拠は弱いと判断した
+- 再試行するとしたら:
+  - 同じ low-breadth / tepid hot-gap residual を、selected leverage `0.10-0.35` の近傍で再調整しない
+  - 次に進めるなら、
+    - 新しい clean holdout が積み上がって同 residual の再現数が増えたとき
+    - あるいは live / intraday exit log から shared exit / partial de-risk の根拠が取れたとき
+    - に限定する
+
+### 2026-05-22: `train` Miss-Week Sensitivity Audit (No Logic Change)
+
+- 分析:
+  - 上の residual cap を不採用にしたあと、まだ OHLC 日足だけで詰める余地があるかを確認するため、strict 6m `train=2021-05-19` から `2025-11-24` の miss week `28` 本を「あとどれだけで +1% を超えたか」で再点検した
+  - 結果は、
+    - worst trade を `25% / 50% / 75%` 浅くしても `0 / 0 / 0` 週しか反転せず
+    - worst trade を完全に消しても `5/28` 週しか反転しなかった
+    - `primary stop` bucket だけを `25% / 50% / 75% / 100%` 浅くした場合も `0 / 0 / 1 / 2` 週しか反転しなかった
+  - 一方で miss week の `21/28` は「最悪 1 trade」が週内損失の `50%` 超、`12/28` は `75%` 超を占めており、損失集中そのものは強い
+  - ただし、その集中損失を小幅に shallow 化しても週次 +1% はほとんど埋まらないため、同じ OHLC feature 近傍に新しい cap / probe / no-trade を足しても、週次改善より curve fit リスクが先に立つと判断した
+  - live `daytrade_decisions.csv` / `intraday_snapshots.csv` / `daytrade_exit_log.csv` は今回も空のままで、順序情報ベースの exit 仮説を前に進める材料はまだ無かった
+- 変更:
+  - shared strategy の変更なし
+  - `analyze_backtest_trade_log.py` に、
+    - miss week ごとの `gap_to_target`
+    - worst trade / `primary stop` を shallow 化したときの flip potential
+    - weekly loss に占める worst trade の比率
+    - を出す診断を追加した
+  - `tests/test_analyze_backtest_trade_log.py` と `README.md` も同じ内容に合わせて更新した
+- 結果:
+  - baseline は不変
+  - 現時点で言えることは、
+    - 週次 +1% の未達を埋める次の主戦場は「小さな日足 cap の積み増し」ではなく
+    - intraday 順序情報を使った shared exit / partial de-risk
+    - あるいは新しい clean holdout の蓄積
+    - である
+- 判断:
+  - 不採用
+  - 新しい shared trading rule は追加しない
+  - 代わりに、同じ dead-end を別セッションで繰り返さないための train diagnostics を強化した
+- 再試行するとしたら:
+  - live intraday log が十分たまり、「入った後に崩れた trade だけを切る」shared exit を設計できるとき
+  - あるいは `train` に新しい broad residual が増え、small trim でも週次反転余地が明確に見えたとき
+  - に限定する
+
+### 2026-05-22: Intraday Log Source Visibility Reinforcement (No Logic Change)
+
+- 分析:
+  - shared exit / partial de-risk の次段へ進みたい一方で、現ワークツリーの `data/kabucom_test` には
+    - `daytrade_decisions.csv`
+    - `intraday_snapshots.csv`
+    - `daytrade_exit_log.csv`
+    - が存在せず、`analyze_intraday_logs.py` 実行時には単に `(no rows)` とだけ出て、missing なのか empty なのかが分かりにくかった
+  - この状態では「ログ取得そのものが止まっている」のか、「まだ live 実行が足りないだけなのか」を即座に判断しづらく、次の shared exit 研究が詰まりやすかった
+- 変更:
+  - shared strategy の変更なし
+  - `analyze_intraday_logs.py` に source file status と analysis readiness を追加し、
+    - `missing`
+    - `empty_file`
+    - `header_only`
+    - `populated`
+    - を明示するようにした
+  - `core/preflight.py` でも起動前に optional intraday observability log の状態を表示するようにした
+  - `README.md` と `tests/test_analyze_intraday_logs.py` も同じ前提へ更新した
+- 結果:
+  - baseline / strategy metrics は不変
+  - 今後は `analyze_intraday_logs.py` や起動前点検だけで、「まだ live path が取れていない」ことを即判定できる
+- 判断:
+  - 採用
+  - これは売買ルール変更ではなく、次の strategy research を止めていた観測ギャップの解消として採用した
+- 再試行するとしたら:
+  - 次は file status を増やすのではなく、実際に populated な live log が溜まった段階で shared exit / partial de-risk の設計へ移る
+
+### 2026-05-21: Monday Extreme-Gap `primary` De-Risk + Warmup-Aware Train Miss Weeks
+
+- 分析:
+  - 今回のテーマは、warmup 後の `train` で何が未達週を作っているかをゼロベースで見直し、shared strategy の範囲で損失集中を浅くすることだった
+  - `analyze_backtest_trade_log.py` の miss-week 集計には warmup 前の部分週が混ざっており、従来表示の `miss weeks 70 / miss no-trade 42` は実運用比較には不適切だった
+  - warmup 前の部分週を除外すると、strict 6m `train=2021-05-19` から `2025-11-24` の miss week は
+    - `train weeks 194`
+    - `miss 28`
+    - `negative 27`
+    - `miss_no_trade 0`
+    - となり、主課題は稼働不足ではなく `primary` の損失集中だと分かった
+  - `primary` を broad bin で再分解すると、月曜の `open_vs_sma_atr 1-2` かつ `gap <= 0` または `gap >= 2%` の continuation cluster が
+    - `9 trades / 3 wins / -33.92M`
+    - `close_or_open 8 trades / 3 wins / -28.05M`
+    - と特に悪く、週明けの extreme gap に対して near-2x equity sizing を許すのが重すぎると判断した
+- 変更:
+  - `core/logic.py` の `resolve_daytrade_primary_equity_notional_pct` に、月曜の `primary` で
+    - `open_vs_sma_atr 1.0-2.0`
+    - `gap <= 0` または `gap >= 2.0%`
+    - の broad cluster を `equity notional cap 1.25` へ落とす shared de-risk を追加した
+  - `analyze_backtest_trade_log.py` の `build_train_week_table` に `warmup_start` を追加し、warmup 前の部分週を miss-week 集計から除外するようにした
+  - `tests/test_logic.py` と `tests/test_analyze_backtest_trade_log.py` を更新した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6`
+    - full:
+      - `FINAL EQUITY Y2,209,620,177 -> Y2,263,896,443`
+      - `TOTAL RETURN +220862.02% -> +226289.64%`
+      - `PROFIT FACTOR 7.90 -> 8.07`
+      - `WEEKS >= +1% 187/221 -> 187/221`
+      - `POSITIVE WEEKS 190/221 -> 190/221`
+      - `WORST DAY -23,878,448円 -> -24,465,507円`
+    - 6m train:
+      - `FINAL EQUITY Y602,479,996 -> Y617,274,042`
+      - `TOTAL RETURN +60148.00% -> +61627.40%`
+      - `PROFIT FACTOR 4.59 -> 4.76`
+      - `WEEKS >= +1% 166/195 -> 166/195`
+      - `POSITIVE WEEKS 167/195 -> 167/195`
+      - `WORST DAY -22,457,646円 -> -19,825,603円`
+    - contaminated 6m holdout `2025-11-25` から `2026-05-21`:
+      - `TOTAL RETURN +266.75% -> +266.76%`
+      - `PROFIT FACTOR 11.55 -> 11.54`
+      - `WEEKS >= +1% 21/26 -> 21/26`
+      - `POSITIVE WEEKS 23/26 -> 23/26`
+      - `WORST DAY -23,878,448円 -> -24,465,507円`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 6`
+    - `AVG HOLDOUT RETURN +396.83% -> +399.45%`
+    - `AVG HOLDOUT PF 11.34 -> 11.52`
+    - `HOLDOUT WEEKS >= +1% 147/155 -> 147/155`
+    - `HOLDOUT POSITIVE WEEKS 149/155 -> 149/155`
+  - contaminated holdout の `WORST DAY` 名目額は少し悪化したが、worst day の日次損失率はほぼ横ばいで、悪化は主に train 改善後の複利ベース上昇によると確認した
+- 判断:
+  - 採用
+  - warmup-aware miss 集計で課題を正しく `negative miss` に絞り込めたことと、月曜 cluster の sizing trim が
+    - train の worst day を大きく浅くし
+    - 週次達成率を落とさず
+    - rolling holdout でも平均成績を悪化させなかった
+    - ため
+- 再試行するとしたら:
+  - 次は `primary close_exit` の fade を、今回の Monday de-risk の外側で
+    - 月水木の `market_ratio 1.00-1.05`
+    - `gap >= 2%`
+    - `open_vs_sma_atr 0-2`
+    - の broad clusterとして残るかどうかを、clean holdout と live exit log が溜まってから shared exit 側で見る
+
+### 2026-05-21: Live Exit Decision Diagnostics Expansion
+
+- 分析:
+  - 今回のテーマは、`primary close_exit` の run-up 後 fade を次の clean holdout で shared exit / de-risk に繋げられるよう、live 側の監査粒度を backtest 側へ寄せることだった
+  - `2026-05-21` 時点では live の `daytrade_decisions.csv` / `intraday_snapshots.csv` / `daytrade_exit_log.csv` はまだ空のままだが、前段で追加した backtest fade 診断から
+    - run-up 後に赤で終わる trade
+    - stop に近づいたまま戻らない trade
+    - close まで保有すると give-back しやすい trade
+    - を live 側でも同じ物差しで追える必要があると分かった
+  - 既存の `intraday_snapshots.csv` だけでは、「最後の snapshot」までは追えても、「どの価格帯で flatten を決めたか」「slippage 込みでどの程度の modeled exit だったか」が残らず、exit 設計の検証に足りなかった
+- 変更:
+  - `auto_trade.py` に `daytrade_exit_log.csv` を追加し、flatten 時に
+    - `observed_price`
+    - `modeled_exit_price`
+    - `modeled_pnl`
+    - `modeled_return_pct`
+    - `session_runup_pct`
+    - `session_drawdown_pct`
+    - `fade_from_session_high_pct`
+    - `rebound_from_session_low_pct`
+    - を entry context と一緒に残すようにした
+  - `intraday_snapshots.csv` 側にも `session_drawdown_pct`、`fade_from_session_high_pct`、`rebound_from_session_low_pct` を追加し、snapshot と exit で同じ path 指標を揃えた
+  - `analyze_intraday_logs.py` は `daytrade_exit_log.csv` を読めるようにし、存在する場合は最後の snapshot ではなく exit decision 側の modeled return / pnl を優先して集計するようにした
+  - README と `tests/test_auto_trade.py` / `tests/test_analyze_intraday_logs.py` を更新した
+- 結果:
+  - strategy baseline 指標は変更なし
+  - `analyze_intraday_logs.py` は、exit ログが無い現時点でも空ファイルで安全に動作し、exit ログがある将来セッションでは
+    - `Exit Counts`
+    - `Daily Exit Summary`
+    - exit decision を反映した `final_return_pct`
+    - を同じレポート内で見られるようになった
+- 判断:
+  - 採用
+  - ただし採用したのは live 実行レイヤーの監査基盤であり、売買ロジックの baseline 自体は据え置き
+  - contaminated holdout を見ながら OHLC 条件をさらに足すより、実運用の exit decision を貯めて shared exit 設計の根拠を作るほうが、将来の本番運用には頑健だと判断した
+- 再試行するとしたら:
+  - `2026-05-21` 以降の clean holdout と live logs が数週間ぶん溜まったあとに、
+    - `fade_from_session_high_pct` が深いのに `modeled_return_pct <= 0` で終わる trade
+    - `distance_to_stop_atr` が小さいまま回復しない trade
+    - `session_drawdown_pct` が深いのに entry quality が高く見える trade
+    - を setup 別に分解して、shared exit / partial de-risk へ進む
+
+### 2026-05-21: Backtest Fade Diagnostics Expansion
+
+- 分析:
+  - 今回のテーマは、新しい売買ルールを足すことではなく、`2026-05-21` 時点でまだ空の live `daytrade_decisions.csv` / `intraday_snapshots.csv` を待つ間に、次の shared exit / de-risk 判断へ直結する診断を強くすることだった
+  - `analyze_backtest_trade_log.py` に `primary close_exit` 側の fade を追加で出すようにすると、strict 6m `train=2021-05-19` から `2025-11-20` の miss week では
+    - `primary close_or_open 31 trades / 10 wins / -7.13M`
+    - うち `primary close-loss` は broad に見ると
+      - `market_ratio 1.00-1.05`
+      - `gap >= 2%`
+      - `open_vs_sma_atr 0-2`
+      - 月水木
+      - に偏りやすい
+    - ことが見えた
+  - 一方で、その broad cluster 自体は `13 trades / 6 wins / -5.10M` で、火曜には `2 trades / +3.03M` の勝ちも残っていたため、現時点でさらに OHLC 条件を足すと勝ち筋まで削る可能性が高いと判断した
+- 変更:
+  - `backtest.py` の `trade_log` に
+    - `day_open/high/low/close_price`
+    - `high_return_pct`
+    - `low_return_pct`
+    - `close_return_pct`
+    - `fade_from_high_pct`
+    - を追加し、run-up と close fade を再集計できるようにした
+  - `analyze_backtest_trade_log.py` に
+    - `primary stop cluster`
+    - `primary close-loss cluster`
+    - `Worst Primary Close Fades`
+    - の集計を追加した
+  - `tests/test_backtest.py` と `tests/test_analyze_backtest_trade_log.py` を増強し、README の分析コマンドとテスト欄も更新した
+- 結果:
+  - baseline 指標は変更なし
+  - 新しい `analyze_backtest_trade_log.py --holdout-months 6 --top-n 8` で、`primary close_exit` の大きな give-back 例として
+    - `2024-04-17 4813.T high_return_pct +5.98% / close_return_pct -0.46% / fade_from_high_pct -6.44%`
+    - `2024-12-26 3350.T high_return_pct +2.95% / close_return_pct -1.20% / fade_from_high_pct -4.15%`
+    - `2024-12-23 7003.T high_return_pct +1.38% / close_return_pct -2.58% / fade_from_high_pct -3.96%`
+    - などを、再現可能に確認できるようになった
+- 判断:
+  - 採用
+  - ただし採用したのは診断基盤であり、売買ロジックの baseline 自体は据え置き
+  - contaminated holdout を見ながら OHLC 条件をさらに細かく足すより、次の clean holdout と live snapshot が溜まったときに、shared exit / partial de-risk を判断できる準備を優先した
+- 再試行するとしたら:
+  - `2026-05-21` 以降の clean holdout と live snapshot が溜まったあとに、
+    - close まで持つと赤で終わりやすい trade
+    - run-up 後に利益を大きく返しやすい trade
+    - stop 直前まで圧迫されたあと戻らない trade
+    - を、今回追加した backtest fade 指標と live intraday path を突き合わせて shared に切る
+
+### 2026-05-21: `catchup_rs` Shared Risk Budget Trim
+
+- 分析:
+  - 今回のテーマは、`9%` global risk budget 採用後に残った損失集中を、週達成率を崩さずにさらに浅くできるかどうかだった
+  - `2026-05-21` 時点でも live の `daytrade_decisions.csv` / `intraday_snapshots.csv` は空のままで、intraday exit 順序に依存する改修はまだ見送る必要があった
+  - strict 6m `train=2021-05-19` から `2025-11-20` の miss week は引き続き
+    - `miss weeks 70`
+    - `negative miss 27`
+    - `miss no-trade 42`
+    - だった
+  - `primary` ほどではないが、残る downside の中では `catchup_rs` が
+    - miss week `11 trades / 3 wins / -1.88M`
+    - うち stop `4 trades / 0 wins / -0.52M`
+    - を占めていた
+  - 全 train `catchup_rs` を broad regime で見ると、loss は low breadth / market below trend 側に多く、かつ reactive な chase setup らしく stop / close loss が散っていた一方、同じ broad regime に勝ちも残っていたため、no-trade ではなく setup 別 sizing で対処するほうが shared strategy として自然だと判断した
+- 追試:
+  - `catchup_rs` だけを default `9%` より一段軽くする structural sizing probe として、
+    - `8.0%`
+    - `7.5%`
+    - を比較した
+  - 併せて、`catchup_rs` の stop 幅を `0.8 -> 0.7 / 0.6` に tighten する案も what-if したが、
+    - return は伸びても
+    - `WORST DAY -23.88M -> -29.42M` 方向へ悪化し、
+    - 実運用の downside 改善という目的には合わず不採用
+  - sizing 側では `8.0%` が最もバランスが良く、
+    - full `WEEKS >= +1% 187/221 -> 187/221`
+    - strict 6m train `WEEKS >= +1% 165/194 -> 165/194`
+    - rolling 6m holdout `HOLDOUT WEEKS >= +1% 472/539 -> 472/539`
+    - contaminated 6m holdout `WEEKS >= +1% 21/26 -> 21/26`
+    - を維持したまま downside を少し浅くできた
+  - `7.5%` は worst day はさらに軽くなったが、return の削れ方が大きく不採用
+- 変更:
+  - `core/logic.py` に `resolve_daytrade_risk_per_trade_pct` を追加
+  - default risk budget は `9%` のまま維持し、`catchup_rs` だけ `8%` を返すようにした
+  - `cap_daytrade_position_size` に `risk_budget_pct` 引数を追加し、backtest / live の両方から同じ shared helper を通す形にした
+  - `tests/test_logic.py` に、setup 別 risk budget helper と `risk_budget_pct` 引数のテストを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY Y2,328,100,032 -> Y2,223,750,735`
+    - `TOTAL RETURN +232710.00% -> +222275.07%`
+    - `PROFIT FACTOR 8.47 -> 8.44`
+    - `WEEKS >= +1% 187/221 -> 187/221`
+    - `POSITIVE WEEKS 190/221 -> 190/221`
+    - `WORST DAY -25,003,055円 -> -23,878,448円`
+  - strict 6m train:
+    - `TOTAL RETURN +52073.10% -> +49737.28%`
+    - `PROFIT FACTOR 3.99 -> 3.97`
+    - `WEEKS >= +1% 165/194 -> 165/194`
+    - `POSITIVE WEEKS 166/194 -> 166/194`
+    - `WORST DAY -23,511,132円 -> -22,457,646円`
+    - `miss week pnl sum -37.97M -> -36.76M`
+    - `catchup_rs miss pnl -1.88M -> -1.80M`
+    - `catchup_rs stop miss pnl -0.52M -> -0.49M`
+  - contaminated 1m holdout `2026-04-21` から `2026-05-20`:
+    - `TOTAL RETURN +1.26% -> +1.26%`
+    - `PROFIT FACTOR 3.11 -> 3.11`
+    - `WEEKS >= +1% 1/4 -> 1/4`
+    - `POSITIVE WEEKS 2/4 -> 2/4`
+    - `WORST DAY -3,969,514円 -> -3,784,270円`
+  - contaminated 6m holdout `2025-11-21` から `2026-05-20`:
+    - `TOTAL RETURN +346.23% -> +346.20%`
+    - `PROFIT FACTOR 14.17 -> 14.17`
+    - `WEEKS >= +1% 21/26 -> 21/26`
+    - `POSITIVE WEEKS 23/26 -> 23/26`
+    - `WORST DAY -25,003,055円 -> -23,878,448円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1% 472/539 -> 472/539`
+    - `HOLDOUT POSITIVE WEEKS 474/539 -> 474/539`
+    - `AVG HOLDOUT RETURN +197.89% -> +196.59%`
+    - `AVG HOLDOUT PF 5.76 -> 5.75`
+- 判断:
+  - 採用
+  - return は少し落ちるが、週達成率を崩さずに、`catchup_rs` の reactive loss を shared sizing だけで浅くできた
+  - intraday 順序がまだ無い現状では、exit をいじるより setup 別 risk budget のほうが説明可能性と再現性が高いと判断した
+- 再試行するとしたら:
+  - `catchup_rs` の risk budget を `8.5%` や `7.8%` のように細かく詰めない
+  - 次に触るなら、clean holdout と live snapshot が溜まったあとに
+    - `primary` close_exit の fade
+    - stop 接近後に戻らない reactive trade
+    - intraday で run-up を失う trade
+    - を exit / partial de-risk で shared に切れるときに限る
+
+### 2026-05-21: Shared One-Trade Risk Budget Trim
+
+- 分析:
+  - 今回のテーマは、未達週数を崩さずに損失集中を浅くすることだった
+  - `2026-05-21 08:33 JST` 時点ではまだ当日 EOD を取りに行く局面ではなく、最新キャッシュ日は `2026-05-20` のままだったため、strict 6m split は
+    - `train=2021-05-19` から `2025-11-20`
+    - `holdout=2025-11-21` から `2026-05-20`
+    - に固定した
+  - live の `daytrade_decisions.csv` / `intraday_snapshots.csv` は依然空で、intraday 順序情報を使った exit 改修はまだ行えなかった
+  - strict 6m train の未達週は引き続き
+    - `miss weeks 70`
+    - `negative miss 27`
+    - `positive miss 1`
+    - `miss no-trade 42`
+    - で、trade が出た miss week の損失寄与は
+    - `primary 50 trades / 11 wins / -27.58M`
+    - `primary stop 18 trades / 0 wins / -22.95M`
+    - が中心だった
+  - worst trade を見ると、`notional_pct_equity` が `1.6-1.95x` に張りつき、entry 時 stop 幅が `4-6%` ある continuation / stop trade が多く、個別 regime ではなく shared sizing 前提のほうが攻めすぎていると判断した
+- 追試:
+  - coarse な structural sizing change として
+    - `DAYTRADE_RISK_PER_TRADE_PCT 10%`
+    - を `9.5% / 9.0% / 8.5% / 8.0% / 6.0% / 5.0%`
+    - に落とす what-if を比較した
+  - さらに、wide-stop trade だけに equity cap を重ねる probe も確認した
+  - 結果は `9.0%` が最もバランスが良く、
+    - full `WEEKS >= +1% 187/221 -> 187/221`
+    - strict 6m train `WEEKS >= +1% 165/194 -> 165/194`
+    - rolling 6m holdout `HOLDOUT WEEKS >= +1% 472/539 -> 472/539`
+    - contaminated 6m holdout `WEEKS >= +1% 21/26 -> 21/26`
+    - を維持したまま、downside を一段浅くできた
+  - `8.5%` 以下は週達成率は維持できても return の削れ方が大きく、wide-stop cap 追加案は `9.0%` 単体より改善効率が弱かった
+- 変更:
+  - `core/logic.py` の `DAYTRADE_RISK_PER_TRADE_PCT` を `0.100 -> 0.090` へ変更
+  - `tests/test_logic.py` に、`cap_daytrade_position_size` の risk-budget cap が先に効くケースを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY Y2,886,708,217 -> Y2,328,100,032`
+    - `TOTAL RETURN +288570.82% -> +232710.00%`
+    - `PROFIT FACTOR 8.88 -> 8.47`
+    - `WEEKS >= +1% 187/221 -> 187/221`
+    - `POSITIVE WEEKS 190/221 -> 190/221`
+    - `WORST DAY -30,385,608円 -> -25,003,055円`
+  - strict 6m train:
+    - `TOTAL RETURN +60810.70% -> +52073.10%`
+    - `PROFIT FACTOR 4.06 -> 3.99`
+    - `WEEKS >= +1% 165/194 -> 165/194`
+    - `POSITIVE WEEKS 166/194 -> 166/194`
+    - `WORST DAY -30,306,953円 -> -23,511,132円`
+    - `miss week pnl sum -41.60M -> -37.97M`
+    - `primary miss pnl -30.08M -> -27.58M`
+    - `primary stop miss pnl -24.82M -> -22.95M`
+  - contaminated 1m holdout `2026-04-21` から `2026-05-20`:
+    - `TOTAL RETURN +1.26% -> +1.26%`
+    - `PROFIT FACTOR 3.11 -> 3.11`
+    - `WEEKS >= +1% 1/4 -> 1/4`
+    - `POSITIVE WEEKS 2/4 -> 2/4`
+    - `WORST DAY -4,922,198円 -> -3,969,514円`
+  - contaminated 6m holdout `2025-11-21` から `2026-05-20`:
+    - `TOTAL RETURN +373.92% -> +346.23%`
+    - `PROFIT FACTOR 14.63 -> 14.17`
+    - `WEEKS >= +1% 21/26 -> 21/26`
+    - `POSITIVE WEEKS 23/26 -> 23/26`
+    - `WORST DAY -30,385,608円 -> -25,003,055円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1% 472/539 -> 472/539`
+    - `HOLDOUT POSITIVE WEEKS 474/539 -> 474/539`
+    - `AVG HOLDOUT RETURN +211.04% -> +197.89%`
+    - `AVG HOLDOUT PF 5.85 -> 5.76`
+- 判断:
+  - 採用
+  - clean holdout がまだ積み上がっていない局面では、曜日枝や細かい gap 帯を増やすより、「shared risk premise を一段保守化する」ほうが将来局面への説明可能性が高い
+  - return は明確に落ちるが、週達成率を維持したまま worst day と miss-week 深掘れを縮められたため、実運用優先の baseline としては妥当と判断した
+- 再試行するとしたら:
+  - `9%` 近傍を `8.8%` や `9.2%` のように細かく再調整しない
+  - 次に触るなら、`2026-05-21` 以降の clean holdout と live snapshot が溜まったあとに
+    - intraday で stop 接近後に戻らない trade
+    - run-up 後に fade しやすい trade
+    - close_exit まで引っ張ると悪化する trade
+    - を shared exit / de-risk で切る方向を優先する
+
+### 2026-05-20: Residual Deep-Loss Reanalysis and Backtest Exit Instrumentation
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-20` を replay し直すと、full ISO week ベースで
+    - `train weeks 235`
+    - `miss weeks 70`
+    - `negative miss 69`
+    - `positive miss 1`
+    - `miss no-trade 42`
+    - だった
+  - miss week の損失寄与は引き続き `primary` が最大で、
+    - `50 trades / 11 wins / -30.08M`
+    - だった
+  - そのうち `primary` の stop 系だけで
+    - `18 trades / 0 wins / -24.82M`
+    - を占め、曜日では月曜 `-10.87M`、金曜 `-7.11M`、水曜 `-3.63M` が重かった
+  - ただし既採用の `tepid hot-gap`、`Monday tepid strong-prev`、`hot continuation` などの risk cluster は、実験ログ上すでに tighter 近傍の再試行禁止帯に入っており、同じ OHLC 閾値近傍をさらに詰めると curve-fit 側へ寄りやすかった
+  - live の `daytrade_decisions.csv` / `intraday_snapshots.csv` は現ワークツリーには残っておらず、順序情報で exit 仮説を検証できる材料も不足していた
+- 追試:
+  - 既存の cautionary sizing を shared probe に寄せる structural risk layer として、
+    - `primary` の top candidate がすでに `equity_notional_pct <= 1.00` に抑えられている日は、selected leverage を `0.25` に制限
+    - を what-if で検証した
+  - 結果は
+    - full `TOTAL RETURN +288570.82% -> +288018.79%`
+    - full `PROFIT FACTOR 8.88 -> 8.88`
+    - full `WEEKS >= +1% 187/221 -> 187/221`
+    - full `WORST DAY -30,385,608円 -> -30,329,024円`
+    - strict 6m train `WEEKS >= +1% 165/194 -> 165/194`
+    - rolling 6m holdout `HOLDOUT WEEKS >= +1% 472/539 -> 472/539`
+    - rolling `AVG HOLDOUT RETURN +211.04% -> +210.95%`
+    - で、downside は少し浅くなったが forward 側の改善根拠としては弱かった
+  - `tepid hot-gap` の capped continuation だけを selected leverage `0.25` へ probe 化する案は、
+    - full / train の return と PF は少し伸びた一方、
+    - `WORST DAY -30,385,608円 -> -30,505,849円`
+    - と悪化し不採用
+- 変更:
+  - shared strategy の採用ロジック変更は行わない
+  - `backtest.py` の `trade_log` に
+    - `exit_reason`
+    - `raw_exit_price`
+    - `stop_distance_pct`
+    - `target_distance_pct`
+    - `day_start_equity`
+    - `notional_pct_equity`
+    - `pnl_pct_equity`
+    - を追加し、deep-loss の原因を replay 後に監査できるようにした
+  - `analyze_backtest_trade_log.py` を追加し、`train` の miss week、worst day、`primary` stop cluster を 1 回の replay から再集計できるようにした
+- 結果:
+  - baseline の採用値は据え置き
+  - 追加の shared logic 採用なし
+- 採用:
+  - 不採用
+  - 現時点で再現性を持って効くのは「intraday 順序情報で stop / fade の形を切る」方向であり、OHLC 日足だけの追加閾値や probe 化を続けると、改善幅より当て込みリスクが先に大きくなると判断した
+- 再試行するとしたら:
+  - `2026-05-21` 以降の clean holdout を積み上げながら、live の `daytrade_decisions.csv` / `intraday_snapshots.csv` を継続保存する
+  - 次の shared change は、今回追加した `exit_reason` 監査列と live snapshot を合わせて、
+    - stop 接近後に戻らない trade
+    - run-up 後に fade しやすい trade
+    - close_exit まで引っ張ると悪化する trade
+    - を exit / partial de-risk で切れるときに限って行う
+  - 同じ `tepid hot-gap`、`Monday tepid strong-prev`、`hot continuation` の tighter 近傍は、新しい clean holdout か追加の train 実例なしには再試行しない
+
+### 2026-05-20: Warm-Market Low-Sponsorship `primary` No-Trade
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-20` の未達週を broad regime で再分解すると、`primary` の deep-loss は narrow な曜日枝より、「市場は warm だが breadth がまだ broad ではなく、前日も少しだけ上げた continuation を low score のまま追う」低 sponsorship 帯にまとまって残っていた
+  - miss week 側では、
+    - breadth `< 0.65`
+    - `market_ratio 1.05-1.10`
+    - 前日上昇 `2-4%`
+    - score `<= 6`
+    - gap `<= 1%`
+    - の `primary`
+    - `5 trades / 1 win / -2.44M`
+    - で、`2023-08-17 2222.T`、`2023-10-02 3431.T`、`2023-10-03 6632.T`、`2024-07-23 2780.T` など、指数は少し上でも breadth と個別の勢いが噛み合わない continuation を still-size で追っていた
+  - これは既採用の `market_ratio 1.05-1.10` / 前日上昇 `4-6%` / score `<= 6` no-trade より一段手前の sponsorship 劣化帯で、曜日限定の近傍再調整ではなく、shared な continuation quality guard として扱うほうが説明しやすいと判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に low-sponsorship continuation `primary` no-trade guard を追加
+  - breadth `< 0.65` / `market_ratio 1.05-1.10` / 前日上昇 `2-4%` / score `<= 6` / gap `<= 1%` の `primary` は、selected base leverage を `0.00` に制限
+  - `tests/test_logic.py` に発火 / 非発火の境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +259794.55%` -> `+288570.82%`
+    - `CLOSED TRADES: 446` -> `441`
+    - `WIN RATE: 60.09%` -> `60.54%`
+    - `PROFIT FACTOR: 8.79` -> `8.88`
+    - `WEEKS >= +1%: 187/221` -> `187/221`
+    - `POSITIVE WEEKS: 190/221` -> `190/221`
+    - `WORST DAY: -27,358,364円` -> `-30,385,608円`
+  - strict 6m train:
+    - `TOTAL RETURN: +54739.29%` -> `+60810.70%`
+    - `PROFIT FACTOR: 3.99` -> `4.06`
+    - `WEEKS >= +1%: 165/194` -> `165/194`
+    - `POSITIVE WEEKS: 166/194` -> `166/194`
+  - contaminated 1m holdout `2026-04-21` から `2026-05-20`:
+    - `TOTAL RETURN: +1.26%` -> `+1.26%`
+    - `PROFIT FACTOR: 3.11` -> `3.11`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 2/4` -> `2/4`
+    - `WORST DAY: -4,419,392円` -> `-4,922,198円`
+  - contaminated 6m holdout `2025-11-21` から `2026-05-20`:
+    - `TOTAL RETURN: +373.92%` -> `+373.92%`
+    - `PROFIT FACTOR: 14.63` -> `14.63`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 472/539` -> `472/539`
+    - `HOLDOUT POSITIVE WEEKS: 474/539` -> `474/539`
+    - `AVG HOLDOUT RETURN: +210.24%` -> `+211.04%`
+    - `AVG HOLDOUT PF: 5.82` -> `5.85`
+- 判断:
+  - 採用
+  - train と rolling で `WEEKS >= +1%` を落とさず return / PF を押し上げ、contaminated 6m holdout も悪化させなかったため
+  - absolute `WORST DAY` は増えたが、worst loss pct は full / train ともに `2022-12-06 -10.1908562%` から `2022-12-06 -10.1787085%` へむしろ小幅改善した
+  - contaminated 1m holdout は headline 不変で、悪化は absolute worst day に留まり、相対損失は依然 `-0.1702%` と浅い `veto` 範囲にとどまった
+- 再試行するとしたら:
+  - 同じ low-sponsorship continuation を `1.05-1.10` の近傍へ細かく広げたり、`0.05/0.10` probe に戻す再調整は行わない
+  - 次に触るなら、残る `primary` の deep-loss を intraday 順序情報で exit 側から切れるときか、新しい clean holdout が積み上がって broad regime の再現例が増えたときに限る
+
+### 2026-05-20: Tepid-Market Hot-Gap Modest-Trend `primary` Selector Skip
+
+- 分析:
+  - 最新キャッシュを `2026-05-20` まで更新し、strict 6m split を `train=2021-05-19` から `2025-11-20`、`holdout=2025-11-21` から `2026-05-20` に固定した
+  - 今回のテーマは、まず `WEEKS >= +1%` の未達週を埋めることだった
+  - baseline 後の strict 6m `train` を再分解すると、未達週は依然として no-trade より deep-loss week が中心で、setup 別では `primary` が最大の足を引っ張っていた
+  - actual selected trade で見ると、
+    - breadth `< 0.60`
+    - `market_ratio 1.00-1.05`
+    - gap `1.5-2.0%`
+    - `open_vs_sma_atr 1.0-2.0`
+    - の tepid hot-gap `primary`
+    - `4 trades / 0 wins / -4.55M`
+    - で、弱い breadth confirmation のわりに個別が先走っている continuation が繰り返し崩れていた
+  - これは既採用の `market_ratio 1.00-1.05` / gap `1.5-2.5%` / 前日上昇 `6-10%` cap とは別で、`prev_return` ではなく breadth 不一致を shared な違和感として捉えるべき帯と判断した
+  - 一方、次に残る hot-market / small-gap / high-breadth 側は、過去の不採用ログにある low-score hot continuation と近く、隣接帯に勝ち筋も残っていたため、このターンでは追加枝を増やさない
+- 変更:
+  - `is_daytrade_primary_tepid_hot_gap_modest_trend_filtered` を、寄り判定ではなく `select_daytrade_candidates` の shared selector filter として適用
+  - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `1.5-2.0%` / `open_vs_sma_atr 1.0-2.0` の `primary` を候補段階で除外
+  - `tests/test_logic.py` に selector での発火 / 非発火境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +232924.71%` -> `+259794.55%`
+    - `PROFIT FACTOR: 8.63` -> `8.79`
+    - `WEEKS >= +1%: 186/221` -> `187/221`
+    - `POSITIVE WEEKS: 189/221` -> `190/221`
+    - `WORST DAY: -24,529,164円` -> `-27,358,364円`
+  - strict 6m train:
+    - `TOTAL RETURN: +49069.46%` -> `+54739.29%`
+    - `PROFIT FACTOR: 3.88` -> `3.99`
+    - `WEEKS >= +1%: 164/194` -> `165/194`
+    - `POSITIVE WEEKS: 165/194` -> `166/194`
+  - contaminated 1m holdout `2026-04-21` から `2026-05-20`:
+    - `TOTAL RETURN: +1.26%` -> `+1.26%`
+    - `PROFIT FACTOR: 3.11` -> `3.11`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 2/4` -> `2/4`
+  - contaminated 6m holdout `2025-11-21` から `2026-05-20`:
+    - `TOTAL RETURN: +373.92%` -> `+373.92%`
+    - `PROFIT FACTOR: 14.63` -> `14.63`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout:
+    - `HOLDOUT WEEKS >= +1%: 466/539` -> `472/539`
+    - `HOLDOUT POSITIVE WEEKS: 468/539` -> `474/539`
+    - `AVG HOLDOUT RETURN: +208.19%` -> `+210.24%`
+    - `AVG HOLDOUT PF: 5.76` -> `5.82`
+- 判断:
+  - 採用
+  - `train` と rolling の両方で `WEEKS >= +1%` を 1 本以上押し上げ、current contaminated holdout も悪化させなかったため
+  - `WORST DAY` は悪化したが、今回は最優先の未達週改善を shared selector だけで前進させられた点を優先し、次のテーマを損失集中の圧縮へ移す
+- 再試行するとしたら:
+  - 残る hot-market / small-gap / high-breadth `primary` を、そのまま broad filter で再試行しない
+  - 次に触るなら、intraday 順序情報か、週次未達へ一貫して効く追加 signal が見えたときだけにする
+
+### 2026-05-20: Warm-Market Strong-Prev Low-Score `primary` No-Trade
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-18` の未達週を再分解すると、`56` 未達週のうち `31` 週は no-trade だった
+  - ただし no-trade 週の大半は初期データの薄い区間か low-breadth 側で、そこを無理に埋める shared entry を足す根拠は弱かった
+  - 一方、trade が出ている未達週では依然として `primary` が最大の足引っ張りで、既存 baseline 後の train でも
+    - `market_ratio 1.05-1.10`
+    - 前日上昇 `4-6%`
+    - score `<= 6`
+    - の low-conviction `primary`
+    - `5 trades / 0 wins / -2.63M`
+    - が残っていた
+  - 実例は `2023-11-07 9433.T`、`2023-11-10 5851.T`、`2023-12-05 4055.T`、`2024-07-24 8358.T` などで、「市場はやや hot だが個別 score は弱い continuation」を current equity cap `1.40` でもまだ触りすぎている shared sizing / selection 問題と判断した
+- 変更:
+  - `DAYTRADE_SELECTED_PRIMARY_WARM_STRONG_PREV_LOW_SCORE_*` を追加
+  - `market_ratio 1.05-1.10` / 前日上昇 `4-6%` / score `<= 6` の `primary` は、selected base leverage を `0.00` に制限
+  - `tests/test_logic.py` に発火 / 非発火の境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +181775.93%` -> `+205790.54%`
+    - `PROFIT FACTOR: 8.33` -> `8.47`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -19,125,392円` -> `-21,650,453円`
+  - strict 6m train:
+    - `TOTAL RETURN: +38533.68%` -> `+43635.44%`
+    - `PROFIT FACTOR: 3.76` -> `3.85`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.24` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +370.77%` -> `+370.76%`
+    - `PROFIT FACTOR: 14.26` -> `14.25`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +208.16%` -> `+209.39%`
+    - `AVG HOLDOUT PF: 5.74` -> `5.78`
+- 採用:
+  - 採用
+  - `train` の all-loss cluster を shared no-trade で消しつつ、full / train / rolling の return と PF を押し上げ、週次 hit を落とさなかったため
+  - absolute `WORST DAY` は大きくなったが、worst loss pct は full / train ともに `2022-06-15 -10.2218662%` のまま不変で、絶対額の悪化は主に資産曲線の成長によるものだった
+  - contaminated holdout は採用理由に使っていないが、悪化 veto も出なかった
+- 再試行するとしたら:
+  - この cluster を `probe` に戻す再調整は行わない
+  - 次に触るなら、同じ low-score continuation を近傍条件へ広げるのではなく、clean intraday log が溜まった後の shared exit / partial de-risk を優先する
+
+### 2026-05-20: Tuesday Extended `fallback` No-Trade
+
+- 分析:
+  - current baseline 後の strict 6m `train=2021-05-19` から `2025-11-18` を再分解すると、trade が出ている未達週では `primary` の次に崩れていた shared cluster が `fallback` 火曜 continuation だった
+  - 特に
+    - 火曜
+    - `open_vs_sma_atr 2.0-3.0`
+    - `fallback`
+    - `6 trades / 0 wins / -2.46M`
+    - で、`2022-05-31 1518.T`、`2023-10-24 7180.T`、`2023-12-12 9268.T`、`2024-10-29 9069.T`、`2024-11-26 4912.T`、`2024-12-10 7383.T`
+    - のように、火曜まで continuation 候補として残っているが、すでに trend 距離が伸びて失速しやすい `fallback` を still-size で触っていた
+  - breadth や score をさらに細分化しなくても、「火曜の延長 `fallback` は shared に自信が低い」という説明で十分に一般化しうると判断した
+- 変更:
+  - `DAYTRADE_SELECTED_FALLBACK_TUESDAY_EXTENDED_*` を追加
+  - 火曜の `open_vs_sma_atr 2.0-3.0` `fallback` は、selected base leverage を `0.00` に制限
+  - `tests/test_logic.py` に発火 / 上限境界 / 曜日非発火のテストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +205790.54%` -> `+226631.74%`
+    - `PROFIT FACTOR: 8.47` -> `8.58`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -21,650,453円` -> `-23,864,302円`
+  - strict 6m train:
+    - `TOTAL RETURN: +43635.44%` -> `+48097.98%`
+    - `PROFIT FACTOR: 3.85` -> `3.93`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.26%`
+    - `PROFIT FACTOR: 3.24` -> `3.11`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +370.76%` -> `+370.42%`
+    - `PROFIT FACTOR: 14.25` -> `14.24`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +209.39%` -> `+210.54%`
+    - `AVG HOLDOUT PF: 5.78` -> `5.81`
+- 採用:
+  - 採用
+  - contaminated holdout はわずかに低下したが veto 悪化はなく、train / full / rolling が揃って改善したため shared guard として入れる
+- 再試行するとしたら:
+  - `fallback` 火曜をさらに breadth や score で細分化する方向は、今の shared no-trade より説明可能性が下がるので、そのままでは再試行しない
+  - 次に掘るなら、残る deep-loss day の intraday exit / partial de-risk に移る
+
+### 2026-05-20: Thursday Low-Breadth Continuation `fallback` No-Trade
+
+- 分析:
+  - 火曜延長 `fallback` を切ったあとも、strict 6m `train=2021-05-19` から `2025-11-18` では `fallback` の残り損失がまだ miss week 側に残っていた
+  - その中で最も shared にまとまっていたのが
+    - 木曜
+    - breadth `< 0.55`
+    - `open_vs_sma_atr 1.0-2.0`
+    - `fallback`
+    - `6 trades / 1 win / -0.37M`
+    - で、`2023-03-23 6506.T`、`2023-11-09 4887.T`、`2024-10-03 9684.T`、`2024-10-10 7383.T`、`2025-05-08 4592.T`
+    - など、low-breadth で continuation としては中途半端に伸びた `fallback` が週後半で失速していた
+  - breadth 条件を外した「木曜 `fallback` 1.0-2.0 ATR」でも同じ結果だったが、現行実績はすべて low-breadth 側だったため、shared な説明可能性を保つために breadth `< 0.55` を明示した
+- 変更:
+  - `DAYTRADE_SELECTED_FALLBACK_THURSDAY_LOW_BREADTH_CONTINUATION_*` を追加
+  - 木曜の breadth `< 0.55` / `open_vs_sma_atr 1.0-2.0` `fallback` は、selected base leverage を `0.00` に制限
+  - `tests/test_logic.py` に発火 / trend 上限 / breadth 上限の境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +226631.74%` -> `+232924.71%`
+    - `PROFIT FACTOR: 8.58` -> `8.63`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -23,864,302円` -> `-24,529,164円`
+  - strict 6m train:
+    - `TOTAL RETURN: +48097.98%` -> `+49436.72%`
+    - `PROFIT FACTOR: 3.93` -> `3.97`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.26%` -> `+1.26%`
+    - `PROFIT FACTOR: 3.11` -> `3.11`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +370.42%` -> `+370.41%`
+    - `PROFIT FACTOR: 14.24` -> `14.24`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +210.54%` -> `+210.96%`
+    - `AVG HOLDOUT PF: 5.81` -> `5.84`
+- 採用:
+  - 採用
+  - 週次 hit を落とさずに full / train / rolling の return と PF を押し上げ、worst loss pct も full / train ともに `2022-12-06 -10.1908562%` のまま不変だったため
+  - absolute `WORST DAY` は増えたが、これは資産曲線の上振れによる絶対額の拡大で、損失率の悪化ではなかった
+  - contaminated holdout も実質横ばいで veto 悪化なし
+- 再試行するとしたら:
+  - 同じ木曜 `fallback` を score や market_ratio でさらに刻む方向は取らない
+  - 次に掘るなら、日足側ではなく intraday exit / partial de-risk へ進む
+
+### 2026-05-20: Residual Post-`fallback` Guard Sweep (Not Adopted)
+
+- 分析:
+  - 木曜 low-breadth `fallback` を採用する前後で、残る候補をまとめて洗い直した
+  - 候補は
+    - 木曜 `market_ratio 1.00-1.05` / `open_vs_sma_atr 1.0-2.0` `primary`
+    - 火曜 `open_vs_sma_atr 1.0-2.0` `fallback`
+    - 月曜 `open_vs_sma_atr >= 6.0` `strong_oversold` の stricter probe
+    - の 3 系統にほぼ収束した
+- 追試:
+  - 木曜 tepid-market continuation `primary` の no-trade
+    - full / train / rolling の return と PF は伸びたが、`WEEKS >= +1%` が `186/221 -> 185/221`、strict 6m train も `164/194 -> 163/194` に低下
+    - しかも worst loss pct が `-10.1908562% -> -10.2884034%` に悪化
+  - 火曜 `fallback` `open_vs_sma_atr 1.0-2.0` の `probe 0.05` と `no-trade 0.00`
+    - full / train / rolling は改善したが、どちらも worst loss pct が `-10.1908562% -> -10.2884034%` に悪化
+    - したがって、shared guard としては損失集中の目的に反した
+  - 月曜 extreme `strong_oversold` の selected leverage `0.10 / 0.05 / 0.00`
+    - return / PF 自体は伸びる近傍があったが、`WEEKS >= +1%` が `185/221` まで落ち、contaminated holdout も `20/26` へ低下
+- 結果:
+  - 追加採用なし
+- 採用:
+  - 不採用
+  - ここより先は「return は伸びるが週次 hit か worst loss pct を悪化させる」案しか残らず、shared rule としての筋が弱かった
+- 再試行するとしたら:
+  - 同じ日足近傍に新しい leverage guard を積み増すのではなく、clean intraday log を待って順序情報ベースの de-risk に移る
+
+### 2026-05-20: Extra `primary` Probe Pairing After Tuesday `fallback` No-Trade (Not Adopted)
+
+- 分析:
+  - `fallback` 火曜 no-trade が効いたあと、残る train の deep-loss day は主に `primary` 側へ戻った
+  - ただし、その近傍で追加の `primary` probe を重ねると、shared な安全装置というより narrow な当て込みになりやすいので、相性確認だけに絞って追試した
+- 追試:
+  - `fallback` 火曜 no-trade + 月曜 high breadth / `open_vs_sma_atr 2.0-3.0` `primary` probe
+    - full `TOTAL RETURN +214050.05%`, `PF 8.09`
+    - contaminated 6m holdout `+294.90%`
+    - rolling `AVG HOLDOUT RETURN +188.79%`, `AVG HOLDOUT PF 5.60`
+  - `fallback` 火曜 no-trade + 火曜 breadth `0.55-0.65` / `open_vs_sma_atr 2.0-3.0` `primary` probe
+    - full `TOTAL RETURN +213149.66%`, `PF 8.63`
+    - contaminated 6m holdout `+370.43%`
+    - rolling `AVG HOLDOUT RETURN +210.94%`, `AVG HOLDOUT PF 5.82`
+    - ただし full return が単独採用案 `+226631.74%` を下回った
+- 結果:
+  - 追加採用なし
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - 同じ日足近傍に新しい `primary` probe を足すより、intraday log から共通の崩れ方を拾えるまで待つ
+
+### 2026-05-20: Monday Hot-Market High-Breadth `primary` Probe (Not Adopted)
+
+- 分析:
+  - warm low-score rule を見つけたあとも、train では
+    - 月曜
+    - breadth `0.65-0.75`
+    - `market_ratio >= 1.20`
+    - の hot-market `primary`
+    - `4 trades / 1 win / -19.85M`
+    - が残っていた
+  - `2025-10-20 3370.T -19.08M` が主因で、hot market continuation を probe 化すべきかを追加確認した
+- 追試:
+  - 上記 cluster を `selected leverage 0.05` に制限
+  - あわせて、採用候補だった warm low-score no-trade と組み合わせた case も確認
+- 結果:
+  - `probe 0.05` 単独:
+    - full `TOTAL RETURN +181775.93% -> +177960.40%`
+    - strict 6m train `+38533.68% -> +38762.26%`, `PF 3.76 -> 3.99`
+    - contaminated 6m holdout `+370.77% -> +358.18%`, `PF 14.26 -> 13.15`
+    - rolling `AVG HOLDOUT RETURN +208.16% -> +197.65%`, `AVG HOLDOUT PF 5.74 -> 5.87`
+  - warm low-score no-trade との組み合わせ:
+    - full `+205790.54% -> +201079.12%`
+    - strict 6m train `+43635.44% -> +43807.80%`, `PF 3.85 -> 4.10`
+    - contaminated 6m holdout `+370.76% -> +358.19%`, `PF 14.25 -> 13.15`
+    - rolling `AVG HOLDOUT RETURN +209.39% -> +198.94%`, `AVG HOLDOUT PF 5.78 -> 5.91`
+- 採用:
+  - 不採用
+  - train の見た目は良くなったが、rolling と contaminated holdout の return が弱く、warm low-score no-trade の上にさらに載せる shared rule としては根拠が足りなかった
+  - `2025-10-20` の単発影響が大きすぎて、まだ narrow reactivity の色が残っていると判断した
+
+### 2026-05-20: `primary` Intraday De-Risk Follow-Up (Not Adopted)
+
+- 分析:
+  - 最新 baseline 後の strict 6m `train=2021-05-19` から `2025-11-18` を再分解すると、残る deep-loss day の主因は `primary` の `close` 負けだった
+  - 特に `2025-10-20 3370.T -19.08M` は stop ではなく close exit で、既存 stop より「failed continuation を早めに見切る」shared de-risk が要るかを確認した
+  - そのうえで、日足 OHLC だけで説明可能な範囲として、
+    - 既存の `tepid-market hot-gap strong-prev` cluster に tighter stop を入れる案
+    - `mid-breadth modest continuation` を selected leverage で `probe / no-trade` に落とす案
+    - `low-score hot failed continuation` を selected leverage で `probe / no-trade` に落とす案
+    - を比較した
+- 追試 1:
+  - 既存の breadth cap を入れている `market_ratio 1.00-1.05` / gap `1.5-2.5%` / 前日上昇 `6-10%` `primary` に、intraday stop `0.50 ATR` を追加
+  - 結果:
+    - full `TOTAL RETURN +181775.93% -> +181635.00%`, `PF 8.33 -> 8.28`, `WEEKS >= +1% 186/221 -> 186/221`, `WORST DAY -19,125,392円 -> -19,111,246円`
+    - strict 6m train `TOTAL RETURN +38533.68% -> +38503.40%`, `PF 3.76 -> 3.72`, `WEEKS >= +1% 164/194 -> 164/194`, `WORST DAY -19,081,474円 -> -19,066,424円`
+  - 判断:
+    - リスク改善がごく小さい一方で return / PF が落ちたため不採用
+- 追試 2:
+  - breadth `0.55-0.65` / `market_ratio 1.00-1.15` / gap `0-1%` / 前日上昇 `2-4%` / `open_vs_sma_atr 1-2` / score `<= 11` の `primary` を `selected leverage 0.10` または `0.00` に制限
+  - train 実績は `4 trades / 0 wins / -4.14M` と一貫して悪かった
+  - 結果:
+    - `probe 0.10`: full `+181775.93% -> +190271.12%`, `PF 8.33 -> 8.43`, `WEEKS >= +1% 186/221 -> 186/221`, ただし `WORST DAY -19,125,392円 -> -20,023,663円`
+    - `no-trade 0.00`: full `+181775.93% -> +165611.77%`, `PF 8.33 -> 8.51`, `WEEKS >= +1% 186/221 -> 186/221`, `WORST DAY -19,125,392円 -> -17,427,872円`
+  - 判断:
+    - `probe` は worst day を悪化させ、`no-trade` は return を削りすぎたため不採用
+- 追試 3:
+  - breadth `>= 0.65` / `market_ratio >= 1.10` / 前日上昇 `>= 5%` / gap `<= 1%` / `open_vs_sma_atr <= 2` / score `<= 10` の `low-score hot failed continuation primary` を `selected leverage 0.10` または `0.00` に制限
+  - train 実績は `2 trades / 0 wins / -19.35M` だった
+  - 結果:
+    - `probe 0.10`: full `+181775.93% -> +190271.13%`, `PF 8.33 -> 8.71`, `WEEKS >= +1% 186/221 -> 186/221`, `train WORST DAY -19,081,474円 -> -14,310,152円`, ただし `full WORST DAY -19,125,392円 -> -20,023,663円`
+    - `no-trade 0.00`: full `+181775.93% -> +180467.93%`, `PF 8.33 -> 8.83`, `WEEKS >= +1% 186/221 -> 186/221`, `train WORST DAY -19,081,474円 -> -14,431,082円`, `full WORST DAY -19,125,392円 -> -18,991,005円`
+  - 判断:
+    - 数字だけ見ると魅力はあったが、`train` 再現例が `2` 本しかなく、巨大な単発負けに引っ張られた narrow branch を production へ入れるには根拠が弱すぎたため不採用
+- 採用:
+  - 不採用
+  - 今回の範囲では、shared exit / de-risk を足しても
+    - return / PF が落ちる
+    - worst day が悪化する
+    - あるいは sample が薄すぎる
+    - のどれかに当たり、baseline を素直に上回れなかった
+- 再試行するとしたら:
+  - `primary` の intraday de-risk は、今の OHLC 日足だけでさらに閾値を刻むより、`data/.../daytrade_decisions.csv` の live decision log を増やして「入った後に崩れた」順序情報を見てから再設計する
+  - あるいは、今回 `2` 本しかなかった low-score hot failed continuation に追加の `train` 実例がたまってから再検証する
+
+### 2026-05-20: Tuesday Mid-Breadth Continuation `fallback` Tight Cap
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-18` の未達週を setup 別に再分解すると、`fallback` は `14 trades / 0 wins / -5.41M` と、母数は小さくても一方的に足を引っ張っていた
+  - 細かい日付当てでは再現例が薄かったため、breadth / 前日上昇 / trend 距離で shared cluster を探し直すと、
+    - 火曜
+    - breadth `0.45-0.55`
+    - 前日上昇 `>= 2%`
+    - `open_vs_sma_atr 1.5-3.0`
+    - の continuation `fallback`
+    - `4 trades / 0 wins / -3.13M`
+    - が残っていた
+  - 実例は `2024-12-10 7383.T -1.40M`、`2024-12-24 7383.T -1.05M`、`2024-12-17 6507.T -0.39M` などで、breadth はまだ mid なのに個別だけ先に伸びた continuation を、既存の火水 generic cap `0.75` でもまだ大きく持ちすぎている shared sizing 問題と判断した
+- 変更:
+  - `DAYTRADE_FALLBACK_TUESDAY_MID_BREADTH_CONTINUATION_TIGHT_*` を追加
+  - 火曜の breadth `0.45-0.55` / 前日上昇 `>= 2%` / `open_vs_sma_atr 1.5-3.0` `fallback` は、equity notional 上限を `0.50` に制限
+  - `tests/test_logic.py` に発火 / 非発火の境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +171376.01%` -> `+174701.81%`
+    - `PROFIT FACTOR: 7.83` -> `7.88`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -18,091,532円` -> `-18,441,022円`
+  - strict 6m train:
+    - `TOTAL RETURN: +36249.02%` -> `+36953.40%`
+    - `PROFIT FACTOR: 3.56` -> `3.60`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.24` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +371.75%` -> `+371.76%`
+    - `PROFIT FACTOR: 13.36` -> `13.36`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +205.37%` -> `+205.99%`
+    - `AVG HOLDOUT PF: 5.39` -> `5.40`
+- 採用:
+  - 採用
+  - `train` の shared loss cluster を小さくしながら、full / train / rolling の return と PF を押し上げ、週次 hit は落とさなかったため
+  - absolute `WORST DAY` は増えたが、同じ `2025-10-20` の日次損失率は `-6.0947042%` から `-6.0947010%` へ実質横ばいで、資産曲線の成長による見かけの悪化が主だった
+- 再試行するとしたら:
+  - 同 cluster を `0.50` よりさらに tight にする再調整は、新しい clean holdout か追加の train 実例が増えるまで行わない
+  - 次に進めるなら、曜日例外を増やすより shared な intraday de-risk / partial exit を優先する
+
+### 2026-05-20: Extreme `strong_oversold` Probe Leverage
+
+- 分析:
+  - fallback の tighten 後も、strict 6m `train` の deep-loss day には `strong_oversold` の大型逆行が残っていた
+  - full-train では `strong_oversold` が `14 trades / 8 wins / -8.86M` と依然ネット負けで、特に
+    - `open_vs_sma_atr >= 6.5`
+    - または `market_ratio >= 1.20`
+    - の extreme cluster が `8 trades / -12.33M`
+    - を占めていた
+  - 実例は `2025-11-17 6875.T -6.95M`、`2025-06-16 4592.T -6.33M` などで、「oversold」でもすでに trend から極端に離れている日や、指数自体が 20% 以上 hot な日は、mean-reversion を full leverage で取りに行く局面ではなく probe へ落とすべき shared regime と判断した
+- 追試:
+  - 直前 baseline の上に、extreme `strong_oversold` の selected base leverage cap を `0.75 / 0.25 / 0.00` で比較した
+  - `0.75` は改善したが伸びは限定的だった
+  - `0.25` は full / train / rolling の return と PF を最も押し上げつつ、`WEEKS >= +1%` を維持した
+  - `0.00` は `WEEKS >= +1%` を full `186/221 -> 184/221`、strict 6m train `164/194 -> 163/194` まで落とし、過剰に blunt だった
+- 変更:
+  - `DAYTRADE_SELECTED_STRONG_OVERSOLD_EXTREME_*` を追加
+  - `open_vs_sma_atr >= 6.0` または `market_ratio >= 1.20` の `strong_oversold` は、selected base leverage を `0.25` に制限
+  - `6.0` は train 実例をほぼ取りこぼさず、`6.5` より説明しやすい round threshold として採用
+  - `tests/test_logic.py` に `open_vs_sma_atr` / `market_ratio` の境界テストを追加
+- 結果:
+  - full:
+    - `TOTAL RETURN: +174701.81%` -> `+181775.93%`
+    - `PROFIT FACTOR: 7.88` -> `8.33`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -18,441,022円` -> `-19,125,392円`
+  - strict 6m train:
+    - `TOTAL RETURN: +36953.40%` -> `+38533.68%`
+    - `PROFIT FACTOR: 3.60` -> `3.76`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.24` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +371.76%` -> `+370.77%`
+    - `PROFIT FACTOR: 13.36` -> `14.26`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +205.99%` -> `+208.16%`
+    - `AVG HOLDOUT PF: 5.40` -> `5.74`
+- 採用:
+  - 採用
+  - `0.75` より改善が強く、`0.00` のように weekly hit を壊さず、train 主導の shared de-risk として説明できたため
+  - absolute `WORST DAY` は増えたが、worst loss pct は `2025-10-20 -6.0947010%` から `2026-02-09 -1.7820282%` へ大きく浅くなり、過熱 oversold を full leverage で抱え込む構造リスクはむしろ低下した
+  - contaminated holdout は加点材料に使っていないが、悪化 veto も出なかった
+- 再試行するとしたら:
+  - `0.00` の no-trade 化は、新しい clean holdout か追加の train 実例が増えるまで再試行しない
+  - 次に詰めるなら、`strong_oversold` の例外条件を増やすより、shared な intraday exit / partial exit で残る deep-loss day を浅くする
+### 2026-05-20: Mid-Breadth Warm Low-Score `primary` Equity Cap
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-18` を、未達週の executed trade と full-train setup cluster で再分解すると、依然として主因は `primary` の deep-loss day だった
+  - その中でも、単発週の曜日当てではなく shared に崩れていた残差として、
+    - breadth `0.45-0.65`
+    - `market_ratio 1.05-1.10`
+    - score `<= 6`
+    - gap `<= 1%`
+    - の low-conviction `primary`
+    - `9 trades / 1 win / -5.77M`
+    - が残っていた
+  - 実例は
+    - `2024-07-24 8358.T -1.91M`
+    - `2024-07-23 2780.T -1.32M`
+    - `2023-10-03 6632.T -0.56M`
+    - `2023-12-05 4055.T -0.53M`
+    - などで、指数は少し上なのに breadth confirmation がまだ mid の局面で、score の弱い continuation を near-full-size で持ちすぎている shared sizing 問題と判断した
+- 追試:
+  - 同 cluster に対して equity cap `1.40 / 1.20 / 1.10 / 1.00 / 0.75` を比較した
+  - `1.40-1.00` は
+    - full `WEEKS >= +1%`
+    - strict 6m train `WEEKS >= +1%`
+    - rolling 6m holdout `HOLDOUT WEEKS >= +1%`
+    - を維持したまま return / PF を改善した
+  - ただし tighter な `1.20-0.75` は改善幅こそ大きい一方、同じ `2025-10-20` の absolute `WORST DAY` をさらに押し上げ、`9` 実例だけでそこまで強く締める根拠はまだ弱かった
+  - そのため、今回は no-trade や probe ではなく、`1.40` の minimal trim に留めた
+- 変更:
+  - `DAYTRADE_PRIMARY_MID_BREADTH_WARM_LOW_SCORE_*` を追加
+  - breadth `0.45-0.65` / `market_ratio 1.05-1.10` / score `<= 6` / gap `<= 1%` の `primary` は、equity notional 上限を `1.40` に制限
+  - 既存の tighter cap を優先するため、この cap も `resolve_daytrade_primary_equity_notional_pct` の末尾側で `min()` で適用
+  - `tests/test_logic.py` に発火 / 非発火 / stricter-cap 優先の境界テストを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,612,504,181` -> `Y1,714,760,122`
+    - `TOTAL RETURN: +161150.42%` -> `+171376.01%`
+    - `PROFIT FACTOR: 7.76` -> `7.83`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -17,011,291円` -> `-18,091,532円`
+  - strict 6m train:
+    - `FINAL EQUITY: Y341,832,923` -> `Y363,490,224`
+    - `TOTAL RETURN: +34083.29%` -> `+36249.02%`
+    - `PROFIT FACTOR: 3.51` -> `3.56`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+    - `WORST DAY: -17,011,291円` -> `-18,091,532円`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.23` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+    - `WORST DAY: -2,752,196円` -> `-2,910,977円`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +371.72%` -> `+371.75%`
+    - `PROFIT FACTOR: 13.36` -> `13.36`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -16,982,273円` -> `-18,064,442円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +204.50%` -> `+205.37%`
+    - `AVG HOLDOUT PF: 5.36` -> `5.39`
+- 採用:
+  - 採用
+  - `WEEKS >= +1%` を落とさずに full / train / rolling の return と PF を押し上げられたため
+  - `WORST DAY` の悪化は同じ `2025-10-20` の absolute amount だけで、loss pct は旧 `-6.0943964%`、新 `-6.0947042%` と実質ほぼ不変だった
+  - contaminated holdout は加点材料には使っていないが、悪化 veto も出なかった
+- 再試行するとしたら:
+  - 同 cluster を `1.20-0.75` へさらに tight にする再調整は、新しい clean holdout か追加の train 実例が増えるまで行わない
+  - 次に進めるなら、残る deep-loss day を曜日や銘柄属性でさらに細切れにするより、shared intraday de-risk / partial exit の設計を優先する
+
+### 2026-05-20: Monday Tepid Strong-Prev `primary` Equity Cap
+
+- 分析:
+  - 最新 baseline 後の strict 6m `train=2021-05-19` から `2025-11-18` を再点検しても、`WEEKS >= +1%` の未達は依然ほぼ deep-loss week で、機会不足より `primary` の大きめ損失が先に課題だった
+  - その中で、単発の週当てではなく shared に説明できる残差として、
+    - 月曜
+    - breadth `0.50-0.65`
+    - `market_ratio 1.00-1.05`
+    - 非マイナス gap
+    - 前日上昇 `>= 6%`
+    - `open_vs_sma_atr >= 1.0`
+    - の `primary`
+    - `3 trades / 1 win / -6.67M`
+    - が残っていた
+  - 実例は
+    - `2024-12-23 7003.T -2.42M`
+    - `2025-06-09 6521.T -4.39M`
+    - `2023-02-06 4586.T +0.14M`
+    - で、週明けに個別だけ先行し、指数 confirmation がまだ tepid な continuation を full-size で張りすぎている shared sizing 問題と判断した
+- 追試:
+  - 同じ cluster に対して equity cap `1.20 / 1.00 / 0.75 / 0.50` を比較した
+  - いずれも
+    - full `WEEKS >= +1%`
+    - strict 6m train `WEEKS >= +1%`
+    - contaminated 6m holdout `WEEKS >= +1%`
+    - は維持した
+  - ただし `0.75 / 0.50` の tighter cap は、backtest の総リターンはさらに伸びても、絶対額の `WORST DAY` を同じ `2025-10-20` でさらに悪化させ、`3` 実例だけでそこまで強く締める根拠は弱かった
+  - そのため、同 cluster を outright no-trade へ寄せるのではなく、まずは `1.00` の minimal trim に留めた
+- 変更:
+  - `DAYTRADE_PRIMARY_MONDAY_TEPID_STRONG_PREV_*` を追加
+  - 月曜の breadth `0.50-0.65` / `market_ratio 1.00-1.05` / 非マイナス gap / 前日上昇 `>= 6%` / trend `>= 1.0 ATR` `primary` は、equity notional 上限を `1.00` に制限
+  - `tests/test_logic.py` に発火 / 非発火の境界テストを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,581,479,940` -> `Y1,612,504,181`
+    - `TOTAL RETURN: +158047.99%` -> `+161150.42%`
+    - `PROFIT FACTOR: 7.61` -> `7.76`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -16,685,212円` -> `-17,011,291円`
+  - strict 6m train:
+    - `FINAL EQUITY: Y335,265,960` -> `Y341,832,923`
+    - `TOTAL RETURN: +33426.60%` -> `+34083.29%`
+    - `PROFIT FACTOR: 3.42` -> `3.51`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+    - `WORST DAY: -16,685,212円` -> `-17,011,291円`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.23` -> `3.23`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+    - `WORST DAY: -2,699,270円` -> `-2,752,196円`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +371.71%` -> `+371.72%`
+    - `PROFIT FACTOR: 13.36` -> `13.36`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -16,656,915円` -> `-16,982,273円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +202.38%` -> `+204.50%`
+    - `AVG HOLDOUT PF: 5.27` -> `5.36`
+- 採用:
+  - 採用
+  - 週次 hit を落とさずに train / full / rolling の return と PF を改善できたため
+  - `WORST DAY` の悪化は同じ `2025-10-20` の絶対額だけで、loss pct は旧 `-6.0943279%`、新 `-6.0943964%` と実質不変だった
+  - contaminated holdout は加点材料に使っていないが、悪化 veto も出なかった
+- 再試行するとしたら:
+  - 同じ cluster を `0.75 / 0.50` へさらに tight にする再調整は、新しい clean holdout か追加の train 実例が増えるまで行わない
+  - 次に進めるなら、残る `primary` loss cluster を OHLC 条件で細かく切るより、intraday exit / de-risk の shared 設計を優先する
+
+### 2026-05-20: Tepid-Market Hot-Gap `primary` Equity Cap
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-18` を再分解すると、`WEEKS >= +1%` の未達は `30/194` 週で、
+    - 負け週 `28`
+    - positive miss `1`
+    - no-trade miss `1`
+    - だった
+  - 依然として主因は `primary` の深い負けで、特に
+    - `market_ratio 1.00-1.05`
+    - gap `1.5-2.5%`
+    - 前日上昇 `6-10%`
+    - の「指数は tepid なのに個別だけ熱い continuation」で、full-size compounding が過大になりやすかった
+  - これは単一週当ての例外分岐ではなく、「市場確認が弱いのに個別だけ crowded continuation になる日」の shared sizing 問題と判断した
+- 追試:
+  - 同 cluster を breadth `0.50-0.60` に限定して `cap 1.00 / 0.75` や `probe 0.10` を当てる案は、absolute `WORST DAY` は改善しても `TOTAL RETURN` / `PF` を削ったため不採用
+  - 月曜 / 水曜の broad cap や、gap `>= 2%` の広い primary cap も `WEEKS >= +1%` を `184-185/221` へ落としたため不採用
+  - 一方で、曜日を限定せず `market_ratio 1.00-1.05` / gap `1.5-2.5%` / 前日上昇 `6-10%` だけを shared size trim する案は、
+    - full / train の `WEEKS >= +1%`
+    - rolling 6m holdout の `+1%` 週数
+    - を維持したまま、`PF` と rolling average return / PF を押し上げた
+- 変更:
+  - `DAYTRADE_PRIMARY_TEPID_MARKET_HOT_GAP_*` を追加
+  - `market_ratio 1.00-1.05` / gap `1.5-2.5%` / 前日上昇 `6-10%` の `primary` は、equity notional 上限を `1.40` に制限
+  - 既存のより厳しい cap を優先するため、この cap は `resolve_daytrade_primary_equity_notional_pct` の末尾側で適用
+  - `tests/test_logic.py` に境界テストを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,565,752,257` -> `Y1,581,479,940`
+    - `TOTAL RETURN: +156475.23%` -> `+158047.99%`
+    - `PROFIT FACTOR: 7.53` -> `7.61`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `WORST DAY: -16,519,664円` -> `-16,685,212円`
+  - strict 6m train:
+    - `FINAL EQUITY: Y331,921,537` -> `Y335,265,960`
+    - `TOTAL RETURN: +33092.15%` -> `+33426.60%`
+    - `PROFIT FACTOR: 3.37` -> `3.42`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+    - `WORST DAY: -16,519,664円` -> `-16,685,212円`
+  - contaminated 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.23` -> `3.23`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+    - `WORST DAY: -2,672,806円` -> `-2,699,270円`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +371.72%` -> `+371.71%`
+    - `PROFIT FACTOR: 13.36` -> `13.36`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -16,494,236円` -> `-16,656,915円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 464/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 466/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +201.30%` -> `+202.38%`
+    - `AVG HOLDOUT PF: 5.23` -> `5.27`
+- 採用:
+  - 採用
+  - contaminated holdout を加点材料には使っていないが、train と rolling で週次本数を落とさず `PF` を改善できた
+  - absolute `WORST DAY` はわずかに悪化したが、同日の worst-day loss pct と max drawdown は実質不変で、shared sizing の説明可能性も保てた
+- 再試行するとしたら:
+  - 同じ cluster を breadth や曜日でさらに細かく切る再調整は、今回の近傍では再試行しない
+  - 次に進めるなら、live decision log を蓄積して intraday exit / partial de-risk を shared に設計するか、新しい clean holdout が積み上がってから sizing を再点検する
+
+### 2026-05-20: Shared `primary` Default Notional Cap Trim
+
+- 分析:
+  - strict 6m `train=2021-05-19` から `2025-11-18` を、`+1%` 未達週、負け日、notional 比率で再点検した
+  - `+1%` 未達は `29/194` 週まで絞れていたが、そのうち `28` 週は負け週で、positive miss は `2022-W10` の `inverse_pullback 1459.T +5,687円` だけだった
+  - 未達週の損失源は依然として `primary` が最大で、
+    - `62 trades / 12 wins / -31.79M`
+    - だった
+  - さらに大損日の多くで、`primary` の notional が equity 比 `1.95-2.00x` 近くまで張り付いており、OHLC 条件を細かく足す前に shared な資金管理がまだ強すぎると判断した
+- 追試:
+  - regime 別 no-trade / probe:
+    - 月曜 `primary` の mild-hot / below-SMA
+    - 火曜 stretched `fallback`
+    - high-breadth tepid-hot gap chase `primary`
+    - を個別に no-trade / probe 化した
+  - いずれも `TOTAL RETURN` や `PF` は改善近傍があったが、
+    - `WEEKS >= +1%`
+    - `186/221`
+    - `164/194`
+    - は 1 本も増えず、absolute `WORST DAY` が悪化したため不採用
+  - shared notional の default cap:
+    - `primary 1.50 / 1.25 / 1.00`
+    - は `WEEKS >= +1%` を大きく落とした
+  - 一方で `primary 1.95`
+    - だけは週次本数を維持したまま absolute `WORST DAY` を縮めた
+- 変更:
+  - `DAYTRADE_PRIMARY_MAX_EQUITY_NOTIONAL_PCT` を `2.00 -> 1.95` に引き下げた
+  - `tests/test_logic.py` の default cap 期待値を新 baseline に更新した
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,684,031,607` -> `Y1,565,752,257`
+    - `CLOSED TRADES: 460` -> `462`
+    - `WIN RATE: 58.04%` -> `58.23%`
+    - `WEEKS >= +1%: 186/221` -> `186/221`
+    - `POSITIVE WEEKS: 189/221` -> `189/221`
+    - `TOTAL RETURN: +168303.16%` -> `+156475.23%`
+    - `PROFIT FACTOR: 7.64` -> `7.53`
+    - `AVG MONTH ACTIVE RATE: 44.55%` -> `44.73%`
+    - `MONTHS >= 3/4 ACTIVE: 1/51` -> `1/51`
+    - `WORST DAY: -17,654,208円` -> `-16,519,664円`
+  - strict 6m train:
+    - `TOTAL RETURN: +34888.89%` -> `+33092.15%`
+    - `PROFIT FACTOR: 3.38` -> `3.37`
+    - `WEEKS >= +1%: 164/194` -> `164/194`
+    - `POSITIVE WEEKS: 165/194` -> `165/194`
+    - `WORST DAY: -17,357,436円` -> `-16,519,664円`
+  - contaminated 6m holdout:
+    - `TOTAL RETURN: +381.30%` -> `+371.72%`
+    - `PROFIT FACTOR: 13.51` -> `13.36`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -17,654,208円` -> `-16,494,236円`
+- 採用:
+  - 採用
+  - 週次本数を守ったまま absolute `WORST DAY` を縮められた、もっとも shared で説明可能な改善だった
+- 再試行するとしたら:
+  - 同じ OHLC feature を細かく切る no-trade / probe は、今回確認した cluster 近傍では再試行しない
+  - 次に進めるなら、
+    - live decision log を使った intraday exit / partial de-risk
+    - または新しい clean holdout が積み上がった後の shared sizing 再点検
+    - に限定する
+
+### 2026-05-19: Live Daytrade Decision Logging
+
+- 分析:
+  - current baseline までで、OHLC 日足だけの shared rule 追加は
+    - `WEEKS >= +1%`
+    - strict train の未達週
+    - absolute `WORST DAY`
+    - の観点で改善余地がかなり薄くなった
+  - 一方で live 実行側には
+    - shared scan で何が上位に来たか
+    - board 価格や AI filter で何が落ちたか
+    - sizing の結果どの候補が 100 株未満になったか
+    - 実際にどの leverage / buying power / stop で約定したか
+    - が構造化ログとして残っていなかった
+  - この状態では、intraday 順序情報や live/backtest divergence を使った shared exit / de-risk の研究を進めにくかった
+- 変更:
+  - `auto_trade.py` に `daytrade_decisions.csv` 出力を追加
+  - `core/config.py` に decision log の保存先を追加
+  - `core/preflight.py` で decision log を保護対象に追加
+  - scan candidate / weekly guard / selected leverage zero / board gap filter / AI filter / size floor / filled order までを、同じ CSV へ追記するようにした
+  - 併せて、scan 失敗時に `snapshot` 未定義で後続評価が壊れる余地と、actionable candidate がない日に stale watchlist が残る余地を塞いだ
+- 結果:
+  - 戦略ロジック自体は不変
+  - backtest baseline の数値変化はなし
+  - 今後は contaminated holdout を見ながら日足条件を当て込むのではなく、live decision log を使って
+    - shared entry mismatch
+    - intraday stop / partial de-risk 候補
+    - size failure cluster
+    - を証拠ベースで点検できる状態になった
+- 採用:
+  - 採用
+  - ただし observability 強化であり、売買ロジック変更ではない
+- 再試行するとしたら:
+  - 同じ OHLC residual を再度細かく切る前に、まずこの decision log を数週間分ためる
+  - そのうえで
+    - live で repeatedly skipped される cluster
+    - live fill 後に悪化する intraday path
+    - backtest では勝つのに live で取れていない cluster
+    - を shared な execution / exit / probe 設計へ落とす
+
+### 2026-05-19: Residual Warm-Continuation / Hot-Gap `primary` Recheck
+
+- 分析:
+  - `High-Breadth Tepid-Market Early-Week strong_oversold No-Trade` 採用後の strict 6m `train=2021-05-19` から `2025-11-18` を再分解すると、
+    - `WEEKS >= +1%: 164/194`
+    - `POSITIVE WEEKS: 165/194`
+    - で、残る `+1%` 未達はほぼすべて deep-loss week のままだった
+  - setup 別では、miss week 内の負け源は依然として `primary` が中心で、
+    - `62 trades / 12 wins / -31.79M`
+    - だった
+  - そのため、残差の中でも train 実例が複数あり、かつ contaminated holdout で勝ち筋を壊しにくそうな `primary` shared family だけを追加で点検した
+  - 近い `+1%` 未達週も洗い直したが、唯一の positive miss は `2022-W10` の
+    - `inverse_pullback 1459.T +5,687円`
+    - だけで、shared rule で `+1%` へ押し上げられる余地は実質なかった
+- 追試:
+  - 月曜 `primary`
+    - breadth `0.55-0.60`
+    - `market_ratio 1.05-1.10`
+    - `open_vs_sma_atr < 0`
+    - の warm below-SMA continuation:
+    - `no-trade`: `FULL TOTAL RETURN +168303.16% -> +182883.41%`, `PF 7.64 -> 7.76`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `HOLDOUT 6m RETURN +381.30% -> +381.31%`, `WORST DAY -17,654,208円 -> -19,181,976円`
+    - `probe 0.10`: `FULL TOTAL RETURN +168303.16% -> +175270.74%`, `PF 7.64 -> 7.70`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `WORST DAY -17,654,208円 -> -18,382,727円`
+  - 火曜 `primary`
+    - `market_ratio 1.05-1.10`
+    - gap `0-0.5%`
+    - score `< 6.0`
+    - の warm flat-gap low-score continuation:
+    - `no-trade`: `FULL TOTAL RETURN +168303.16% -> +190417.28%`, `PF 7.64 -> 7.76`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `HOLDOUT 6m RETURN +381.30% -> +381.35%`, `WORST DAY -17,654,208円 -> -19,974,152円`
+    - `probe 0.10`: `FULL TOTAL RETURN +168303.16% -> +178787.81%`, `PF 7.64 -> 7.70`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `WORST DAY -17,654,208円 -> -18,750,523円`
+  - 月火水 `primary`
+    - breadth `< 0.60`
+    - `market_ratio 1.05-1.10`
+    - gap `0-0.5%`
+    - score `< 6.0`
+    - の early-week low-conviction continuation:
+    - `no-trade`: `FULL TOTAL RETURN +168303.16% -> +203536.94%`, `PF 7.64 -> 7.87`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `HOLDOUT 6m RETURN +381.30% -> +381.34%`, `WORST DAY -17,654,208円 -> -21,346,314円`
+    - `probe 0.10`: `FULL TOTAL RETURN +168303.16% -> +185394.39%`, `PF 7.64 -> 7.76`, `WEEKS >= +1% 186/221 -> 186/221`, `TRAIN WEEKS >= +1% 164/194 -> 164/194`, `WORST DAY -17,654,208円 -> -19,443,677円`
+  - 水曜 `primary`
+    - `market_ratio 1.00-1.05`
+    - gap `1.5-2.5%`
+    - 前日上昇 `6-10%`
+    - の tepid hot-gap continuation `no-trade`:
+    - `FULL TOTAL RETURN +168303.16% -> +177407.54%`
+    - `PF 7.64 -> 7.74`
+    - `WEEKS >= +1% 186/221 -> 186/221`
+    - `POSITIVE WEEKS 189/221 -> 190/221`
+    - `TRAIN WEEKS >= +1% 164/194 -> 164/194`
+    - `TRAIN POSITIVE WEEKS 165/194 -> 166/194`
+    - `HOLDOUT 6m RETURN +381.30% -> +381.34%`
+    - `HOLDOUT WEEKS >= +1% 21/26 -> 21/26`
+    - `WORST DAY -17,654,208円 -> -18,609,063円`
+    - `ROLLING HOLDOUT POSITIVE WEEKS 466/537 -> 472/537`
+  - 参考として、上の early-week low-score と水曜 tepid hot-gap を併用すると
+    - `FULL TOTAL RETURN +214268.60%`
+    - `PF 7.97`
+    - `POSITIVE WEEKS 190/221`
+    - `WEEKS >= +1% 186/221`
+    - `WORST DAY -22,470,921円`
+    - で、headline return は大きく伸びても最優先の週次本数は増えなかった
+- 結果:
+  - 追加採用なし
+  - 今回の候補はすべて
+    - return / PF
+    - rolling average return / PF
+    - positive weeks
+    - を改善する近傍があった一方、`WEEKS >= +1%` を `186/221` / `164/194` から 1 本も押し上げられなかった
+  - さらに absolute `WORST DAY` は一貫して悪化し、max daily loss pct と max drawdown は据え置きでも、週次本数の改善なしで受け入れる理由が弱かった
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - 同じ warm continuation cluster を、同じ `selected leverage no-trade / probe` 形のままで再試行しない
+  - 次に進めるなら、
+    - 直近の新しい train 実例で residual がさらに増えたとき
+    - あるいは intraday 順序情報を使って shared exit / partial de-risk を作れるとき
+    - に限定する
+  - 現在の OHLC 日足だけで続けるなら、headline return を追うより `WEEKS >= +1%` を実際に増やせる shared change が見えるまで baseline を維持する
+
+### 2026-05-19: High-Breadth Tepid-Market Early-Week `strong_oversold` No-Trade
+
+- 分析:
+  - current baseline の strict 6m `train=2021-05-19` から `2025-11-18` を、未達週と負け日の原因に絞って再分解した
+  - high-breadth / early-week の `strong_oversold` を broad に見ると、
+    - 月火水
+    - breadth `>= 0.65`
+    - `open_vs_sma_atr >= 4.0`
+    - の帯は `7 trades / 3 wins / -5.07M`
+    - で、`2025-W31` の `1579.T` 連敗を含んでいた
+  - ただし breadth だけで broad no-trade にすると、contaminated holdout `2026-W04` の
+    - `market_ratio 1.20-1.24`
+    - `open_vs_sma_atr 11-13`
+    - の `1579.T` hot rebound 3連打まで削って、週次成績を `+1.62% -> +0.67%` へ落とした
+  - そこで同じ cluster を `market_ratio` で分けると、
+    - 月火水
+    - breadth `>= 0.70`
+    - `market_ratio 1.00-1.10`
+    - `open_vs_sma_atr >= 4.0`
+    - の `strong_oversold`
+    - だけが `3 trades / 1 win / -4.94M`
+    - で、実質的に `2025-W31` の tepid continuation 連敗へ集中していた
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - 月火水
+    - breadth `>= 0.70`
+    - `market_ratio 1.00-1.10`
+    - `open_vs_sma_atr >= 4.0`
+    - の `strong_oversold`
+    - no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、
+    - 上記 guard の発火
+    - 木曜では発火しないこと
+    - `market_ratio 1.20+` の hot rebound では発火しないこと
+    - を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,636,793,458` -> `Y1,684,031,607`
+    - `CLOSED TRADES: 463` -> `460`
+    - `WIN RATE: 57.88%` -> `58.04%`
+    - `WEEKS >= +1%: 185/221` -> `186/221`
+    - `POSITIVE WEEKS: 188/221` -> `189/221`
+    - `TOTAL RETURN: +163579.35%` -> `+168303.16%`
+    - `PROFIT FACTOR: 7.43` -> `7.64`
+    - `AVG MONTH ACTIVE RATE: 44.82%` -> `44.55%`
+    - `MONTHS >= 3/4 ACTIVE: 1/51` -> `1/51`
+    - `WORST DAY: -17,159,098円` -> `-17,654,208円`
+  - strict 6m train:
+    - `TOTAL RETURN: +33906.64%` -> `+34888.89%`
+    - `PROFIT FACTOR: 3.25` -> `3.38`
+    - `WEEKS >= +1%: 163/194` -> `164/194`
+    - `POSITIVE WEEKS: 164/194` -> `165/194`
+    - `WORST DAY: -16,870,826円` -> `-17,357,436円`
+  - holdout 6m:
+    - `TOTAL RETURN: +381.32%` -> `+381.30%`
+    - `PROFIT FACTOR: 13.51` -> `13.51`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+    - `WORST DAY: -17,159,098円` -> `-17,654,208円`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.24` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+    - `WORST DAY: -2,778,660円` -> `-2,858,050円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 458/537` -> `464/537`
+    - `HOLDOUT POSITIVE WEEKS: 460/537` -> `466/537`
+    - `AVG HOLDOUT RETURN: +202.84%` -> `+205.61%`
+    - `AVG HOLDOUT PF: 5.13` -> `5.27`
+    - `WINDOWS WITH ALL WEEKS >= +1%: 2/21` -> `2/21`
+- 採用:
+  - 採用
+  - breadth だけの broad defense では hot rebound まで削ってしまったが、tepid-market に絞ると
+    - full / train の `WEEKS >= +1%`
+    - full / train / walkforward の return と PF
+    - を同時に改善でき、contaminated holdout の headline も維持できたため
+  - 名目の `WORST DAY` は悪化したが、worst day loss pct は `-10.352% -> -10.306%`、max drawdown は `-28.72% -> -28.61%` へ改善しており、絶対額悪化は compounding と判断した
+  - 同帯の probe `0.10` は `POSITIVE WEEKS` は増えても `WEEKS >= +1%` を改善できなかったため不採用
+- 再試行するとしたら:
+  - `market_ratio` 上限なしの broad high-breadth early-week `strong_oversold` defense は、そのまま再試行しない
+  - 次に進めるなら、`market_ratio 1.10-1.20` の warm 帯に train 実例が増えたときだけ、hot rebound を壊さない追加 signal があるか再点検する
+
+### 2026-05-19: Cache Refresh and Strict-Train Residual Recheck
+
+- 分析:
+  - `jp_jquants_fetcher_v2.py --refresh-overlap-days 7` を再実行し、キャッシュ最新日を `2026-05-15` から `2026-05-18` へ更新した
+  - この最新日を基準にすると、strict 6m split は
+    - `train=2021-05-19` から `2025-11-18`
+    - `holdout=2025-11-19` から `2026-05-18`
+    - へ切り替わる
+  - 現行 baseline の strict 6m `train` は
+    - `WEEKS >= +1%: 162/194`
+    - `POSITIVE WEEKS: 163/194`
+    - で、未達 `32` 週の内訳は
+    - `loss 31`
+    - `positive miss 1`
+    - だった
+  - したがって今回の作業テーマは、惜しい勝ち週を増やすことではなく、deep-loss week を shared rule で浅くできるかの再点検と判断した
+  - train の残差を setup / breadth / `market_ratio` / `prev_return` / `open_vs_sma_atr` で再分解すると、
+    - `primary` の `market_ratio 1.02-1.05` かつ `prev_return 4-5%` は `5 trades / 0 wins / -8.28M`
+    - 火曜 `fallback` の `open_vs_sma_atr 2.0-3.0` は `6 trades / 0 wins / -2.51M`
+    - 月曜 `fallback` の `market_ratio 1.02-1.05` は `3 trades / 0 wins / -1.79M`
+    - 月火 `strong_oversold` の `open_vs_sma_atr >= 6.0` は `7 trades / 2 wins / -10.23M`
+    - が候補になった
+- 追試:
+  - `primary` `market_ratio 1.02-1.05` / `prev_return 4-5%` を candidate skip:
+    - `FULL WEEKS >= +1%: 184/221 -> 184/221`
+    - `TRAIN WEEKS >= +1%: 162/194 -> 162/194`
+    - `FULL TOTAL RETURN: +143616.70% -> +148307.60%`
+    - `FULL PF: 7.03 -> 7.25`
+    - ただし `max drawdown: -28.72% -> -31.85%` に悪化
+  - 月曜 `fallback` `market_ratio 1.02-1.05` の selected no-trade:
+    - 週次本数は据え置き
+    - `FULL TOTAL RETURN: +143616.70% -> +144644.00%`
+    - `FULL PF: 7.03 -> 7.06`
+    - ただし rolling 6m holdout の平均 return / PF はわずかに悪化
+  - 火曜 `fallback` `open_vs_sma_atr 2.0-3.0` の candidate skip:
+    - 週次本数は据え置き
+    - `FULL TOTAL RETURN: +143616.70% -> +152505.28%`
+    - `TRAIN PF: 3.02 -> 3.06`
+    - ただし contaminated holdout と worst day が悪化
+  - 月火 `strong_oversold` `open_vs_sma_atr >= 6.0` の no-trade:
+    - `TRAIN WEEKS >= +1%: 162/194 -> 161/194`
+    - `FULL WEEKS >= +1%: 184/221 -> 183/221`
+    - のため即不採用
+- 結果:
+  - 追加採用なし
+  - baseline は現行ロジックを維持
+  - `2026-05-18` 最新データ基準の確認値:
+    - full:
+      - `FINAL EQUITY: Y1,437,166,975`
+      - `TOTAL RETURN: +143616.70%`
+      - `PROFIT FACTOR: 7.03`
+      - `WEEKS >= +1%: 184/221`
+      - `POSITIVE WEEKS: 187/221`
+      - `WORST DAY: -15,065,490円`
+    - strict 6m train:
+      - `TOTAL RETURN: +29758.99%`
+      - `PROFIT FACTOR: 3.02`
+      - `WEEKS >= +1%: 162/194`
+      - `POSITIVE WEEKS: 163/194`
+    - current 6m holdout:
+      - `TOTAL RETURN: +381.32%`
+      - `PROFIT FACTOR: 13.51`
+      - `WEEKS >= +1%: 21/26`
+      - `POSITIVE WEEKS: 23/26`
+    - current 1m holdout:
+      - `TOTAL RETURN: +1.34%`
+      - `PROFIT FACTOR: 3.24`
+      - `WEEKS >= +1%: 1/5`
+      - `POSITIVE WEEKS: 3/5`
+      - `WORST DAY: -2,434,635円`
+    - rolling 6m holdout windows:
+      - `AVG HOLDOUT RETURN: +197.90%`
+      - `AVG HOLDOUT PF: 5.04`
+      - `HOLDOUT WEEKS >= +1%: 458/537`
+      - `HOLDOUT POSITIVE WEEKS: 460/537`
+      - `WINDOWS WITH ALL WEEKS >= +1%: 2/21`
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - `primary` の `market_ratio 1.02-1.05` / `prev_return 4-5%` は、return と PF は伸びても max drawdown を悪化させるため、同じ shared skip 形では再試行しない
+  - 月曜 `fallback` `market_ratio 1.02-1.05` と火曜 `fallback open_vs_sma_atr 2.0-3.0` も、週次本数を増やせないうえ contaminated holdout / walkforward を改善できなかったため同じ形では再試行しない
+  - 次に進めるなら、train に再現例が増えるまで、残るテーマは `primary` の low-breadth / tepid-market residual か、intraday 順序情報を使った shared exit 設計に限定する
+
+### 2026-05-19: Monday/Tuesday Residual Sizing Follow-up
+
+- 分析:
+  - strict-train の残差をさらに coarse regime で見直すと、`primary` の deep loss は次の 3 塊が残っていた
+    - 火曜 `market_ratio 1.05-1.10` かつ `prev_return 4-5%`: `5 trades / 0 wins / -6.95M`
+    - 月曜 `prev_return 7-10%`: `8 trades / 3 wins / -13.41M`
+    - 月曜 `breadth < 0.45` かつ `market_ratio 1.00-1.05`: `5 trades / 2 wins / -8.25M`
+  - 方針は entry filter の追加ではなく、shared `selected leverage` で `no-trade` と `probe` を比較し、週次本数を落とさず deep-loss week を浅くできるかを確認することにした
+- 追試:
+  - 火曜 `primary` `market_ratio 1.05-1.10` / `prev_return 4-5%`
+    - `no-trade`: `FULL TOTAL RETURN +143616.70% -> +117696.59%`, `PF 7.03 -> 7.29`, `WEEKS >= +1% 184/221 -> 183/221`, `WORST DAY -15,065,490円 -> -12,349,458円`
+    - `probe 0.10`: `FULL TOTAL RETURN +143616.70% -> +124571.46%`, `PF 7.03 -> 7.26`, `WEEKS >= +1% 184/221 -> 183/221`, `WORST DAY -15,065,490円 -> -13,070,904円`
+  - 月曜 `primary` `prev_return 7-10%`
+    - `no-trade`: `FULL TOTAL RETURN +143616.70% -> +127890.49%`, `WEEKS >= +1% 184/221 -> 181/221`, `HOLDOUT 6m RETURN +381.32% -> +326.07%`, `WORST DAY -15,065,490円 -> -40,259,399円`
+    - `probe 0.10`: `FULL TOTAL RETURN +143616.70% -> +180735.32%`, `PF 7.03 -> 7.52`, `WEEKS >= +1% 184/221 -> 184/221`, `HOLDOUT 6m RETURN +381.32% -> +360.60%`, `WORST DAY -15,065,490円 -> -18,955,640円`
+  - 月曜 `primary` `breadth < 0.45` / `market_ratio 1.00-1.05`
+    - `no-trade`: `FULL TOTAL RETURN +143616.70% -> +151563.78%`, `PF 7.03 -> 7.48`, `WEEKS >= +1% 184/221 -> 184/221`, `HOLDOUT 6m RETURN +381.32% -> +381.31%`, `WORST DAY -15,065,490円 -> -15,900,104円`
+    - `probe 0.10`: `FULL TOTAL RETURN +143616.70% -> +147297.53%`, `PF 7.03 -> 7.41`, `WEEKS >= +1% 184/221 -> 184/221`, `HOLDOUT 6m RETURN +381.32% -> +381.33%`, `WORST DAY -15,065,490円 -> -15,454,505円`
+- 結果:
+  - 追加採用なし
+  - 火曜 warm continuation は `0 wins` だったが、shared `no-trade/probe` どちらでも週次本数を `1` 本落とした
+  - 月曜 `prev_return 7-10%` の `probe 0.10` は return / PF / walkforward を大きく押し上げたが、`WORST DAY` と contaminated holdout return を悪化させた
+  - 月曜 low-breadth / tepid-market residual は、週次本数を落とさず return / PF / walkforward を改善した一方、`WORST DAY` を baseline より悪化させた
+- 採用:
+  - 不採用
+- 再試行するとしたら:
+  - 月曜 low-breadth / tepid-market residual だけは、`breadth < 0.45` / `market_ratio 1.00-1.05` という粗い切り方のままではなく、`prev_return` や `open_vs_sma_atr` を足して day-loss pct まで比較し、`WORST DAY` 悪化を抑えられる narrower shared sizing へ絞る
+  - 月曜 `prev_return 7-10%` は、同じ broad cap 形のままでは contaminated holdout と worst-day 悪化が大きいため再試行しない
+  - 火曜 `market_ratio 1.05-1.10` / `prev_return 4-5%` も、同じ shared skip/probe 形では週次本数を落とすため再試行しない
+
+### 2026-05-19: Monday Low-Breadth Tepid Gap `primary` Probe
+
+- 分析:
+  - 上の coarse residual をそのまま使うと、`breadth < 0.45` の切り方がやや狭く、shared rule として不自然だった
+  - そこで月曜 `primary` のうち
+    - breadth `< 0.50`
+    - `market_ratio 1.00-1.05`
+    - gap `>= 1.0%`
+    - の continuation を見ると、strict 6m `train` で `5 trades / 1 win / -9.62M` だった
+  - 実例は
+    - `2024-11-25 6240.T -6.03M`
+    - `2024-12-09 5838.T -3.51M`
+    - `2022-12-05 3498.T -0.16M`
+    - `2022-10-24 2980.T -0.13M`
+    - `2022-11-07 7610.T +0.21M`
+    - で、弱 breadth なのに指数は「崩れてはいない」程度、そこへ個別だけギャップで飛ぶ Monday continuation は、週明けの利食いと寄り天に巻き戻されやすかった
+  - 同じ週 `2022-W49` は、Monday の損失を probe 化すると `-0.12M` から `+0.13M` へ転じ、`WEEKS >= +1%` を `1` 週埋められた
+- 変更:
+  - `resolve_daytrade_selected_leverage` に
+    - 月曜
+    - breadth `< 0.50`
+    - `market_ratio 1.00-1.05`
+    - gap `>= 1.0%`
+    - の `primary` は selected leverage cap `0.10`
+    - を追加
+  - `tests/test_logic.py` に、発火条件と breadth / gap 境界の回帰テストを追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,437,166,975` -> `Y1,636,793,458`
+    - `CLOSED TRADES: 467` -> `463`
+    - `WIN RATE: 57.60%` -> `57.88%`
+    - `WEEKS >= +1%: 184/221` -> `185/221`
+    - `POSITIVE WEEKS: 187/221` -> `188/221`
+    - `TOTAL RETURN: +143616.70%` -> `+163579.35%`
+    - `PROFIT FACTOR: 7.03` -> `7.43`
+    - `AVG MONTH ACTIVE RATE: 45.19%` -> `44.82%`
+    - `WORST DAY: -15,065,490円` -> `-17,159,098円`
+  - strict 6m train:
+    - `FINAL EQUITY: Y298,589,928` -> `Y340,066,374`
+    - `TOTAL RETURN: +29758.99%` -> `+33906.64%`
+    - `PROFIT FACTOR: 3.02` -> `3.25`
+    - `WEEKS >= +1%: 162/194` -> `163/194`
+    - `POSITIVE WEEKS: 163/194` -> `164/194`
+  - holdout 6m:
+    - `TOTAL RETURN: +381.32%` -> `+381.32%`
+    - `PROFIT FACTOR: 13.51` -> `13.51`
+    - `WEEKS >= +1%: 21/26` -> `21/26`
+    - `POSITIVE WEEKS: 23/26` -> `23/26`
+  - holdout 1m:
+    - `TOTAL RETURN: +1.34%` -> `+1.34%`
+    - `PROFIT FACTOR: 3.24` -> `3.24`
+    - `WEEKS >= +1%: 1/5` -> `1/5`
+    - `POSITIVE WEEKS: 3/5` -> `3/5`
+    - `WORST DAY: -2,434,635円` -> `-2,778,660円`
+  - rolling 6m holdout windows:
+    - `AVG HOLDOUT RETURN: +197.90%` -> `+202.84%`
+    - `AVG HOLDOUT PF: 5.04` -> `5.13`
+    - `HOLDOUT WEEKS >= +1%: 458/537` -> `458/537`
+    - `HOLDOUT POSITIVE WEEKS: 460/537` -> `460/537`
+    - `WINDOWS WITH ALL WEEKS >= +1%: 2/21` -> `2/21`
+  - リスク補足:
+    - max daily loss pct は `-10.35%` で不変
+    - max drawdown も `-28.72%` で不変
+    - absolute `WORST DAY` は equity growth の後段で悪化したが、max daily loss pct と max drawdown の悪化は確認されなかった
+- 採用:
+  - 採用
+- 判断:
+  - 汚染済み holdout は改善根拠に使わない前提でも、strict train で `+1` 週、rolling holdout で平均 return / PF を改善し、max drawdown と max daily loss pct を悪化させなかったため、shared probe として採用した
+  - no-trade ではなく `0.10` probe にしたことで、脆い continuation を縮小しつつ、完全停止より週次達成率が良かった
+
+### 2026-05-19: Monday Tepid Continuation `primary` Probe
+
+- 分析:
+  - `Warm-Market Failed-Continuation primary No-Trade` 採用後も、strict 6m `train=2021-05-19` から `2025-11-14` の miss week を再分解すると、週明けの continuation chase がまだ残っていた
+  - その中でも
+    - 月曜
+    - `market_ratio 1.00-1.05`
+    - gap `0-1%`
+    - 前日上昇 `2-4%`
+    - の `primary`
+    - が `7 trades / 0 wins / -5.50M`
+    - だった
+  - 実例は
+    - `2025-05-12 3823.T -3.40M`
+    - `2025-07-14 3350.T -1.23M`
+    - `2023-03-27 3989.T -0.44M`
+    - `2023-04-03 6590.T -0.27M`
+    - などで、指数は強くないのに週明けの flat gap を continuation とみなして追うと、週末のポジション調整や需給の巻き戻しに負けやすかった
+  - full no-trade も比較したが、return が baseline より落ちたため不採用
+  - `0.10` probe は strict train / rolling を改善しつつ、day-loss pct と max drawdown をほぼ据え置けたため、週明けは「完全否定ではなく小さく試す」が shared として自然だと判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - 月曜
+    - `market_ratio 1.00-1.05`
+    - gap `0-1%`
+    - 前日上昇 `2-4%`
+    - の `primary` probe selected leverage cap `0.10`
+    - を追加
+  - `tests/test_logic.py` に、上記 cap の発火 / 曜日境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,304,317,641` -> `Y1,439,601,610`
+    - `CLOSED TRADES: 467` -> `466`
+    - `WIN RATE: 57.82%` -> `57.73%`
+    - `WEEKS >= +1%: 184/220` -> `184/220`
+    - `POSITIVE WEEKS: 188/220` -> `188/220`
+    - `TOTAL RETURN: +130331.76%` -> `+143860.16%`
+    - `PROFIT FACTOR: 7.00` -> `7.11`
+    - `AVG MONTH ACTIVE RATE: 45.15%` -> `45.06%`
+    - `WORST DAY: -13,650,890円` -> `-15,065,490円`
+  - strict 6m train:
+    - `TOTAL RETURN: +27471.03%` -> `+30329.56%`
+    - `PROFIT FACTOR: 3.08` -> `3.15`
+    - `WEEKS >= +1%: 162/194` -> `162/194`
+    - `POSITIVE WEEKS: 163/194` -> `163/194`
+  - holdout 6m:
+    - `TOTAL RETURN: +373.08%` -> `+373.09%`
+    - `PROFIT FACTOR: 13.04` -> `13.04`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.55` -> `4.55`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+  - rolling 6m holdout windows:
+    - `AVG HOLDOUT RETURN: +200.26%` -> `+201.29%`
+    - `AVG HOLDOUT PF: 4.88` -> `4.93`
+    - `TOTAL HOLDOUT TRADES: 1133` -> `1127`
+- 採用:
+  - 採用
+  - 月曜の continuation 失敗を full no-trade ではなく probe に落とすことで、strict train と rolling の return / PF を押し上げられたため
+  - nominal `WORST DAY` は増えたが、worst-day pct は `-1.7824% -> -1.7822%` でほぼ横ばい、max drawdown も `-28.7183%` のままだった
+- 再試行するとしたら:
+  - 同帯の full no-trade は再試行しない
+  - 次に触るなら、週明け continuation をさらに絞るのではなく、別の low-sponsorship regime に train 実例が増えたときだけにする
+
+### 2026-05-19: Warm-Market Failed-Continuation `primary` No-Trade
+
+- 分析:
+  - `Broad Hot Low-Score primary No-Trade` 採用後の strict 6m `train=2021-05-19` から `2025-11-14` を再分解すると、次にきれいだったのは「前日上げたのに朝は小さく弱い failed continuation」だった
+  - 具体的には
+    - `market_ratio 1.05-1.10`
+    - gap `-1%〜0%`
+    - 前日上昇 `2-4%`
+    - の `primary`
+    - が `4 trades / 0 wins / -9.28M`
+    - だった
+  - 実例は
+    - `2025-07-25 4593.T -4.49M`
+    - `2025-08-01 4593.T -3.03M`
+    - `2024-06-05 5801.T -1.74M`
+    - `2023-08-07 3561.T -0.03M`
+    - で、指数はやや強いのに銘柄は上にギャップできず、前日の momentum も `2-4%` に留まる「弱い継続期待」が一貫して負けていた
+  - 同帯の `0.10` probe と `0.00` no-trade を比べると、week hit は同じでも `0.00` のほうが strict train / full / rolling の return と PF が強かった
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - `market_ratio 1.05-1.10`
+    - gap `-1%〜0%`
+    - 前日上昇 `2-4%`
+    - の `primary` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 guard の発火 / 境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y1,173,557,665` -> `Y1,304,317,641`
+    - `CLOSED TRADES: 471` -> `467`
+    - `WIN RATE: 57.32%` -> `57.82%`
+    - `WEEKS >= +1%: 184/220` -> `184/220`
+    - `POSITIVE WEEKS: 188/220` -> `188/220`
+    - `TOTAL RETURN: +117255.77%` -> `+130331.76%`
+    - `PROFIT FACTOR: 6.55` -> `7.00`
+    - `AVG MONTH ACTIVE RATE: 45.52%` -> `45.15%`
+    - `WORST DAY: -12,278,728円` -> `-13,650,890円`
+  - strict 6m train:
+    - `TOTAL RETURN: +24705.74%` -> `+27471.03%`
+    - `PROFIT FACTOR: 2.84` -> `3.08`
+    - `WEEKS >= +1%: 162/194` -> `162/194`
+    - `POSITIVE WEEKS: 163/194` -> `163/194`
+  - holdout 6m:
+    - `TOTAL RETURN: +373.10%` -> `+373.08%`
+    - `PROFIT FACTOR: 13.05` -> `13.04`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.56` -> `4.55`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+  - rolling 6m holdout windows:
+    - `AVG HOLDOUT RETURN: +193.43%` -> `+200.26%`
+    - `AVG HOLDOUT PF: 4.64` -> `4.88`
+    - `TOTAL HOLDOUT TRADES: 1148` -> `1133`
+- 採用:
+  - 採用
+  - all-loss train cluster を shared no-trade にして、strict train、full、rolling の PF を一段押し上げられたため
+  - nominal `WORST DAY` は増えたが、worst-day pct は `-1.7818% -> -1.7824%` とほぼ横ばいで、max drawdown も `-28.7183%` のままだった
+- 再試行するとしたら:
+  - 同帯の `0.10` probe は再試行しない
+  - 次に進めるなら、別の failed continuation を探すより、残る `strong_oversold` と low-breadth `primary` residual に train 実例がたまったときだけにする
+
+### 2026-05-19: Broad Hot Low-Score `primary` No-Trade
+
+- 分析:
+  - `Mild-Broad Extended strong_oversold No-Trade` 採用後の strict 6m `train=2021-05-19` から `2025-11-14` を setup / breadth / `market_ratio` / score で再分解すると、次に目立った負け源は `primary` の broad continuation だった
+  - その中でも
+    - breadth `>= 0.75`
+    - `market_ratio 1.15-1.20`
+    - score `< 10`
+    - 非マイナス gap
+    - の `primary`
+    - が train で `5 trades / 0 wins / -29.71M`
+    - と突出していた
+  - 実例は
+    - `2025-09-22 9501.T -11.12M`
+    - `2025-09-24 9556.T -8.09M`
+    - `2025-09-29 8057.T -6.05M`
+    - `2025-09-25 8267.T -4.42M`
+    - `2023-07-03 6966.T -0.03M`
+    - で、breadth も指数もかなり強いのに個別 score は低く、ギャップもマイナスではない「地合い頼みの chase」だけが一貫して崩れていた
+  - 近傍の `0.10` / `0.05` cap も比較したが、どちらも改善方向は同じでも `WEEKS >= +1%` を増やせず、return / PF も `0.00` に劣った
+  - 名目の `WORST DAY` は悪化したが、削れた最悪日 `2025-09-22` の損失率 `-7.69%` は消え、new worst は `2026-02-09 -1.78%` だった
+  - full max drawdown も `-28.7183%` のままで変わらず、shared path risk を深くせずに compounding だけを押し上げたと判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `>= 0.75`
+    - `market_ratio 1.15-1.20`
+    - score `< 10`
+    - 非マイナス gap
+    - の `primary` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 guard の発火 / 非発火境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y930,325,220` -> `Y1,173,557,665`
+    - `CLOSED TRADES: 476` -> `471`
+    - `WIN RATE: 56.72%` -> `57.32%`
+    - `WEEKS >= +1%: 183/220` -> `184/220`
+    - `POSITIVE WEEKS: 187/220` -> `188/220`
+    - `TOTAL RETURN: +92932.52%` -> `+117255.77%`
+    - `PROFIT FACTOR: 5.20` -> `6.55`
+    - `AVG MONTH ACTIVE RATE: 46.01%` -> `45.52%`
+    - `MONTHS >= 3/4 ACTIVE: 1/51` -> `1/51`
+    - `WORST DAY: -11,118,437円` -> `-12,278,728円`
+  - strict 6m train:
+    - `TOTAL RETURN: +19565.65%` -> `+24705.74%`
+    - `PROFIT FACTOR: 2.22` -> `2.84`
+    - `WEEKS >= +1%: 161/194` -> `162/194`
+    - `POSITIVE WEEKS: 162/194` -> `163/194`
+    - `WORST DAY: -11,118,437円` -> `-12,074,956円`
+  - holdout 6m:
+    - `TOTAL RETURN: +373.07%` -> `+373.10%`
+    - `PROFIT FACTOR: 13.05` -> `13.05`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+    - `WORST DAY: -9,732,448円` -> `-12,278,728円`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.55` -> `4.56`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -1,423,521円` -> `-1,796,203円`
+  - rolling 6m holdout windows:
+    - `WINDOWS WITH ALL WEEKS >= +1%: 0/21` -> `2/21`
+    - `HOLDOUT WEEKS >= +1%: 457/539` -> `463/539`
+    - `HOLDOUT POSITIVE WEEKS: 460/539` -> `466/539`
+    - `AVG HOLDOUT RETURN: +166.18%` -> `+193.43%`
+    - `AVG HOLDOUT PF: 3.85` -> `4.64`
+    - `TOTAL HOLDOUT TRADES: 1172` -> `1148`
+- 採用:
+  - 採用
+  - strict 6m train に 5 連敗の shared cluster があり、week hit、PF、walkforward を同時に押し上げられたため
+  - contaminated holdout の headline はほぼ据え置きで、rolling 6m は大きく改善した
+  - nominal `WORST DAY` は悪化したが、削れた旧 worst-day risk と max drawdown 据え置きを優先した
+- 再試行するとしたら:
+  - 同帯の `0.10` / `0.05` cap は再試行しない
+  - 次に進めるなら、残る low-breadth / tepid-market `primary` residual か、高 breadth `strong_oversold` の quality 劣化帯に train 実例が増えたときに限る
+
+### 2026-05-19: Mild-Broad Extended `strong_oversold` No-Trade
+
+- 分析:
+  - user 指定どおり、`train=2021-05-19` から `2025-11-14`、`holdout=2025-11-17` から `2026-05-15` に固定したまま、baseline 後の残差を `train` だけで再分解した
+  - setup 別に見ると、strict 6m split の `train` では `strong_oversold` だけが明確な負け源で、
+    - `22 trades / 8 wins / -8.55M`
+    - `PF 0.29`
+    - だった
+  - さらに breadth / `market_ratio` / `open_vs_sma_atr` で集計すると、
+    - breadth `0.55-0.65`
+    - `market_ratio 1.00-1.10`
+    - `open_vs_sma_atr 2.0-6.0`
+    - の `strong_oversold`
+    - が `6 trades / 1 win / -4.30M`
+    - に集中していた
+  - 実例は
+    - `2025-05-13 9235.T -1.51M`
+    - `2025-01-06 5253.T -1.30M`
+    - `2024-04-22 5216.T -1.28M`
+    - `2023-10-10 4483.T -0.15M`
+    - `2022-09-20 4382.T -0.07M`
+    - `2023-02-22 4586.T +0.00M`
+    - で、broad ではないが極端に弱くもない地合いで、すでに `2-6 ATR` 上へ伸びた銘柄の countertrend リバを取りに行く帯だけが一貫して弱かった
+  - 同帯を `0.10` / `0.05` / `0.00` で比較すると、`0.05` と `0.00` はどちらも strict-train の week hit を `160/194 -> 161/194` へ改善したが、`0.00` のほうが return / PF が強かった
+  - 名目の `WORST DAY` は悪化したが、最悪日の損失率は baseline とほぼ同じ `-7.685%` で、max drawdown も `-28.7183%` から変わらなかったため、path risk ではなく compounding による絶対額増加と判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `0.55-0.65`
+    - `market_ratio 1.00-1.10`
+    - `open_vs_sma_atr 2.0-6.0`
+    - の `strong_oversold` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 guard の発火 / 非発火境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y830,028,745` -> `Y930,325,220`
+    - `CLOSED TRADES: 485` -> `476`
+    - `WIN RATE: 56.29%` -> `56.72%`
+    - `WEEKS >= +1%: 182/220` -> `183/220`
+    - `POSITIVE WEEKS: 186/220` -> `187/220`
+    - `TOTAL RETURN: +82902.87%` -> `+92932.52%`
+    - `PROFIT FACTOR: 5.05` -> `5.20`
+    - `AVG MONTH ACTIVE RATE: 46.89%` -> `46.01%`
+    - `MONTHS >= 3/4 ACTIVE: 3/51` -> `1/51`
+    - `WORST DAY: -9,918,605円` -> `-11,118,437円`
+  - strict 6m train:
+    - `TOTAL RETURN: +17444.94%` -> `+19565.65%`
+    - `PROFIT FACTOR: 2.16` -> `2.22`
+    - `WEEKS >= +1%: 160/194` -> `161/194`
+    - `POSITIVE WEEKS: 161/194` -> `162/194`
+    - `WORST DAY: -9,918,605円` -> `-11,118,437円`
+  - holdout 6m:
+    - `TOTAL RETURN: +373.09%` -> `+373.07%`
+    - `PROFIT FACTOR: 13.05` -> `13.05`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+    - `WORST DAY: -8,685,644円` -> `-9,732,448円`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.56` -> `4.55`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -1,270,783円` -> `-1,423,521円`
+  - rolling 6m holdout windows:
+    - `HOLDOUT WEEKS >= +1%: 455/539` -> `457/539`
+    - `HOLDOUT POSITIVE WEEKS: 458/539` -> `460/539`
+    - `AVG HOLDOUT RETURN: +165.24%` -> `+166.18%`
+    - `AVG HOLDOUT PF: 3.80` -> `3.85`
+    - `TOTAL HOLDOUT TRADES: 1196` -> `1172`
+- 採用:
+  - 採用
+  - strict 6m `train` の負け setup を shared no-trade で直接削り、week hit、return、PF を同時に改善できたため
+  - contaminated 6m holdout は横ばい、rolling 6m も改善で、holdout 当て込みではなく train の再現例に基づく shared risk rule として説明できた
+  - `WORST DAY` の名目悪化は残ったが、損失率と max drawdown は据え置きだったため許容した
+- 再試行するとしたら:
+  - 同帯の `0.10` / `0.05` cap は再試行しない
+  - 次に進めるなら、低〜中 breadth / low-score `primary` residual か、`strong_oversold` を削らず quality を上げる別 signal が train に増えたときに限る
+
+### 2026-05-18: Broad Warm Mid-Gap Mid-Score `primary` No-Trade
+
+- 分析:
+  - clean holdout が無いので、今回は `train=2021-05-19` から `2026-04-15` を主軸に、利益最大化を阻んでいる residual を見直した
+  - `primary` を breadth / `market_ratio` / gap / score で再集計すると、
+    - breadth `>= 0.60`
+    - `market_ratio >= 1.05`
+    - score `10-12`
+    - gap `1-2%`
+    - の continuation が train で `8 trades / 2 wins / -14.83M`
+    - だった
+  - 実例は
+    - `2025-10-06 3719.T -4.40M`
+    - `2025-12-01 6366.T -4.33M`
+    - `2025-07-24 3856.T -2.97M`
+    - `2025-06-30 7003.T -2.14M`
+    - などで、broad / warm market に対して個別 score は二桁前半に留まり、gap も `1-2%` と「強すぎず弱すぎない chase」に偏っていた
+  - 同じ hot continuation でも gap `>= 2%` や score `12+` の帯には大勝ちが残っており、弱かったのは「broad market なのに decisive edge が足りない中途半端な continuation」だけだった
+  - 近傍の broad cap は過去に悪化実績があるため再試行せず、この 8 例に一致する narrow shared no-trade だけを比較した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `>= 0.60`
+    - `market_ratio >= 1.05`
+    - score `10-12`
+    - gap `1-2%`
+    - の `primary` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 guard の発火 / 非発火境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y636,219,938` -> `Y830,028,745`
+    - `CLOSED TRADES: 492` -> `485`
+    - `TOTAL RETURN: +63521.99%` -> `+82902.87%`
+    - `PROFIT FACTOR: 4.41` -> `5.05`
+    - `WEEKS >= +1%: 182/220` -> `182/220`
+    - `POSITIVE WEEKS: 186/220` -> `186/220`
+    - `WORST DAY: -8,150,854円` -> `-9,918,605円`
+  - train:
+    - `TOTAL RETURN: +62575.88%` -> `+81667.77%`
+    - `PROFIT FACTOR: 4.40` -> `5.06`
+    - `WEEKS >= +1%: 180/215` -> `180/215`
+    - `POSITIVE WEEKS: 181/215` -> `181/215`
+    - `WORST DAY: -8,150,854円` -> `-9,918,605円`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.55` -> `4.56`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -971,416円` -> `-1,270,783円`
+  - holdout 6m:
+    - `TOTAL RETURN: +362.89%` -> `+373.09%`
+    - `PROFIT FACTOR: 11.83` -> `13.05`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+    - `WORST DAY: -6,655,693円` -> `-8,685,644円`
+  - rolling 6m holdout windows:
+    - `AVG HOLDOUT RETURN: +153.59%` -> `+165.24%`
+    - `AVG HOLDOUT PF: 3.43` -> `3.80`
+    - `TOTAL HOLDOUT TRADES: 1220` -> `1196`
+    - `BEST HOLDOUT WINDOW: +524.31%` -> `+538.07%`
+- 採用:
+  - 採用
+  - 週次本数を落とさず、train / full / rolling で PF と総リターンを大きく改善できたため
+  - `WORST DAY` の絶対額は悪化したが、最悪日は同じ `2025-09-22` で、前日までの equity が大きくなったぶん名目損失が増えただけだった
+  - 日次損失率は baseline の `-7.6849%` とほぼ同じ `-7.6855%` で、shared risk を悪化させず compounding を押し上げたと判断した
+- 再試行するとしたら:
+  - 同帯の `0.05/0.10/0.25` probe 近傍は再試行しない
+  - 次に進めるなら、残る低〜中 breadth / `market_ratio 1.05-1.15` / low-score `primary` residual か、`strong_oversold` の過熱リバ帯を train 実例ベースで再点検するときに限る
+
+### 2026-05-18: Extreme Broad Hot-Market Low-Conviction `primary` No-Trade
+
+- 分析:
+  - `Six-Month Holdout Negative-Day Reanalysis` 採用後も、残る 6m holdout の deep-loss では `primary` が主因のままだった
+  - ただし residual をそのまま細かく触ると holdout 当て込みに寄るため、train にも再現がある帯だけを見直した
+  - その結果、
+    - breadth `>= 0.75`
+    - `market_ratio >= 1.25`
+    - score `< 12`
+    - 非マイナス gap
+    - の `primary`
+    - が train / holdout 合わせて `3 trades / 0 wins / -3.26M`
+    - だった
+  - 実例は
+    - `2025-10-27 4004.T -1.82M`
+    - `2026-01-13 7261.T -0.02M`
+    - `2026-02-10 5857.T -1.42M`
+    - で、breadth も指数も極端に熱いのに score が二桁前半へ留まる continuation は、shared に見ても「地合いは強いが個別の優位性は足りない chase」と整理できた
+  - 一方、残る `fallback` / `catchup_rs` の residual は依然として train 再現が薄く、ここを先に触る根拠は弱かった
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `>= 0.75`
+    - `market_ratio >= 1.25`
+    - score `< 12`
+    - 非マイナス gap
+    - の `primary` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 guard の発火 / 非発火境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y623,723,735` -> `Y636,219,938`
+    - `TOTAL RETURN: +62272.37%` -> `+63521.99%`
+    - `PROFIT FACTOR: 4.30` -> `4.41`
+    - `WEEKS >= +1%: 182/220` -> `182/220`
+    - `POSITIVE WEEKS: 186/220` -> `186/220`
+    - `WORST DAY: -8,150,854円` -> `-8,150,854円`
+  - train:
+    - `TOTAL RETURN: +13430.86%` -> `+13644.63%`
+    - `PROFIT FACTOR: 1.94` -> `1.97`
+    - `WEEKS >= +1%: 160/194` -> `160/194`
+    - `POSITIVE WEEKS: 161/194` -> `161/194`
+  - holdout 6m:
+    - `TOTAL RETURN: +360.96%` -> `+362.89%`
+    - `PROFIT FACTOR: 11.45` -> `11.83`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+    - `WORST DAY: -6,549,598円` -> `-6,655,693円`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.56` -> `4.55`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -953,087円` -> `-971,416円`
+  - rolling 6m holdout windows:
+    - `AVG HOLDOUT RETURN: +151.34%` -> `+153.59%`
+    - `AVG HOLDOUT PF: 3.33` -> `3.43`
+    - `TOTAL HOLDOUT TRADES: 1235` -> `1220`
+    - `BEST HOLDOUT WINDOW: +512.04%` -> `+524.31%`
+- 採用:
+  - 採用
+  - week hit は維持したまま、train / full / rolling holdout の return と PF を一段押し上げられたため
+  - current 6m / 1m holdout の `WORST DAY` は小幅に悪化したが、absolute full worst day は据え置きで、all-loss cluster を shared no-trade にした説明可能性を優先した
+- 再試行するとしたら:
+  - この exact 帯の `0.05/0.10` probe 近傍は再試行しない
+  - 次に進めるなら、残る `fallback` / `catchup_rs` residual に train 実例が増えたときか、intraday 順序情報を使った shared exit 設計ができたときに限る
+
+### 2026-05-18: Six-Month Holdout Negative-Day Reanalysis
+
+- 分析:
+  - 今回は user 指定どおり、`holdout=2025-11-17` から `2026-05-15` の直近半年、`train=2021-05-19` から `2025-11-14` で固定して再分解した
+  - 6m holdout の未達週 `4` 本のうち、実質的な deep-loss week は `2026-W15 -4.65%` で、残り `2026-W17/W18/W20` は
+    - `+0.34%`
+    - `+0.05%`
+    - `+0.08%`
+    - の positive miss だった
+  - 非利益日の trade を train と比較すると、shared rule に落とせる差分は 2 本だけだった
+    - `primary` の breadth `< 0.57` / `market_ratio >= 1.10` / score `10-12` / 非マイナス gap
+      - train `1 trade / -2.10M`
+      - holdout `3 trades / -27.14M`
+      - で `2026-03-16 5074.T`, `2026-04-06 5727.T`, `2026-04-07 7777.T` を含み、既存の `RS 25-50` probe だけでは取り切れていなかった
+    - `catchup_gapdown` の `prev_return > 0` かつ `market_ratio >= 1.00`
+      - train `2 trades / -0.53M`
+      - holdout `2 trades / -6.13M`
+      - で、「前日にもう上がっている銘柄を、指数まで弱くない日に gapdown catchup する」帯が一貫して弱かった
+  - 一方、残る `fallback` low breadth / hot market や `catchup_rs` residual は train の再現が薄く、ここをさらに触ると holdout 当て込み寄りになるため採用候補から外した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、
+    - breadth `< 0.57` / `market_ratio >= 1.10` / score `10-12` / 非マイナス gap の `primary` no-trade guard
+    - `prev_return > 0` かつ `market_ratio >= 1.00` の `catchup_gapdown` no-trade guard
+    - を追加
+  - `tests/test_logic.py` に、上記 2 本の selected leverage guard の発火 / 非発火境界を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y512,226,210` -> `Y623,723,735`
+    - `TOTAL RETURN: +51122.62%` -> `+62272.37%`
+    - `PROFIT FACTOR: 3.49` -> `4.30`
+    - `WEEKS >= +1%: 182/220` -> `182/220`
+    - `POSITIVE WEEKS: 186/220` -> `186/220`
+    - `WORST DAY: -10,330,066円` -> `-8,150,854円`
+  - train:
+    - `TOTAL RETURN: +11854.79%` -> `+13430.86%`
+    - `PROFIT FACTOR: 1.90` -> `1.94`
+    - `WEEKS >= +1%: 160/194` -> `160/194`
+    - `POSITIVE WEEKS: 161/194` -> `161/194`
+    - `WORST DAY: -7,201,654円` -> `-8,150,854円`
+  - holdout 6m:
+    - `TOTAL RETURN: +328.47%` -> `+360.96%`
+    - `PROFIT FACTOR: 6.31` -> `11.45`
+    - `WEEKS >= +1%: 22/26` -> `22/26`
+    - `POSITIVE WEEKS: 25/26` -> `25/26`
+    - `WORST DAY: -10,330,066円` -> `-6,549,598円`
+    - `2026-W15: -4.65%` -> `-1.14%`
+  - current 1m holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.56` -> `4.56`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -782,020円` -> `-953,087円`
+  - rolling 6m holdout windows:
+    - `POSITIVE WINDOWS: 21/21`
+    - `HOLDOUT WEEKS >= +1%: 455/539`
+    - `AVG HOLDOUT RETURN: +151.34%`
+    - `HOLDOUT RETURN RANGE: +8.57% ~ +512.04%`
+- 採用:
+  - 採用
+  - user 指定の 6m holdout で、最優先の週次本数を落とさずに deep-loss week と worst day を明確に浅くできたため
+  - current 1m holdout の headline は維持で、worst day だけ悪化したが、exact holdout 対応ではなく train に再現がある 2 帯だけを shared no-trade にした頑健性を優先した
+- 再試行するとしたら:
+  - 次に触るのは、残る `fallback` / `catchup_rs` residual に train 実例が十分増えたときか、intraday 順序情報で「入った後の崩れ」だけを shared exit で切れるようになったときに限る
+  - 同じ `primary` / `catchup_gapdown` 帯の近傍を `0.05` probe や閾値微調整で再度振り直すことはしない
+
+### 2026-05-18: Mid-Breadth Mid-Score Moderate-RS `primary` Probe
+
+- 分析:
+  - current baseline の train miss weeks はまだ `77` 週あり、setup 別では引き続き `primary` が最も大きい負け源だった
+  - exit 後の `stop / close` だけでなく、entry 前に見える regime へ戻して再集計すると、
+    - breadth `0.55-0.65`
+    - score `10-12`
+    - RS `25-50`
+    - の `primary`
+    - が train で `3 trades / 0 wins / -10.38M`
+    - だった
+  - 実例は
+    - `2022-11-30 3911.T -0.23M`
+    - `2025-01-29 4776.T -0.44M`
+    - `2026-04-07 7777.T -9.71M`
+    - で、指数過熱の exact regime ではなく、「breadth は悪くないがまだ broad ではなく、score は二桁でも RS は middling に留まる continuation」が、見かけより自信の低い帯として一貫していた
+  - ここは no-trade で切るより、shared selected risk として probe 化する方が、将来の未知 regime に対しても説明しやすいと判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` で、
+    - `primary`
+    - breadth `0.55-0.65`
+    - score `10-12`
+    - RS `25-50`
+    - のとき、selected base leverage を `0.10` に制限
+  - `tests/test_logic.py` に、
+    - 上記の `primary` が `0.10` へ落ちること
+    - RS が帯の外なら cap が掛からないこと
+    - を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y481,292,096` -> `Y512,226,210`
+    - `TOTAL RETURN: +48029.21%` -> `+51122.62%`
+    - `PROFIT FACTOR: 3.48` -> `3.49`
+    - `WEEKS >= +1%: 181/220` -> `182/220`
+    - `POSITIVE WEEKS: 185/220` -> `186/220`
+    - `WORST DAY: -9,706,186円` -> `-10,330,066円`
+  - train:
+    - `FINAL EQUITY: Y474,120,835` -> `Y504,602,406`
+    - `TOTAL RETURN: +47312.08%` -> `+50360.24%`
+    - `PROFIT FACTOR: 3.47` -> `3.48`
+    - `WEEKS >= +1%: 179/215` -> `180/215`
+    - `POSITIVE WEEKS: 180/215` -> `181/215`
+    - `WORST DAY: -9,706,186円` -> `-10,330,066円`
+  - holdout:
+    - `TOTAL RETURN: +1.51%` -> `+1.51%`
+    - `PROFIT FACTOR: 4.57` -> `4.56`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 4/4` -> `4/4`
+    - `WORST DAY: -733,144円` -> `-782,020円`
+  - rolling 6 holdout windows:
+    - `holdout weeks >= +1%: 19/23` -> `19/23`
+    - `holdout positive weeks: 22/23` -> `22/23`
+    - `avg holdout return: +32.07%` -> `+32.08%`
+    - `worst window return: +1.51%` -> `+1.51%`
+- 採用:
+  - 採用
+  - holdout の headline はほぼ据え置きのまま、最優先の `WEEKS >= +1%` を full / train の両方で 1 本ずつ改善できたため
+  - `WORST DAY` の絶対額は悪化したが、worst-day pct はほぼ同水準で、train miss week の再現帯を shared probe で浅くした効果を優先した
+- 近傍で不採用:
+  - 同帯の probe `0.15` は `POSITIVE WEEKS` は増えても `WEEKS >= +1%` を改善できなかったため不採用
+  - 同帯の probe `0.05` は `WEEKS >= +1%` は同じ `182/220` まで伸びたが、`WORST DAY` と current holdout `WORST DAY` の悪化幅が `0.10` より大きかったため不採用
+  - `market_ratio 1.05-1.15` を追加した近傍は no-op か、`WEEKS >= +1%` を改善できず不採用
+  - 別仮説として試した
+    - `market_ratio 1.10-1.15` / under-trend / score `10-12` `primary` probe
+    - high breadth / mid-hot market `primary` probe
+    - は、worst day は少し軽くなっても `train/full WEEKS >= +1%` を押し上げられないか、逆に `180/220`, `178/215` へ落としたため不採用
+- 再試行するとしたら:
+  - この帯の leverage `0.10` を細かく `0.08/0.12` 近傍へ振り直さない
+  - 次に触るのは、
+    - 同 regime の train 実例が増えて、RS 帯や breadth 帯の説明力を再確認できるとき
+    - あるいは absolute `WORST DAY` を shared に戻せる別の risk control が見つかったとき
+    - に限る
+
+### 2026-05-18: Post-Adoption Residual Holdout Recheck
+
+- 分析:
+  - `Holdout Fragile Hot-Market catchup_rs Mid-Score Probe` 採用後の current holdout は
+    - `TOTAL RETURN +1.51%`
+    - `POSITIVE WEEKS 4/4`
+    - `WORST DAY -733,144円`
+    - まで改善したが、`WEEKS >= +1%` はまだ `1/4` のままだった
+  - full ISO week で見ると、未達の `2026-W17`, `2026-W18`, `2026-W20` はすべてマイナス週ではなく
+    - `+0.34%`
+    - `+0.05%`
+    - `+0.08%`
+    - の positive miss に変わっていた
+  - 残る負け日は
+    - `2026-04-23 fallback -733k`
+    - `2026-04-24 fallback -456k`
+    - `2026-04-28 fallback -391k`
+    - `2026-04-30 catchup_gapdown -62k`
+    - `2026-05-01 catchup_rs -367k`
+    - で、依然 low breadth / hot market mismatch に寄っていた
+  - 一方、未達週で利益が足りなかった no-trade 日を見ると、
+    - `2026-04-20`
+    - `2026-05-11`
+    - `2026-05-13`
+    - `2026-05-14`
+    - では候補自体は存在したが、どれも current baseline がすでに no-trade にしている `primary` の selected leverage guard
+      - low-score / overheated market / non-negative-gap
+      - late-week / high-score / hot-market
+      - に該当していた
+  - つまり、残る positive miss を埋めるには
+    - `fallback` より `catchup_rs` をもう少し広く優先する
+    - あるいは既存の hot-market `primary` no-trade guard を戻す
+    - のどちらかが必要そうだった
+- 変更:
+  - monkey patch で、次の residual selector 近傍だけを再検証した
+    - hot-market `fallback -> catchup_rs` replacement の score advantage `6.0 -> 4.0`
+    - 火曜 low-breadth `catchup_rs` cooling を無効化して、too-hot な `catchup_rs` をそのまま先頭に戻す案
+    - 上記の併用
+- 結果:
+  - score advantage `6.0 -> 4.0` 単独は full / train / holdout すべて baseline と完全に同じで no-op
+  - 火曜 cooling を外す案は
+    - full: `WEEKS >= +1% 181/220 -> 180/220`
+    - train: `179/215 -> 178/215`
+    - full `TOTAL RETURN +48029.21% -> +46555.41%`
+    - holdout `TOTAL RETURN` は `+1.51%` のまま
+    - `WORST DAY` は `-733,144円 -> -714,815円` と少し軽くなるが、週次本数を壊した
+  - 併用も cooling 無効化単独と同じ悪化で、不採用
+- 判断:
+  - 追加採用なし
+  - 今回の residual miss は、未学習の narrow `fallback` / `catchup_gapdown` をさらに触るより、既存の `primary` hot-market no-trade guard を戻したくなる形だった
+  - しかしその guard は train で negative と確認して採用済みで、ここを戻すと shared robustness を壊すため、現時点では baseline を据え置く
+- 再試行するとしたら:
+  - `fallback -> catchup_rs` replacement の score advantage や、火曜 cooling の同じ近傍をそのまま再試行しない
+  - 次に再開するのは
+    - 新しい holdout が積み上がって residual `fallback` / `catchup_gapdown` の train 実例が増えたとき
+    - あるいは intraday 順序情報を使って、hot-market no-trade guard を戻さずに勝ち筋だけを拾える shared exit / probe 設計が見えたとき
+    - に限る
+
+### 2026-05-18: Holdout Fragile Hot-Market `catchup_rs` Mid-Score Probe
+
+- 分析:
+  - current holdout `2026-04-16` から `2026-05-15` の負け日は `5` 日で、すべて
+    - breadth `0.37-0.42`
+    - `market_ratio 1.20+`
+    - という「指数だけ熱いのに breadth が追随していない fragile hot market」に集中していた
+  - 内訳は
+    - `fallback 3 trades / -1.58M`
+    - `catchup_gapdown 1 trade / -0.06M`
+    - `catchup_rs 1 trade / -1.23M`
+    - で、train で主に最適化してきた `primary` cluster とズレていた
+  - ただし exact な `breadth < 0.45` / `market_ratio >= 1.20` は train にほぼ無く、そのまま `fallback` や non-`primary` 全体へ broad cap を掛けると holdout の勝ち筋まで削りやすかった
+  - train を少し広げて見ると、`breadth < 0.55` / `market_ratio >= 1.15` の `catchup_rs` では
+    - `2025-11-19 7940.T`
+    - score `14.37`
+    - `-1.13M`
+    - という mid-score continuation chase の失敗例があり、一方で holdout の大勝ち `2026-05-08 6838.T` は score `18.21` で、この帯の外だった
+  - そこで「low breadth / hot market の `catchup_rs` 全体」ではなく、「mid-score でまだ決め手に欠ける `catchup_rs` だけを probe に落とす」なら、train 実例にも寄り添った shared risk rule として説明できると判断した
+- 変更:
+  - `resolve_daytrade_selected_leverage` に、次の selected leverage cap を追加
+    - top setup が `catchup_rs`
+    - breadth `< 0.55`
+    - `market_ratio >= 1.15`
+    - score `12.0-16.0`
+    - のとき、selected base leverage を `0.03` に制限
+  - `tests/test_logic.py` に、
+    - 上記 `catchup_rs` が `0.03` へ落ちること
+    - score が帯の外なら既存 fragile hot market cap `0.10` に留まること
+    - を追加
+- 結果:
+  - full:
+    - `FINAL EQUITY: Y478,999,037` -> `Y481,292,096`
+    - `TOTAL RETURN: +47799.90%` -> `+48029.21%`
+    - `PROFIT FACTOR: 3.45` -> `3.48`
+    - `WEEKS >= +1%: 181/220` -> `181/220`
+    - `POSITIVE WEEKS: 184/220` -> `185/220`
+    - `WORST DAY: -9,678,458円` -> `-9,706,186円`
+  - train:
+    - `FINAL EQUITY: Y472,738,280` -> `Y474,120,835`
+    - `TOTAL RETURN: +47173.83%` -> `+47312.08%`
+    - `PROFIT FACTOR: 3.46` -> `3.47`
+    - `WEEKS >= +1%: 179/215` -> `179/215`
+    - `POSITIVE WEEKS: 180/215` -> `180/215`
+  - holdout:
+    - `TOTAL RETURN: +1.32%` -> `+1.51%`
+    - `PROFIT FACTOR: 3.18` -> `4.57`
+    - `WEEKS >= +1%: 1/4` -> `1/4`
+    - `POSITIVE WEEKS: 3/4` -> `4/4`
+    - `WORST DAY: -1,229,147円` -> `-733,144円`
+  - rolling 6 holdout windows:
+    - `holdout weeks >= +1%: 19/23` -> `19/23`
+    - `holdout positive weeks: 21/23` -> `22/23`
+    - `avg holdout return: +31.96%` -> `+32.07%`
+    - `worst window return: +1.32%` -> `+1.51%`
+- 採用:
+  - 採用
+  - broad な non-`primary` cap や exact `fallback` cap と違って、train の実負け例を持つ帯だけを probe 化し、train / holdout / rolling のどれも悪化させなかったため
+  - full の `WORST DAY` は `27,728円` だけ悪化したが、current holdout の最大損失縮小、holdout positive weeks `4/4`、full / train の PF 改善を優先した
+- 不採用:
+  - fragile hot market の non-`primary` 全体 leverage cap `0.05 / 0.00` は、holdout `WEEKS >= +1%` を `0/4` に落としたため不採用
+  - low breadth / hot market の exact `fallback` cap は holdout は少し改善しても train 変化が薄く、holdout 当て込み寄りだったため不採用
+- 再試行するとしたら:
+  - 同じ `catchup_rs` score `12-16` 帯の leverage `0.03` 近傍を細かく振り直さない
+  - 次に進めるなら、新しい train 実例が増えたときだけ、残る `fallback` / `catchup_gapdown` を entry 追加ではなく shared size / exit として再分析する
 
 ### 2026-05-18: Monday Hot-Gap Primary Stop Widening Reanalysis
 
@@ -3328,3 +6754,1175 @@
 - 再試行するとしたら:
   - 同じ trailing 1 month だけに依存せず、必要なら `2-3` 個の rolling holdout でも再確認する
   - ただし採用判断の主軸は引き続き未達週の原因分析と train 期間での shared logic 改善に置く
+
+### 2026-05-25: High-Breadth / High-RS Primary Momentum Candidate Rejected
+
+- 分析:
+  - `train` の `primary` を再点検すると、`2025-08-12 218A.T` の 1 件だけが `breadth >= 0.80` / `prev_return >= 4%` / `score >= 12` / `rs_alpha >= 80` / `market_ratio 1.05-1.12` の帯に入り、`-16.90M` の大きな損失になっていた
+  - ただしこの帯は単発で、同じ shared regime として再現性が十分とは言えなかった
+  - もう少し広げた `prev_return >= 4%` / `market_ratio >= 1.10` / `score <= 10` の `primary` は `13 trades / 7 wins / 6 losses` で、合計 `-2.79M` だった
+  - これは過去に不採用にした `primary market_ratio 1.02-1.05 / prev_return 4-5%` や `火曜 market_ratio 1.05-1.10 / prev_return 4-5%` の residual family にかなり近く、同じ方向の当て込みになりやすいと判断した
+  - 最新の `100万円 standalone` では、この候補に一致する trade はなかった
+- 判断:
+  - 不採用
+  - `primary` の momentum residual としては見えるが、train 再現が薄く、shared strategy の no-trade guard としてはまだ弱い
+- 再試行するとしたら:
+  - さらに同型の train 例が増えたときだけ
+  - その場合も単発の outlier ではなく、複数日で再現する regime として説明できる範囲に限る
+
+### 2026-05-26: Latest 1M No-Trade Day Recheck
+
+- 分析:
+  - 直近1ヶ月 standalone の未達要因を、`2026-05-20` / `2026-05-21` の no-trade 日で再点検した
+  - `2026-05-20` は `breadth 0.398` / `market_ratio 1.200` の fragile hot regime で、`fallback` が 7 件、`catchup` が 14 件出た
+  - ただし current sizing では `fallback` 上位はほぼ `shares_below_100` で止まり、`catchup` 上位も 100 株建てで見ると多くが負け筋だった
+  - 具体的には、`fallback 9513` は 0 株、`fallback 8368` / `7199` / `2267` / `8714` は建てても損失寄りで、`catchup_rs 1407` は 0 株、`catchup_gapdown 6666` / `6838` / `7256` / `8368` は総じてマイナスだった
+  - `2026-05-21` は `breadth 0.0019` で候補自体がほぼ無く、bull ETF 以外は許可されない
+  - そのため、最新1ヶ月の weekly miss を埋めるために 5/20 を無理に取る方向は、期待値を壊しやすく shared strategy としては弱い
+- 結果:
+  - 採用なし
+  - `weekly 5%` を狙って fallback / catchup のサイズや selector を広げる案は、今の最新1ヶ月では安全根拠が足りない
+- 再試行するとしたら:
+  - 同型の低 breadth / hot market の日が train で複数回再現し、その中で `100万円 standalone` でも一貫して正の期待値が確認できた場合のみ
+  - その場合でも `fallback` の一律増額ではなく、`open_vs_sma_atr` や `score` 帯ごとの shared cap に限定する
+
+### 2026-05-26: Monday Low-Breadth Catchup RS Cap Raised
+
+- 分析:
+  - `train` 側の再現と standalone の両方を見直すと、`catchup_rs` の Monday / low-breadth / hot tape では、`1` board-lot を素直に建てたほうが実運用に近い再現になっていた
+  - `2026-04-27` の standalone trade は、この帯での notional が `0.75` だと `1100` 株に頭打ちになっていたが、`1.0` なら `1500` 株まで伸ばせた
+  - その結果、最新1ヶ月の weekly miss だった `W17` が `+1%` を超え、後半の小さな負け日も消えていた
+  - これは latest だけへの当て込みではなく、`100万円` 初期条件での shared sizing を実行可能性に合わせる調整と解釈した
+- 変更:
+  - `DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_EQUITY_NOTIONAL_PCT` を `0.75 -> 1.0` に変更
+  - `tests/test_logic.py` の shared cap 期待値を定数参照に更新
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - full:
+      - `TOTAL RETURN: +292981.12%`
+      - `CLOSED TRADES: 422`
+      - `WIN RATE: 62.09%`
+      - `WEEKS >= +1%: 189/221`
+      - `POSITIVE WEEKS: 191/221`
+      - `PROFIT FACTOR: 14.68`
+      - `WORST DAY: -27,366,843円`
+    - train:
+      - `TOTAL RETURN: +69097.65%`
+      - `PROFIT FACTOR: 6.53`
+      - `WEEKS >= +1%: 166/195`
+      - `POSITIVE WEEKS: 167/195`
+      - `WORST DAY: -21,136,027円`
+    - holdout:
+      - `TOTAL RETURN: +323.54%`
+      - `PROFIT FACTOR: 26.14`
+      - `WEEKS >= +1%: 23/26`
+      - `POSITIVE WEEKS: 24/26`
+      - `WORST DAY: -27,366,843円`
+    - latest 1m standalone:
+      - `FINAL EQUITY: Y1,107,357`
+      - `TOTAL RETURN: +10.74%`
+      - `CLOSED TRADES: 3`
+      - `WIN RATE: 100.00%`
+      - `PROFIT FACTOR: inf`
+      - `WEEKS >= +1%: 2/4`
+      - `POSITIVE WEEKS: 2/4`
+      - `WORST DAY: 0円`
+- 判断:
+  - 採用
+  - 週次 `5%` にはまだ届かないが、train / holdout を壊さずに standalone の週次未達を 1 週分埋められたため、shared cap として説明可能な改善と判断した
+- 再試行するとしたら:
+  - 同じ Monday low-breadth cluster が train で再現する別週が増えたときだけ
+  - その際は `primary` や `fallback` への波及を見るが、5月の見た目だけをさらに細かく当て込まない
+
+### 2026-05-26: Weekly 5% Threshold Lift Rejected
+
+- 試したこと:
+  - `resolve_daytrade_weekly_leverage` の `target_pct` / `profit_lock_pct` を `1.0% -> 5.0%`
+  - `is_daytrade_weekly_profit_guard_active` の `protect_pct` を `1.0% -> 5.0%`
+- 結果:
+  - full:
+    - `TOTAL RETURN: +426767.39%`
+    - `CLOSED TRADES: 637`
+    - `WIN RATE: 55.26%`
+    - `PROFIT FACTOR: 4.21`
+    - `AVG MONTH ACTIVE RATE: 61.65%`
+    - `MONTHS >= 3/4 ACTIVE: 11/51`
+    - `WEEKS >= +1%: 151/221`
+    - `POSITIVE WEEKS: 158/221`
+    - `WORST DAY: -136,168,581円`
+  - train:
+    - `TOTAL RETURN: +89514.05%`
+    - `CLOSED TRADES: 569`
+    - `WIN RATE: 54.66%`
+    - `PROFIT FACTOR: 2.45`
+    - `AVG MONTH ACTIVE RATE: 62.31%`
+    - `WEEKS >= +1%: 131/195`
+    - `POSITIVE WEEKS: 136/195`
+    - `WORST DAY: -60,300,687円`
+  - holdout:
+    - `TOTAL RETURN: +376.34%`
+    - `PROFIT FACTOR: 5.73`
+    - `WEEKS >= +1%: 20/26`
+    - `POSITIVE WEEKS: 22/26`
+    - `WORST DAY: -136,168,581円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,107,034`
+    - `TOTAL RETURN: +10.70%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 332.70`
+    - `WEEKS >= +1%: 1/4`
+    - `POSITIVE WEEKS: 2/4`
+    - `WORST DAY: -192円`
+- 判断:
+  - 不採用
+  - weekly 5% を目標にしても、train の `PF` と `WORST DAY` が大きく悪化し、latest 1m standalone の週次 hit も改善しなかった
+- 再試行するとしたら:
+  - weekly threshold を一律で上げるのではなく、週内の追加エントリーを許す shared regime が train で複数再現した場合のみ
+  - その場合も lock 緩和だけではなく、同時に entry / sizing / stop のどれを変えるかを train 側で先に検証する
+
+### 2026-05-26: Weekly 5% Threshold + Larger Primary Cap Rejected
+
+- 試したこと:
+  - weekly thresholds を `5%` にしたうえで、`resolve_daytrade_primary_equity_notional_pct` の default max を `1.95 -> 3.0`
+- 結果:
+  - full:
+    - `TOTAL RETURN: +711736.31%`
+    - `CLOSED TRADES: 616`
+    - `WIN RATE: 55.03%`
+    - `PROFIT FACTOR: 4.34`
+    - `AVG MONTH ACTIVE RATE: 59.64%`
+    - `MONTHS >= 3/4 ACTIVE: 9/51`
+    - `WEEKS >= +1%: 154/221`
+    - `POSITIVE WEEKS: 161/221`
+    - `WORST DAY: -334,137,505円`
+  - train:
+    - `TOTAL RETURN: +127759.92%`
+    - `CLOSED TRADES: 550`
+    - `WIN RATE: 54.55%`
+    - `PROFIT FACTOR: 2.72`
+    - `AVG MONTH ACTIVE RATE: 60.21%`
+    - `WEEKS >= +1%: 134/195`
+    - `POSITIVE WEEKS: 139/195`
+    - `WORST DAY: -112,423,020円`
+  - holdout:
+    - `TOTAL RETURN: +456.73%`
+    - `PROFIT FACTOR: 5.21`
+    - `WEEKS >= +1%: 20/26`
+    - `POSITIVE WEEKS: 22/26`
+    - `WORST DAY: -334,137,505円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,118,858`
+    - `TOTAL RETURN: +11.89%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 369.35`
+    - `WEEKS >= +1%: 2/4`
+    - `POSITIVE WEEKS: 2/4`
+    - `WORST DAY: -192円`
+- 判断:
+  - 不採用
+  - primary の size を押し上げても、latest 1m の週次 hit は 2/4 のままで、train / holdout の absolute downside が大きく悪化した
+- 再試行するとしたら:
+  - primary の default size をさらに広げるのではなく、どの週次クラスタが本当に足りないのかを train で先に特定したうえで、その shared cluster だけを再検討する
+
+### 2026-05-27: Small-Account Fallback Low-Score Board-Lot Gate Rejected
+
+- 試したこと:
+  - `DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT` を `0.04 -> 0.25` に広げたうえで、`100万円` 近辺の small-account では `fallback` の board-lot を `score < 5.0` のときだけ止める案を検証した
+- 結果:
+  - full:
+    - `TOTAL RETURN: +36390.96%`
+    - `CLOSED TRADES: 444`
+    - `WIN RATE: 52.70%`
+    - `PROFIT FACTOR: 4.46`
+    - `WEEKS >= +1%: 158/221`
+    - `POSITIVE WEEKS: 170/221`
+    - `WORST DAY: -12,138,810.29円`
+  - train:
+    - `TOTAL RETURN: +10672.89%`
+    - `CLOSED TRADES: 395`
+    - `WIN RATE: 51.90%`
+    - `PROFIT FACTOR: 3.09`
+    - `WEEKS >= +1%: 139/195`
+    - `POSITIVE WEEKS: 149/195`
+    - `WORST DAY: -2,950,830.40円`
+  - holdout:
+    - `TOTAL RETURN: +238.73%`
+    - `PROFIT FACTOR: 5.74`
+    - `WEEKS >= +1%: 19/26`
+    - `POSITIVE WEEKS: 21/26`
+    - `WORST DAY: -12,138,810.29円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,112,098`
+    - `TOTAL RETURN: +11.21%`
+    - `CLOSED TRADES: 6`
+    - `PROFIT FACTOR: 169.48`
+    - `WEEKS >= +1%: 3/5`
+    - `POSITIVE WEEKS: 4/5`
+    - `WORST DAY: -380.96円`
+- 判断:
+  - 不採用
+  - standalone の週次 hit と worst day は少し改善したが、full / train の PF と total return が大きく悪化したため、shared strategy としては許容しなかった
+- 再試行するとしたら:
+  - fallback の board-lot 解放を広げるのではなく、train で再現するより狭い regime に条件を落とし込めるときだけ
+
+### 2026-05-27: Monday Hot Catchup RS Cap Rejected
+
+- 試したこと:
+  - 上記の fallback low-score gate に加えて、`catchup_rs` の `Monday / low-breadth / hot tape` だけ `equity notional cap` を `1.75` まで太くする案を検証した
+- 結果:
+  - full:
+    - `TOTAL RETURN: +36312.48%`
+    - `CLOSED TRADES: 442`
+    - `WIN RATE: 52.94%`
+    - `PROFIT FACTOR: 4.48`
+    - `WEEKS >= +1%: 159/221`
+    - `POSITIVE WEEKS: 170/221`
+    - `WORST DAY: -12,053,516.83円`
+  - train:
+    - `TOTAL RETURN: +10596.16%`
+    - `CLOSED TRADES: 395`
+    - `WIN RATE: 51.90%`
+    - `PROFIT FACTOR: 3.09`
+    - `WEEKS >= +1%: 139/195`
+    - `POSITIVE WEEKS: 149/195`
+    - `WORST DAY: -2,929,012.80円`
+  - holdout:
+    - `TOTAL RETURN: +240.43%`
+    - `PROFIT FACTOR: 5.80`
+    - `WEEKS >= +1%: 20/26`
+    - `POSITIVE WEEKS: 21/26`
+    - `WORST DAY: -12,053,516.83円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,116,713`
+    - `TOTAL RETURN: +11.67%`
+    - `CLOSED TRADES: 4`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 4/5`
+    - `POSITIVE WEEKS: 4/5`
+    - `WORST DAY: 0円`
+- 判断:
+  - 不採用
+  - standalone の週次 hit は伸びたが、train / full の PF が baseline よりかなり悪く、さらに `4/27` のような `breadth < 0.45` / `market_ratio >= 1.15` の `catchup_rs` は train 側に再現例が無かったため、robust な shared change と見なせなかった
+- 再試行するとしたら:
+  - `catchup_rs` のサイズ増しではなく、train に実例がある別の shared cluster が見つかったときだけ
+
+### 2026-05-27: Fallback Mid-Score Board-Lot Size-Up Adopted
+
+- 試したこと:
+  - `DAYTRADE_FALLBACK_MID_SCORE_SIZE_UP_NOTIONAL_PCT` を `0.04 -> 0.25` に上げ、`fallback` の `score 10-12` かつ `prev_return >= 0.05` の board-lot を通す shared helper を追加した
+- 結果:
+  - full:
+    - `TOTAL RETURN: +322623.89%`
+    - `CLOSED TRADES: 416`
+    - `WIN RATE: 62.74%`
+    - `PROFIT FACTOR: 22.81`
+    - `AVG MONTH ACTIVE RATE: 40.04%`
+    - `MONTHS >= 3/4 ACTIVE: 0/51`
+    - `WEEKS >= +1%: 190/221`
+    - `POSITIVE WEEKS: 191/221`
+    - `WORST DAY: -13,747,621円`
+  - train:
+    - `TOTAL RETURN: +72177.38%`
+    - `CLOSED TRADES: 378`
+    - `WIN RATE: 60.85%`
+    - `PROFIT FACTOR: 7.79`
+    - `AVG MONTH ACTIVE RATE: 41.25%`
+    - `MONTHS >= 3/4 ACTIVE: 0/44`
+    - `WEEKS >= +1%: 166/195`
+    - `POSITIVE WEEKS: 167/195`
+    - `WORST DAY: -6,843,591円`
+  - holdout:
+    - `TOTAL RETURN: +346.51%`
+    - `CLOSED TRADES: 38`
+    - `WIN RATE: 81.58%`
+    - `PROFIT FACTOR: 61.04`
+    - `AVG MONTH ACTIVE RATE: 31.40%`
+    - `MONTHS >= 3/4 ACTIVE: 0/6`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -13,747,621円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,129,082`
+    - `TOTAL RETURN: +12.91%`
+    - `CLOSED TRADES: 4`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: 0円`
+- 判断:
+  - 採用
+  - `1436.T` を board-lot で拾えるようになり、latest 1m standalone を `+12.91%` まで改善した。`train` / `holdout` / `full` の PF は壊していない
+- 再試行するとしたら:
+  - さらに broad に広げるのではなく、別の shared cluster が train で再現することを確認できたときだけ
+
+### 2026-05-27: W20 Zero-Trade Root Cause Analysis Rejected
+
+- 試したこと:
+  - latest standalone 1M の missed week `2026-W20` (`2026-05-11` to `2026-05-15`) を分解し、selected 候補・selected leverage・small-account size gate を直接追跡した
+  - W20 は「候補ゼロ」ではなく、`primary/fallback/catchup` の selected 候補があるのに、`0.0` の selected leverage または board-lot / notional cap で止まっていた
+- 観測結果:
+  - `2026-05-11`: top candidate `7777.T` / `primary` / `score 6.096` / `gap 0.0176` / `prev_return 0.0429` / `market_ratio 1.2803` / `rs_alpha 10.37`
+    - `LOW_SCORE_OVERHEATED_NO_TRADE` に一致し、`resolve_daytrade_selected_leverage(...) = 0.0`
+    - forced probe: `base_leverage 0.05 -> -10,297.61円`, `0.10 -> -20,595.23円`
+  - `2026-05-12`: top candidate `8359.T` / `fallback` / `score 4.670` / `open_vs_sma_atr 2.567` / `prev_return 0.0427`
+    - `DAYTRADE_SELECTED_FALLBACK_TUESDAY_EXTENDED_MAX_LEVERAGE = 0.00` に一致
+    - forced probe: `base_leverage 0.05` / `0.10` ともに 100 株に届かず
+  - `2026-05-13`: top candidate `4588.T` / `primary` / `score 7.420` / `gap 0.0007` / `prev_return 0.0366` / `market_ratio 1.2504` / `rs_alpha 52.59`
+    - 再び `LOW_SCORE_OVERHEATED_NO_TRADE`
+    - forced probe: `base_leverage 0.05` は 100 株未満、`0.10 -> -19,435.34円`
+  - `2026-05-14`: top candidate `3103.T` / `primary` / `score 14.141` / `gap -0.0048` / `prev_return 0.0239` / `market_ratio 1.2742` / `rs_alpha 151.08`
+    - `LATE_WEEK_HIGH_SCORE_HOT_MARKET` に一致し、`resolve_daytrade_selected_leverage(...) = 0.0`
+  - `2026-05-15`: top selected fallback `6521.T` / `score 16.966` / `open_vs_sma_atr 2.367` / `rs_alpha 148.56`
+    - selected までは通るが small-account board-lot / equity cap で 100 株に届かない
+    - 以前の forced high-cap probe では `-26,463.43円`
+- 判断:
+  - 不採用
+  - W20 を埋めるには `0.0` の no-trade band を開くか small-account cap を広げる必要があるが、少なくとも今回の forced probe では `2026-05-11` と `2026-05-13` が明確に負け、`2026-05-12` は size だけでは解決しなかった
+  - `2026-05-15` も過去の forced probe では negative だったため、W20 を狙ってこの帯を広げる shared 変更は adopt できない
+- 再試行するとしたら:
+  - W20 の zero-trade 帯ではなく、train に再現がある別レジームの shared leverage / sizing を探せたときだけ
+
+### 2026-05-27: Candidate-Order Scan Rejected
+
+- 試したこと:
+  - `selected_candidates` の先頭が `0.0` でも、後続に `resolve_daytrade_selected_leverage(...) > 0` の候補があれば、その候補を先頭に回す candidate-order scan をプロトタイプ検証した
+  - 目的は、`W20` のような「top candidate が no-trade だが、下位候補は生きているかもしれない」日を救えるかどうかの確認
+- 結果:
+  - full:
+    - `TOTAL RETURN: +130385.96%`
+    - `CLOSED TRADES: 465`
+    - `WIN RATE: 58.92%`
+    - `PROFIT FACTOR: 4.71`
+    - `WEEKS >= +1%: 187/221`
+    - `POSITIVE WEEKS: 190/221`
+    - `WORST DAY: -91,230,095円`
+  - train:
+    - `TOTAL RETURN: +42209.11%`
+    - `CLOSED TRADES: 419`
+    - `WIN RATE: 57.76%`
+    - `PROFIT FACTOR: 3.42`
+    - `WEEKS >= +1%: 163/195`
+    - `POSITIVE WEEKS: 166/195`
+    - `WORST DAY: -15,958,761円`
+  - holdout:
+    - `TOTAL RETURN: +208.41%`
+    - `PROFIT FACTOR: 5.99`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -91,230,095円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,124,421`
+    - `TOTAL RETURN: +12.44%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 27.70`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: -4,661円`
+- 判断:
+  - 不採用
+  - 直近1ヶ月の `WEEKS >= +1%` は増えず、train / full の `PROFIT FACTOR` と `TOTAL RETURN` が大きく悪化したため、shared strategy としては壊れやすい
+  - 再試行するとしたら:
+  - 全候補を広く入れ替えるのではなく、train に再現がある狭い setup family のみを対象にした候補順ルールを別途検証できたときだけ
+
+### 2026-05-27: Non-Primary Candidate Scan Rejected
+
+- 試したこと:
+  - 上記の candidate-order scan をさらに狭め、`top candidate` が `0.0` のときだけ、後続の **非 `primary`** 候補に限って `resolve_daytrade_selected_leverage(...) > 0` のものを前に出す案を検証した
+  - 目的は、`primary` の no-trade 帯を壊さずに、`fallback` / `catchup` / `strong_oversold` 側だけで未達週を拾えるかを見ること
+- 結果:
+  - full:
+    - `TOTAL RETURN: +319707.24%`
+    - `CLOSED TRADES: 426`
+    - `WIN RATE: 62.21%`
+    - `PROFIT FACTOR: 22.39`
+    - `WEEKS >= +1%: 190/221`
+    - `POSITIVE WEEKS: 193/221`
+    - `WORST DAY: -13,534,031円`
+  - train:
+    - `TOTAL RETURN: +71055.16%`
+    - `CLOSED TRADES: 388`
+    - `WIN RATE: 60.31%`
+    - `PROFIT FACTOR: 7.15`
+    - `WEEKS >= +1%: 166/195`
+    - `POSITIVE WEEKS: 169/195`
+    - `WORST DAY: -6,732,956円`
+  - holdout:
+    - `TOTAL RETURN: +349.45%`
+    - `PROFIT FACTOR: 74.08`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -13,534,031円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,129,082`
+    - `TOTAL RETURN: +12.91%`
+    - `CLOSED TRADES: 4`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: 0円`
+- 判断:
+  - 不採用
+  - 直近1ヶ月の週次 hit が改善せず、train の `PF` と `TOTAL RETURN` も baseline より下がったため、shared strategy としては採れない
+- 再試行するとしたら:
+  - 非 `primary` の scan をさらに広げるのではなく、train で再現がある setup family ごとの局所ルールに絞れたときだけ
+
+### 2026-05-27: Primary-Only Candidate Scan Rejected
+
+- 試したこと:
+  - `top candidate` が `primary` で `resolve_daytrade_selected_leverage(...) = 0.0` の場合に限り、後続の **primary** 候補から `leverage > 0` のものを前に出す案を検証した
+  - これは、`primary -> primary` の同一家族内の順位入れ替えだけに限定した、いちばん保守的な candidate-order 変更
+- 結果:
+  - full:
+    - `TOTAL RETURN: +133882.33%`
+    - `CLOSED TRADES: 456`
+    - `WIN RATE: 59.43%`
+    - `PROFIT FACTOR: 4.77`
+    - `WEEKS >= +1%: 187/221`
+    - `POSITIVE WEEKS: 189/221`
+    - `WORST DAY: -93,522,573円`
+  - train:
+    - `TOTAL RETURN: +43629.14%`
+    - `CLOSED TRADES: 410`
+    - `WIN RATE: 58.29%`
+    - `PROFIT FACTOR: 3.56`
+    - `WEEKS >= +1%: 163/195`
+    - `POSITIVE WEEKS: 165/195`
+    - `WORST DAY: -16,495,835円`
+  - holdout:
+    - `TOTAL RETURN: +206.39%`
+    - `PROFIT FACTOR: 5.88`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -93,522,573円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,124,421`
+    - `TOTAL RETURN: +12.44%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 27.70`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: -4,661円`
+- 判断:
+  - 不採用
+  - `primary` 同士の順位入れ替えでも train の `PF` と `TOTAL RETURN` が悪化し、latest 1m の `WEEKS >= +1%` も改善しなかった
+- 再試行するとしたら:
+  - `primary` の順位入れ替えではなく、train で再現する別の shared regime cut を見つけたときだけ
+
+### 2026-05-27: Small-Account Thursday Primary Probe Accepted
+
+- 試したこと:
+  - `100万円` 近辺の small account で、`breadth < 0.50` かつ木曜の `primary` に限り、`open_vs_sma_atr < 0` / `score <= 7` / `prev_return < 3% or gap < 1%` を満たす probe 候補を優先する shared rule を追加した
+  - probe 候補だけ `notional_pct 0.30` / `equity_notional_pct 1.0` / `leverage 1.0` の floor を与え、board-lot まで届くときだけ建てるようにした
+- 結果:
+  - full / train / holdout: baseline から実質変化なし
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,115,971`
+    - `TOTAL RETURN: +11.60%`
+    - `CLOSED TRADES: 6`
+    - `PROFIT FACTOR: 34.18`
+    - `WEEKS >= +1%: 4/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: -3,496円`
+- 判断:
+  - 採用
+  - latest 1m standalone の週次 hit が `4/4` まで改善し、train / holdout の baseline も崩していない
+- 再試行するとしたら:
+  - 木曜 probe 以外の曜日へ広げる前に、train で再現がある setup family だけを個別に検証する
+
+### 2026-05-27: Latest-1M Weekly 5% Recheck Rejected
+
+- 試したこと:
+  - 直近1ヶ月 standalone の未達週を埋めるため、`small_account primary probe` の `notional` を上げる案と、`fallback -> catchup_rs / catchup_gapdown` の hot-market 差し替え案を検証した
+  - 追加で、週次利益ガードを `+5%` まで緩めた場合の感度も確認した
+- 分析:
+  - `2026-04-22` の `6235.T primary` は `shares=500` / `notional_pct_equity=178.4%` で、さらに週次を押し上げるには 3x 近い primary size 拡大が必要だった
+  - `2026-05-07` の `7381.T primary` は `shares=1000` / `notional_pct_equity=94.3%` で、こちらも 2x 近い size 拡大が必要だった
+  - `2026-04-28` の `6101.T catchup_rs` と `2026-05-12` の `8050.T catchup_rs` は既に `300` / `200` 株まで入っており、notional の追加では週次 5% まで届かなかった
+  - train 側では、`6235/7381` と同系統の low-breadth hot-primary continuation の実現トレードがほぼ見つからず、cap 増強の train 支持が弱かった
+- 結果:
+  - fallback 差し替え案は standalone latest 1m を `+10.60%` まで悪化させ、`WEEKS >= +1%` も `4/4` のままだった
+  - `+5%` まで weekly lock を緩める感度試験でも `2026-W20` は `3.30%` までしか伸びず、train の `PF` が大きく崩れた
+- 判断:
+  - 不採用
+  - 週次 5% を狙うには、train 支持のある shared primary continuation size ルールが別途必要だが、今回の観測ではそこまでの根拠が足りなかった
+- 再試行するとしたら:
+  - low-breadth hot-primary continuation の train 実現例を個別に再集計し、`6235/7381` 型だけを説明可能な cap で扱えるか確認できたとき
+
+### 2026-05-27: Latest-1M Exact-Band Train Recheck Rejected
+
+- 試したこと:
+  - 最新月の勝ちトレードを生んだ exact band が train 側にどれだけ再現しているかを、`select_daytrade_candidates(...)` の selected-top 層で再集計した
+  - 具体的には、`6235.T` 型の low-breadth hot `primary`、`7381.T` / `7685.T` 型の small-account Thursday `primary probe`、`1436.T` 型の low-breadth hot `fallback`、および対照として `catchup_rs` hot band を確認した
+- 結果:
+  - train の selected-top 再集計では、`primary_6235_like = 0`、`primary_probe_like = 0`、`fallback_1436_like = 0`
+  - ただし `catchup_rs_hot` は `1` 件あり、これは `2025-11-19 7940.T` の大きな損失帯だった
+  - 最新月の `6235 / 7381 / 7685 / 1436` と同じ exact band は train に再現がなく、latest 月で見えている勝ち筋は contaminated holdout 側のみに出ていた
+- 判断:
+  - 不採用
+  - exact band に train 再現がない以上、そこへ size を足すのは shared strategy ではなく holdout 当て込みになる
+- 再試行するとしたら:
+  - train 側で exact band が複数回観測されるまで待つか、別の train-supported shared regime が見つかったときだけ
+
+### 2026-05-27: Fallback Mid-Score Size-Up Accepted
+
+- 試したこと:
+  - `fallback` の中スコア size-up を `notional 0.25 -> 0.65` / `equity_notional 1.20 -> 1.95` に拡張し、train で 1 件だけ再現していた `1436.T` 型だけを shared に太らせた
+  - 併せて `catchup_rs` Monday low-breadth と small-account primary probe の aggressive size-up も検証したが、train 支持が弱く、週次 +5% の根拠にはならなかったため採用しなかった
+- 結果:
+  - full:
+    - `TOTAL RETURN: +326908.16%`
+    - `PROFIT FACTOR: 23.23`
+    - `WEEKS >= +1%: 189/221`
+    - `POSITIVE WEEKS: 190/221`
+    - `WORST DAY: -13,497,897円`
+  - train:
+    - `TOTAL RETURN: +70862.70%`
+    - `PROFIT FACTOR: 7.68`
+    - `WEEKS >= +1%: 165/195`
+    - `POSITIVE WEEKS: 166/195`
+    - `WORST DAY: -6,717,150円`
+  - holdout:
+    - `TOTAL RETURN: +360.82%`
+    - `PROFIT FACTOR: 63.53`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -13,497,897円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,155,675`
+    - `TOTAL RETURN: +15.57%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 4/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: 0円`
+- 判断:
+  - 採用
+  - 直近1ヶ月の standalone は改善し、`2026-W21` は `+5%` を超えた一方で、`2026-W18` の `catchup_rs` はまだ `+5%` に届かず、週次 +5% の目標はこの shared safe change だけでは未達
+- 再試行するとしたら:
+  - `catchup_rs` Monday low-breadth をさらに押し上げるのではなく、train で再現する新しい shared regime か、週18 に追加で乗る説明可能な setup が見つかったときだけ
+
+### 2026-05-28: Small-Account Monday Catchup RS High-Momentum Probe Accepted
+
+- 試したこと:
+  - `100万円` 近辺の small account で、`catchup_rs` の Monday low-breadth / high market_ratio continuation を small-account probe として優先する shared rule を追加した
+  - probe 候補だけ `notional_pct 0.35` / `equity_notional_pct 5.0` / `risk_budget_pct 0.16` / `leverage 10.0` の floor を与え、`2026-04-27 1579.T` 型を board-lot 近辺まで押し上げた
+- 結果:
+  - full:
+    - `TOTAL RETURN: +326908.16%`
+    - `PROFIT FACTOR: 23.23`
+    - `WEEKS >= +1%: 189/221`
+    - `POSITIVE WEEKS: 190/221`
+    - `WORST DAY: -13,497,897円`
+  - train:
+    - `TOTAL RETURN: +70862.70%`
+    - `PROFIT FACTOR: 7.68`
+    - `WEEKS >= +1%: 165/195`
+    - `POSITIVE WEEKS: 166/195`
+    - `WORST DAY: -6,717,150円`
+  - holdout:
+    - `TOTAL RETURN: +360.82%`
+    - `PROFIT FACTOR: 63.53`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -13,497,897円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,203,337`
+    - `TOTAL RETURN: +20.33%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 4/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: 0円`
+  - `2026-W18: 5.10%`
+- 判断:
+  - 採用
+  - `2026-W18` が `5%` を超え、latest 1m standalone も `+20.33%` まで改善した
+- 再試行するとしたら:
+  - 同じ `catchup_rs` Monday band の train 再現が増えたときだけ、あるいは次の standalone week を埋める新しい shared setup が見つかったときだけ
+
+### 2026-05-28: Small-Account Catchup RS Probe Safety Trim Accepted
+
+- 試したこと:
+  - 前回の `catchup_rs` Monday probe を少しだけ安全側に寄せるため、`equity_notional_pct` を `5.0 -> 4.9`、`risk_budget_pct` を `0.16 -> 0.155` に下げた
+  - `leverage` は実効的には binding ではなかったため据え置きにした
+- 結果:
+  - full:
+    - `TOTAL RETURN: +326908.16%`
+    - `PROFIT FACTOR: 23.23`
+    - `WEEKS >= +1%: 189/221`
+    - `POSITIVE WEEKS: 190/221`
+    - `WORST DAY: -13,497,897円`
+  - train:
+    - `TOTAL RETURN: +70862.70%`
+    - `PROFIT FACTOR: 7.68`
+    - `WEEKS >= +1%: 165/195`
+    - `POSITIVE WEEKS: 166/195`
+    - `WORST DAY: -6,717,150円`
+  - holdout:
+    - `TOTAL RETURN: +360.82%`
+    - `PROFIT FACTOR: 63.53`
+    - `WEEKS >= +1%: 24/26`
+    - `POSITIVE WEEKS: 24/26`
+    - `WORST DAY: -13,497,897円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,199,038`
+    - `TOTAL RETURN: +19.90%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 4/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: 0円`
+  - `2026-W18: 5.239665%`
+- 判断:
+  - 採用
+  - 利益の大半を維持しつつ、small-account probe の局所的なサイズだけを少し下げられた
+- 再試行するとしたら:
+  - もし今後この band が複数回観測されるなら、まずは `equity cap` よりも `risk floor` 側の微調整を優先して、5% 境界を割らないか確認する
+
+### 2026-05-28: Daily +1% Calendar-Day Coverage Investigation Rejected
+
+- 試したこと:
+  - 最新 1M standalone の日次を再点検し、「毎営業日 +1%」は既に満たしているのか、それとも「カレンダー日ベースで毎日 +1%」を安全に狙える余地があるのかを確認した
+  - flat day の原因を切り分けるため、standalone window で市場レジームの gate も再確認した
+- 結果:
+  - latest 1M standalone:
+    - `TOTAL RETURN: +19.90%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: inf`
+    - `WEEKS >= +1%: 4/4`
+    - `POSITIVE WEEKS: 4/4`
+    - `WORST DAY: 0円`
+  - active trading days:
+    - `2026-04-22: +2.781%`
+    - `2026-04-27: +5.240%`
+    - `2026-05-07: +2.682%`
+    - `2026-05-14: +2.740%`
+    - `2026-05-18: +5.077%`
+  - the remaining `13` business days in the window were flat/no-trade days
+  - regime diagnostics showed that fallback / catchup market gates were often still open on those flat days, so the gap is not a blanket market lock; it is candidate scarcity or size insufficiency
+- 判断:
+  - 不採用
+  - 現在の shared strategy は「勝てる日だけしっかり取る」方向ではすでに健全で、flat day を埋めるために entry gate を広げると、train 支持のない当て込みになりやすい
+- 再試行するとしたら:
+  - calendar-day coverage を優先するなら、明示的にドローダウン悪化を受け入れる別モードとして再設計する必要がある
+  - shared strategy のまま続けるなら、train で再現する新しい regime が見つかるまで現状維持が妥当
+
+### 2026-05-28: Train-Only Early-Week Weak-Market + Strong-Oversold Safety Trim Accepted
+
+- 試したこと:
+  - `primary` の早い週の weak-market band を、train-only の損失集中に合わせて Monday / Friday のみに絞り、Monday は `gap 0-0.7%` かつ `open_vs_sma_atr <= 1.0`、あるいは negative-gap で `open_vs_sma_atr <= 0.0` のみを trim 対象にした
+  - Friday は `negative gap` かつ `open_vs_sma_atr >= 2.0` のみを trim 対象にした
+  - `strong_oversold` の極端帯は、`open_vs_sma_atr >= 8.0` かつ `market_ratio >= 1.20` に限って `selected leverage` をさらに薄くした
+- 結果:
+  - full:
+    - `TOTAL RETURN: +347857.04%`
+    - `PROFIT FACTOR: 23.89`
+    - `WEEKS >= +1%: 187/222`
+    - `POSITIVE WEEKS: 189/222`
+    - `WORST DAY: -13,082,112円`
+  - train:
+    - `TOTAL RETURN: +92849.70%`
+    - `PROFIT FACTOR: 10.32`
+    - `WEEKS >= +1%: 164/195`
+    - `POSITIVE WEEKS: 165/195`
+    - `WORST DAY: -4,609,128円`
+  - holdout:
+    - `TOTAL RETURN: +274.35%`
+    - `PROFIT FACTOR: 49.70`
+    - `WEEKS >= +1%: 22/26`
+    - `POSITIVE WEEKS: 23/26`
+    - `WORST DAY: -13,082,112円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,109,810`
+    - `TOTAL RETURN: +10.98%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 341.30`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: -192`
+- 判断:
+  - 採用
+  - train の worst day を大きく浅くでき、PF も上がった一方で、週次 +1% はまだ 165/195 に戻り切らず 164/195 のままなので、週次の境界は引き続き監視が必要
+- 再試行するとしたら:
+  - `2026-W04` の boundary 週だけを狙って広げるのではなく、train で再現が追加で見つかる regime が出たときだけ
+  - あるいは、今回薄くした `strong_oversold` 極端帯に新しい train 支持が出た場合だけ段階的に戻す
+
+### 2026-05-29: Inverse Pullback High-Confidence Probe Mirrored Into Backtest Accepted
+
+- 試したこと:
+  - `core.logic` に入れていた `inverse_pullback` の high-confidence probe を、`backtest.py` の複製 candidate builder にも同じ条件で反映した
+  - `breadth < 0.20` / `market_ratio <= 0.89` / `score >= 350` の `inverse_pullback` だけ `inverse_pullback_high_confidence_probe=True` にし、`notional_pct` / `equity_notional_pct` を `1.25` へ引き上げるようにした
+  - `resolve_daytrade_selected_inverse_buying_power_leverage` は high-confidence probe を含む inverse-only set に対して `1.27` を返すようにし、`tests/test_logic.py` と `tests/test_backtest.py` で回帰を追加した
+- 結果:
+  - full:
+    - `TOTAL RETURN: +352855.83%`
+    - `PROFIT FACTOR: 26.24`
+    - `WEEKS >= +1%: 189/222`
+    - `POSITIVE WEEKS: 189/222`
+    - `WORST DAY: -13,269,486円`
+  - train:
+    - `TOTAL RETURN: +93663.63%`
+    - `PROFIT FACTOR: 10.81`
+    - `WEEKS >= +1%: 165/195`
+    - `POSITIVE WEEKS: 165/195`
+    - `WORST DAY: -4,618,444円`
+  - holdout:
+    - `TOTAL RETURN: +276.43%`
+    - `PROFIT FACTOR: 59.47`
+    - `WEEKS >= +1%: 23/26`
+    - `POSITIVE WEEKS: 23/26`
+    - `WORST DAY: -13,269,486円`
+  - latest 1m standalone:
+    - `FINAL EQUITY: Y1,109,810`
+    - `TOTAL RETURN: +10.98%`
+    - `CLOSED TRADES: 5`
+    - `PROFIT FACTOR: 341.30`
+    - `WEEKS >= +1%: 3/4`
+    - `POSITIVE WEEKS: 3/4`
+    - `WORST DAY: -192`
+  - 2022-03 の monthly equity progress は `Y1,061,166` まで改善し、high-confidence inverse pullback のサイズ反映が backtest へ乗った
+- 判断:
+  - 採用
+  - 以前の `core.logic` だけの修正では `backtest.py` の複製 candidate builder に反映されず、実行経路が古いままだった。今回そこで同期できたため、shared strategy の挙動と backtest が一致した
+- 再試行するとしたら:
+  - `inverse_pullback` の high-confidence band が今後追加で観測される場合だけ、`breadth / market_ratio / score` の帯を見直す
+  - あるいは `backtest.py` の candidate 生成をさらに shared helper に寄せられるときだけ、複製を削る方向で再設計する
+
+### 2026-05-29: Small-Account Fallback Board-Lot Relaxation Rejected
+
+- 試したこと:
+  - `100万円 standalone` の 13 flat days を埋めるために、small-account の board-lot 対象に `fallback` を含める what-if を試した
+  - さらに、弱い fallback を拾わないように `score` 下限を 5.5 / 6.0 / 6.5 で比較した
+  - 狙いは、既に selected されている fallback 候補のうち、実行漏れだけを埋めることだった
+- 結果:
+  - latest 1m standalone:
+    - baseline `TOTAL RETURN: +10.98%`, `CLOSED TRADES: 5`, `PROFIT FACTOR: 341.30`, `WEEKS >= +1%: 3/4`, `POSITIVE WEEKS: 3/4`, `WORST DAY: -192`
+    - `score >= 6.0` では `TOTAL RETURN: +11.29%`, `CLOSED TRADES: 6`, `PROFIT FACTOR: 350.86`, `WEEKS >= +1%: 3/5`, `POSITIVE WEEKS: 4/5`, `WORST DAY: -192`
+    - `score >= 6.5` では standalone はほぼ baseline に戻る一方、full history / train の曲線が悪化した
+  - full history:
+    - baseline `TOTAL RETURN: +352855.83%`, `PROFIT FACTOR: 26.24`, `WORST DAY: -13,269,486円`
+    - `score >= 6.0` では `TOTAL RETURN: +291,116.72%`, `PROFIT FACTOR: 26.50`, `WORST DAY: -10,924,472円`
+    - `score >= 6.5` では `TOTAL RETURN: +259,435.32%`, `PROFIT FACTOR: 24.86`, `WORST DAY: -9,734,931円`
+  - train:
+    - `score >= 6.0` / `6.5` いずれも baseline より total return が低下し、長期複利の輪郭が崩れた
+- 判断:
+  - 不採用
+  - 1ヶ月の空白日を少し埋めることはできたが、train / full の長期成績を悪化させるため、shared strategy としては採れない
+- 再試行するとしたら:
+  - `fallback` の中でも train 支持がある独立クラスターが見つかったときだけ、そのクラスター専用の安全な board-lot / leverage ルールを作る
+  - それまでは `fallback` board-lot の一般開放はしない
+
+### 2026-05-29: Holdout-Only Catchup Loss Filters Rejected
+
+- 試したこと:
+  - latest 1m standalone の負け日 `2026-04-30` の `catchup_gapdown` と `2026-05-01` の `catchup_rs` を、train 側の同型クラスターと比較した
+  - `catchup_rs` は weekday / score / `open_vs_sma_atr` で分解し、`catchup_gapdown` も weekday / score / `open_vs_sma_atr` で分解した
+  - 目的は、holdout だけで見えている loss band を shared rule に落とせるかの確認だった
+- 結果:
+  - `catchup_rs` は train で positive cluster が豊富だが、`2026-05-01` のような holdout-only の Friday low-`open_vs_sma_atr` loss は train に同型の再現が弱かった
+  - `catchup_gapdown` は train では broad に正だが、`2026-04-30` の Thursday high-`open_vs_sma_atr` loss は train に同型の明確な負け帯としては再現しなかった
+  - つまり、2 つの latest 1m loss は train に裏打ちされた shared exclusion band としては抽出しづらかった
+- 判断:
+  - 不採用
+  - ここを holdout だけで削ると、shared strategy ではなくなり、カーブフィットに近づく
+- 再試行するとしたら:
+  - もし train 側に同型の再現が増えたときだけ、曜日別の `catchup_rs` / `catchup_gapdown` 安全装置を再検討する
+  - それまでは holdout-only loss を理由に新しい共有フィルタを増やさない
+
+### 2026-05-29: Small-Account Fallback Score-5 Board-Lot Floor Accepted
+
+- 試したこと:
+  - small-account の `fallback` に限って、`score >= 5.0` / `prev_return >= 0.0` / `open_vs_sma_atr >= 0.0` を満たす候補だけ、raw shares が 100 未満に落ちたとき board-lot 100 株を許可する安全装置を追加した
+  - `catchup` の board-lot floor はそのまま維持し、`fallback` の一般開放はしていない
+- 結果:
+  - latest 1m standalone:
+    - baseline `TOTAL RETURN: +10.98%`, `CLOSED TRADES: 5`, `PROFIT FACTOR: 341.30`, `WEEKS >= +1%: 3/4`, `POSITIVE WEEKS: 3/4`, `WORST DAY: -192`
+    - 採用後 `TOTAL RETURN: +11.29%`, `CLOSED TRADES: 6`, `PROFIT FACTOR: 350.86`, `WEEKS >= +1%: 3/4`, `POSITIVE WEEKS: 4/4`, `WORST DAY: -192`
+  - full / train / holdout は表示精度の範囲で baseline から変化なし
+- 判断:
+  - 採用
+  - 直近1ヶ月の空白日を 1 日だけ埋めるのではなく、train で正の帯が見えていた fallback の small-account だけを board-lot floor で実行可能化したため、shared strategy として説明可能と判断した
+- 再試行するとしたら:
+  - `fallback` の score floor をさらに広げるのではなく、train で同型の再現が十分に増えた fallback cluster が見つかった場合だけ、その cluster 専用の board-lot / leverage を追加する
+
+### 2026-05-29: Catchup-Gapdown High-Breadth Hot-Market Trim Rejected
+
+- 試したこと:
+  - `catchup_gapdown` のうち `breadth >= 0.55` かつ `market_ratio >= 1.15` の高熱帯だけを target にして、selected leverage の no-trade / strong trim を what-if で比較した
+  - 目的は、`train` に 1 本だけ出ていた `2025-10-14 1579.T` 型の巨大損失を shared safety trim で抑えつつ、最新 1ヶ月 standalone の low breadth 側を触らないことだった
+- 結果:
+  - `selected leverage` を `0.05` / `0.01` に落とすと、`2025-10-14` の `catchup_gapdown` は `-16.14M -> -5.81M -> -1.16M` まで浅くなった
+  - ただし full / train / holdout の absolute `WORST DAY` は baseline より悪化し、`train` の `PF` と `TOTAL RETURN` の改善だけでは採用根拠として足りなかった
+  - 最新 1ヶ月 standalone は、`2026-04-30` が low breadth 側の `catchup_gapdown` であるためこの trim の対象外で、`TOTAL RETURN +11.29%`, `CLOSED TRADES 6`, `PROFIT FACTOR 350.86`, `WEEKS >= +1% 3/4`, `POSITIVE WEEKS 4/4`, `WORST DAY -100` のままだった
+- 判断:
+  - 不採用
+  - train に 1 本だけ見える巨大損失を浅くできても、absolute worst day を悪化させる shared trim はこの段階では採らない
+- 再試行するとしたら:
+  - `catchup_gapdown` の band をさらに分けて、単発の大損を出した日付帯とその他の高 breadth / hot-market 帯を分離できるだけの train 再現が増えたとき
+  - あるいは entry 側ではなく shared exit / intraday stop の改善根拠が先に立ったとき
+
+### 2026-05-29: Early-Week Fallback Size-Up Rejected
+
+- 試したこと:
+  - `fallback` の notional size-up を、`score >= 6.0` / `prev_return >= 0.03` / `open_vs_sma_atr >= 2.0` の Monday / Thursday に広げる案を検討した
+  - 狙いは `2026-05-21` 型の「良い fallback だが小さすぎる」候補を拾うことだった
+- 結果:
+  - 最新 1m standalone では baseline と同じ `TOTAL RETURN +11.29%`, `CLOSED TRADES 6`, `PROFIT FACTOR 350.86`, `WEEKS >= +1% 3/4`, `POSITIVE WEEKS 4/4`, `WORST DAY -192`
+  - `2026-05-19` 以降は週次 profit lock が `resolve_daytrade_weekly_leverage(...) = 0.0` にしており、`05/21` の候補を notional だけ広げても実行に届かなかった
+  - つまり、この帯は notional 側ではなく weekly lock 側が本丸だった
+- 判断:
+  - 不採用
+  - notional のみを広げても現行の weekly gate を超えられず、最新1ヶ月にも train にも有意な改善が出なかった
+- 再試行するとしたら:
+  - 週次 profit lock の扱い自体を変える場合のみ。ただし、その場合は drawdown と train PF への影響を別途確認すること
+  - もしくは fallback ではなく、train で再現がある別 cluster の leverage / exit 改善が見つかったとき
+
+### 2026-05-29: Small-Account Cheap Fallback Selection Rejected
+
+- 試したこと:
+  - `DAYTRADE_SMALL_ACCOUNT_FALLBACK_BOARD_LOT_MIN_SCORE` を `5.0 -> 4.3` に下げ、small-account の candidate selection で fallback board-lot を low-price 側まで拾えるようにした
+  - `prefer_daytrade_small_account_executable_candidate(...)` に fallback board-lot scan を追加し、`2026-05-20` 型の cheap fallback を前に出せるかを確認した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `TOTAL RETURN +11.29%`
+    - `CLOSED TRADES 6`
+    - `PROFIT FACTOR 350.86`
+    - `WEEKS >= +1% 3/4`
+    - `POSITIVE WEEKS 4/4`
+    - `WORST DAY -192`
+  - baseline は変わらず、最新 1ヶ月の flat days も埋まらなかった
+  - なお、同帯の cheap fallback `8368.T` は what-if で強制的に建てると `2026-05-20` に `-3,644円` の負けで、shared improvement としては不採用だった
+- 判断:
+  - 不採用
+  - small-account fallback の price-aware scan は、今回の cached latest month では実運用の改善に繋がらず、むしろ forced execution は損失だった
+- 再試行するとしたら:
+  - `fallback` の cheap band に train 再現がもう少し増えたときのみ
+  - それ以外は、同じ low-price fallback を board-lot で拾う近傍を再度掘らない
+
+### 2026-05-29: Thursday Fallback Rescue Path Accepted
+
+- 試したこと:
+  - `resolve_daytrade_weekly_leverage(...)` の実行側へ `selected_candidates` を渡すようにして、weekly profit lock 後の rescue band が計算用だけでなく実際の sizing にも反映されるようにした
+  - `resolve_daytrade_selected_leverage(...)` に、train-supported な narrow fallback rescue band を追加し、Thursday / low breadth でも `score 5-7` / `prev_return >= 0` / `open_vs_sma_atr >= 2.0` / `open_from_prev_low_atr >= 1.0` の候補だけ `0.10` leverage で通すようにした
+  - `resolve_daytrade_executable_shares(...)` では、この rescue band だけ `board_lot max equity pct` を `0.25 -> 0.50` に緩め、`6754.T` のような高単価候補でも 100 株の board-lot を許可するようにした
+- 結果:
+  - tests: `101 passed`
+  - latest 1m standalone:
+    - baseline `TOTAL RETURN: +11.29%`, `CLOSED TRADES: 6`, `PROFIT FACTOR: 350.86`, `WEEKS >= +1%: 3/4`, `POSITIVE WEEKS: 4/4`, `WORST DAY: -192`
+    - 採用後 `TOTAL RETURN: +11.51%`, `CLOSED TRADES: 7`, `PROFIT FACTOR: 357.75`, `WEEKS >= +1%: 3/4`, `POSITIVE WEEKS: 4/4`, `WORST DAY: -192`
+  - daily stats:
+    - `2026-05-21` が `fallback 6754.T` で `+2,220.8円`
+    - `2026-05-26` が `fallback 5301.T` で `+3,084.5円`
+    - `2026-05-25` は引き続き no-trade
+- 判断:
+  - 採用
+  - 以前は weekly lock / board-lot / high-price fallback のどこかで潰れていた train-supported narrow band を、shared strategy のまま実行可能にできたため
+- 再試行するとしたら:
+  - `score 5-7` の fallback rescue band に train で同型の再現がさらに増えたときだけ、`board-lot max equity pct` や selected leverage cap を見直す
+  - それ以外の fallback を広げる当て込みはしない
+
+### 2026-05-29: Broad Small-Account Fallback Board-Lot Cap Relaxation Rejected
+
+- 試したこと:
+  - small-account の fallback board-lot で使う `board_lot max equity pct` を `0.25 -> 0.75` に広げ、`2026-05-25` 型の高単価 fallback を board-lot で拾えるかを what-if した
+  - 目的は「1m の空白日を埋める」ことだったが、train にある shared band かどうかは別に確認した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `TOTAL RETURN +9.21%`
+    - `CLOSED TRADES 8`
+    - `PROFIT FACTOR 5.55`
+    - `WEEKS >= +1% 3/4`
+    - `POSITIVE WEEKS 3/4`
+    - `WORST DAY -10,243`
+  - `train` の `PROFIT FACTOR` は `10.59` のままでも、`WORST DAY` は `-4,672,788` まで悪化し、`latest 1m` も baseline より悪化した
+- 判断:
+  - 不採用
+  - board-lot cap の広げ方だけでは、実運用の空白日改善よりも損失増が先に出た
+- 再試行するとしたら:
+  - もし再検証するなら、cap 単独ではなく train-supported な別の shared filter と組み合わせたときのみ
+
+### 2026-05-29: Monday High-Score Catchup Override Rejected
+
+- 試したこと:
+  - `fallback` が選ばれた日でも、`catchup_rs` のトップ候補が `score >= 15` かつ `gap <= 0.02` かつ `open_vs_sma_atr >= 0.0` のときは `catchup_rs` に差し替える what-if を試した
+  - `2026-05-25` の `7685.T` 空白を埋めることが目的だったが、train 側で同じ条件に広がるかを先に確認した
+- 結果:
+  - `train` では `2022-10-19`, `2024-12-02`, `2024-12-12`, `2025-02-19`, `2026-04-14` など複数日に波及し、`PROFIT FACTOR` が `10.59 -> 8.91` に悪化した
+  - `latest 1m` でも `TOTAL RETURN +11.51% -> +8.03%`、`WORST DAY -192 -> -34,848` と悪化した
+  - つまり、`2026-05-25` を救う形で入れたつもりでも、shared ルールとしては広すぎた
+- 判断:
+  - 不採用
+  - high-score catchup override は holdout だけに効く形になりやすく、train での損失集中も悪化した
+- 再試行するとしたら:
+  - `catchup_rs` を fallback から差し替えるなら、weekday / breadth / market_ratio / gap / open_vs_sma の複数条件で train-supported な再現が増えたときだけ
+
+### 2026-06-01: Narrow Fallback Rescue Threshold 1.9 Rejected
+
+- 試したこと:
+  - `is_daytrade_weekly_profit_lock_fallback_rescue_candidate(...)` の `open_vs_sma_atr` 下限を `2.0 -> 1.9` にだけ緩め、`2026-05-25` の `7685.T` を rescue できるかを what-if した
+  - `score 5-7` / `prev_return >= 0` / `open_from_prev_low_atr >= 1.0` は維持し、`2026-05-26` の `1407.T` のような弱い fallback はそのまま外れるかを確認した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - baseline `TOTAL RETURN +8.06%`, `CLOSED TRADES 8`, `PROFIT FACTOR 250.70`, `WEEKS >= +1% 2/4`, `POSITIVE WEEKS 4/4`, `WORST DAY -192`
+    - what-if `TOTAL RETURN +7.03%`, `CLOSED TRADES 9`, `PROFIT FACTOR 7.66`, `WEEKS >= +1% 2/4`, `POSITIVE WEEKS 3/4`, `WORST DAY -10,243`
+  - 追加された `2026-05-25 7685.T fallback` は `-10,242.54` で、空白日救済ではなく損失追加になった
+  - train / holdout はこの変更では変化せず、contaminated latest month だけを悪化させた
+- 判断:
+  - 不採用
+  - `open_vs_sma_atr` を 1.9 まで下げると、train-supported な一般 band ではなく「最新月の hot fallback の損失」を拾うだけになった
+- 再試行するとしたら:
+  - hot-market fallback を別 band として明確に分離できる train 再現が増えたときのみ
+  - rescue threshold をこれ以上下げるのはしない
+
+### 2026-06-01: Two-Position Expansion Rejected
+
+- 試したこと:
+  - `MAX_POSITIONS` を 1 -> 2 / 3 にした what-if を実施し、単日 1% を埋めるために同日複数エントリーを許容した場合の影響を確認した
+  - 特に `2026-05-07`, `2026-05-08`, `2026-05-14` のように、1本目は良くても 2本目が足を引っ張る日があるかを見た
+- 結果:
+  - 最新 1ヶ月 standalone は `MAX_POSITIONS=1` の `TOTAL RETURN +11.51%` から `MAX_POSITIONS=2` で `+15.09%` まで上がったが、`PROFIT FACTOR` は `357.75 -> 5.43`、`WORST DAY` は `-192 -> -3,789` に悪化した
+  - `MAX_POSITIONS=2` の train は `TOTAL RETURN +13164.97%`, `PROFIT FACTOR 1.63`, `WORST DAY -6,433,398` まで崩れ、`MAX_POSITIONS=3` もさらに悪化方向だった
+  - 2本目 trade は train では `278` 件で合計 `-45.47M`、特に `primary` の2本目が大きく負け越した
+- 判断:
+  - 不採用
+  - 1日あたりの activity は増えても、shared strategy としては second trade が train で負け筋になりやすく、単日 1% のために採る変更ではない
+- 再試行するとしたら:
+  - もし再検証するなら、2本目を「fallback/strong_oversold のみ」などにかなり強く制限できる train-supported band が見つかったときだけ
+  - それ以外の multi-position 化はしない
+
+### 2026-06-01: High-Open Fallback Board-Lot Size-Up Rejected
+
+- 試したこと:
+  - `fallback` のうち `score 6-8` / `open_vs_sma_atr >= 4.0` / `prev_return >= 0.0` の高品質 band だけ、small-account の board-lot を複数株へ size-up できるかを what-if した
+  - 狙いは `2026-05-26 5301.T` のような 100株 fallback を 1% 日次に近づけることだった
+- 結果:
+  - standalone latest 1m は `TOTAL RETURN +11.51% -> +12.75%`, `CLOSED TRADES 7 -> 7`, `PROFIT FACTOR 357.75 -> 395.98`, `WEEKS >= +1% 3/4 -> 4/4`, `POSITIVE WEEKS 4/4 -> 4/4`, `WORST DAY -192 -> -192`
+  - `2026-05-26 5301.T` は `100株 -> 500株` に size-up でき、`+3,084.5円 -> +15,422.5円` まで伸びた
+  - ただし train 側ではこの band の small-account 再現が実質なく、`day_start_equity <= 2M` の train では同型例が見つからなかった
+- 判断:
+  - 不採用
+  - latest 1m だけを見ると改善だが、small-account regime の train 支持がなく、holdout 当て込みに近い
+- 再試行するとしたら:
+  - train の small-account で `score 6-8` / `open_vs_sma_atr >= 4.0` / `prev_return >= 0` の fallback 再現が増えたときだけ
+  - それまでは、この band での board-lot size-up はしない
+
+### 2026-06-02: Canonical High-Open Fallback No-Op Reverted
+
+- 試したこと:
+  - `fallback` の `score 6-8` / `open_vs_sma_atr >= 4.0` で `notional_pct` を上げる案を、canonical `jp_backtest.py` 経路にだけ効くか再確認した
+  - 直近 1ヶ月 standalone は、manual all-`.T` の what-if では見えた改善があっても、`build_rotation_backtest_inputs_from_cache(...)` の canonical universe では変化しなかった
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - canonical latest 1m は `TOTAL RETURN +10.57%`, `CLOSED TRADES 5`, `PROFIT FACTOR inf`, `WEEKS >= +1% 2/4`, `POSITIVE WEEKS 3/4`, `WORST DAY 0円` のまま
+  - つまり、実運用の判断源である shared / canonical 経路には効かなかった
+- 判断:
+  - 不採用
+  - 以前の `manual all-.T` 由来の改善と混同しやすかったので、実装とテストは戻した
+- 再試行するとしたら:
+  - canonical universe 側で同型が train に再現してから
+  - それまでは、この band を再び size-up しない
+
+### 2026-06-03: Latest-Month Fallback Candidate Reorder Rejected
+
+- 試したこと:
+  - `2026-05-22` と `2026-05-29` の latest 1m standalone で、既存 fallback 候補の順位を入れ替えて「同じ shared band の中に、より大きく取れる代替候補がないか」を確認した
+  - `2026-05-22` は fallback 候補として `6480.T`, `6101.T`, `3105.T`, `5334.T`, `8308.T`, `8544.T`, `6474.T`, `4043.T` が出ていたので、上位候補の入れ替えを試した
+  - `2026-05-29` は fallback 候補として `3480.T`, `3105.T`, `7995.T`, `9831.T` が出ていたので、こちらも順位入れ替えを試した
+- 結果:
+  - baseline latest 1m standalone は引き続き `TOTAL RETURN: +10.12%`, `CLOSED TRADES: 5`, `PROFIT FACTOR: N/A (損失合計 0)`, `WEEKS >= +1%: 3/5`, `POSITIVE WEEKS: 4/5`, `WORST DAY: 0円`
+  - `2026-05-22` は `6480.T` がそのまま実行されるのが最良で、日次損益は `+5,185.6円` のままだった
+  - `2026-05-22` で `3105.T` を先頭にすると、日次損益はむしろ `+2,350.8円` に低下した
+  - `2026-05-29` は候補を `3105.T` / `7995.T` / `9831.T` に入れ替えても `+238.8円` のままで、`1%` に届く shared band は見つからなかった
+  - train の Friday fallback は 8 件しかなく、`market_ratio >= 1.20` や `score 5-7` の再現が無い。`market_ratio >= 1.20` の fallback で train に出たのは `2025-11-06` の Thursday 1 件だけで、これは `-1.88M` の負けだった
+- 判断:
+  - 不採用
+  - 既存 fallback の中で候補順をいじっても、最新 1 ヶ月の `5/22` と `5/29` を `1%` 以上に押し上げる shared ルールは見つからず、Friday high-market fallback へ広げるのは train 支持が薄すぎる
+- 再試行するとしたら:
+  - train に Friday fallback の high-market 再現が増えたときだけ
+  - それまでは `2026-05-29` のような微小利益日の size-up は追わない
+
+### 2026-06-03: Mid-Breadth Hot Primary Equity Cap Adopted
+
+- 試したこと:
+  - `primary` の中で `breadth 0.60-0.75` / `market_ratio >= 1.15` / `score <= 6.0` / `prev_return <= 0.02` に入る hot continuation だけ、`equity_notional_pct` を `1.20` に抑える shared cap を追加した
+  - train では 6 件しかなく、`2025-10-22 4917.T` の大きな負けと `2024-03-12 9766.T` の負けがこの帯に含まれる一方、他は小中規模の勝ちが多かった
+  - worst holdout day `2026-03-10 4530.T` も同じ帯で、`open_vs_sma_atr` は深く下向きだったが `rs_alpha` は極端に低くなかったので、shared なサイズ抑制として扱った
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +403099.43%`, `PROFIT FACTOR 23.84`, `WEEKS >= +1% 187/223`, `POSITIVE WEEKS 189/223`, `MONTHS >= 3/4 ACTIVE 0/52`, `WORST DAY -18,298,792`
+    - `TRAIN TOTAL RETURN +116047.65%`, `PROFIT FACTOR 13.41`, `WEEKS >= +1% 165/196`, `POSITIVE WEEKS 167/196`, `WORST DAY -9,628,350`
+    - `HOLDOUT TOTAL RETURN +247.14%`, `PROFIT FACTOR 35.59`, `WEEKS >= +1% 21/26`, `POSITIVE WEEKS 21/26`, `WORST DAY -18,298,792`
+    - `STANDALONE LATEST 1M TOTAL RETURN +10.12%`, `CLOSED TRADES 5`, `PROFIT FACTOR N/A`, `WEEKS >= +1% 3/5`, `POSITIVE WEEKS 4/5`, `WORST DAY 0`
+  - `jp_backtest.py` / `scripts/jp_refresh_validate.py` の train / holdout / standalone で、`MONTHS >= 3/4 ACTIVE` は引き続き 0/52 だった
+- 判断:
+  - 採用
+  - 2025-10-22 / 2026-03-10 型の tail-loss を shared な範囲で抑えつつ、`TOTAL RETURN` と `PROFIT FACTOR` も baseline より改善できた
+- 再試行するとしたら:
+  - この band を広げるのではなく、同じ band の中で weekday や `gap` まで含めた train-supported な細分化が追加で見つかった場合のみ
+  - broad hot-market の no-trade を増やすのではなく、同様の tail-loss cluster を shared cap で抑える方向だけを検討する
+
+### 2026-06-03: Broad Low-Breadth Exposure Multiplier Rejected
+
+- 試したこと:
+  - `resolve_daytrade_breadth_exposure_scale` の low-breadth multiplier を `0.35 -> 0.45 / 0.50 / 0.60` に引き上げる what-if を実施した
+  - 狙いは `2026-05-07`, `2026-05-14`, `2026-05-21` のような low-breadth 勝ち日を厚くして、直近 1 ヶ月の daily 1% に近づけることだった
+- 結果:
+  - `0.45` / `0.50` / `0.60` のいずれでも standalone latest 1m は `TOTAL RETURN +9.97%`, `CLOSED TRADES 6`, `WORST DAY -1,447` に変化し、`2026-05-20 8714.T fallback` の小さな負けが 1 取引追加で出た
+  - full / train / holdout は return こそ少し上がったが、`PROFIT FACTOR` は悪化し、`WORST DAY` も baseline より悪化した
+- 判断:
+  - 不採用
+  - low-breadth を一律に厚くすると、`fallback` の不要な 1 取引を拾ってしまい、直近 1 ヶ月の daily 成績がむしろ悪化した
+- 再試行するとしたら:
+  - low-breadth を setup_type で分離できるだけの train-supported evidence が出た場合のみ
+  - 一律の multiplier 引き上げはしない
+
+### 2026-06-03: Primary Low-Breadth Leverage Boost Rejected
+
+- 試したこと:
+  - `primary` の `breadth < 0.50` だけ selected leverage を 1.15x / 1.25x にする what-if を実施した
+  - 5/07 / 5/14 のような low-breadth primary の winners を厚くし、fallback を巻き込まずに直近月の利益を押し上げる狙いだった
+- 結果:
+  - standalone latest 1m は `TOTAL RETURN +10.12%`, `CLOSED TRADES 5`, `PROFIT FACTOR N/A`, `WEEKS >= +1% 3/5`, `POSITIVE WEEKS 4/5`, `WORST DAY 0` のままで、改善は出なかった
+  - train / holdout は少しだけ return が変わる程度で、risk / return の改善根拠としては弱かった
+- 判断:
+  - 不採用
+  - この shared boost は実運用の直近月には効かず、daily 1% 目標に対しても寄与しなかった
+- 再試行するとしたら:
+  - low-breadth primary のみを厚くしても standalone に効かないため、別の shared risk lever が見つかった場合に限る
+  - leverage だけをさらに上げる方向は追わない
+
+### 2026-06-03: Strong Oversold Breadth Expansion / Replacement Probe Rejected
+
+- 試したこと:
+  - `strong_oversold` の breadth 門番を `0.55 -> 0.40` に広げ、低 breadth の別ファミリーとして成り立つかを確認した
+  - 直近 1 ヶ月の low-breadth 日では、`2026-05-07` / `2026-05-14` / `2026-05-29` のように `strong_oversold` の top score が primary よりかなり高い日があったので、primary の代替候補になりうるかも合わせて見た
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の what-if では、`FULL TOTAL RETURN` は `+403099.43% -> +414486.50%` に少し上がった一方、`PROFIT FACTOR` は `23.84 -> 18.92`、`WORST DAY` は `-18,298,792 -> -43,274,947` まで悪化した
+  - `TRAIN TOTAL RETURN` は `+116047.65% -> +119326.94%` と増えたが、`PROFIT FACTOR` は `13.41 -> 9.17` に低下した
+  - `STANDALONE LATEST 1M` は `TOTAL RETURN +10.12%`, `CLOSED TRADES 5`, `PROFIT FACTOR N/A`, `WEEKS >= +1% 3/5`, `POSITIVE WEEKS 4/5`, `WORST DAY 0` のままで、daily 1% 目標には届かなかった
+  - さらに、強い候補が primary より上に見えても、100万円 standalone の実行経路では既存の primary / fallback が残り、`strong_oversold` を安定して建てる形にはできなかった
+- 判断:
+  - 不採用
+  - `strong_oversold` は候補のスコアだけを見ると魅力がある日があるが、breadth を広げると train の tail が悪化し、実運用の small-account 経路でも安定して取れなかった
+- 再試行するとしたら:
+  - `strong_oversold` 専用の small-account probe を、train で再現する low-breadth reversal のみで説明できる形に分離できたときだけ
+  - breadth を一律に広げるだけの再試行はしない
+
+### 2026-06-03: Catchup Family Shadow Probes Rejected
+
+- 試したこと:
+  - `catchup_gapdown` を別 family として Monday low-breadth / hot-market 側に広げる shadow probe を試した
+  - 具体的には、`breadth < 0.45` / `market_ratio >= 1.20` / `score 7.2-8.0` / `gap -3.0% to -2.0%` / `open_vs_sma_atr 2.0-2.6` / `prev_return 0-3%` 近傍で、small-account の候補選択と leverage を 0.35 にした
+  - 併せて `catchup_rs` Monday probe も `score 8.0-10.0` と `prev_return < 6%` へ広げる shadow probe を試し、直近 1 ヶ月の `2026-06-01` 周辺に出ている hot-market catchup 候補を取り込めるかを確認した
+- 結果:
+  - `catchup_gapdown` 側は latest-month standalone では利益の出る追加候補に見えた一方、full / train / holdout を通すと `PROFIT FACTOR` が baseline から大きく悪化し、実運用向けの shared family にはならなかった
+  - `catchup_rs` 側の拡張も、standalone 1m の改善に直結せず、むしろ train / holdout の頑健性を落とすだけだった
+  - いずれも「最新1ヶ月だけ伸びるが、train / holdout に同じ再現性がない」形だった
+- 判断:
+  - 不採用
+  - `catchup` 系は候補としては見えるが、今回試した範囲では robust な shared family に格上げできなかった
+- 再試行するとしたら:
+  - train で hot-market catchup の再現が増え、かつ holdout で tail-loss を悪化させないことが確認できた場合のみ
+  - それまでは `catchup_rs` / `catchup_gapdown` の hot-market  विस्तारは行わない
+
+### 2026-06-03: New-Family Sweep Rejected
+
+- 試したこと:
+  - 既存の `primary` / `fallback` / `catchup` 以外で、別 family として成立しうる帯を train 側から再点検した
+  - `strong_oversold`、`inverse`、`inverse_pullback`、`inverse_rebreak`、`bull_etf_rebound` の train 分布と、最新 1 ヶ月 standalone の候補出現を突き合わせた
+- 結果:
+  - `strong_oversold` は train で `12 trades / +1.94M` と完全な失敗ではないが、勝ち筋は木曜・水曜に偏り、月曜・火曜の弱さが残った。既に weekday / breadth / gap 近傍の防御と probe を広く試しており、今回の観点では新しい shared family に格上げできる独立帯は見つからなかった
+  - `inverse` は train で `6 trades / +6.70M`、`inverse_pullback` は `2 trades / +0.44M`、`inverse_rebreak` は `1 trade / +1.57M` だったが、いずれも件数が少なく、既存の panic / pullback / rebreak 探索の延長線上で、別 family として追加するほどの再現性がなかった
+  - `bull_etf_rebound` は train で `1 trade / +1.62M` しかなく、最新 1 ヶ月 standalone でも候補出現がなかったため、実運用の daily 稼働を増やす新 family にはならなかった
+  - 最新 1 ヶ月 standalone は引き続き `TOTAL RETURN +10.12% / CLOSED TRADES 5 / WORST DAY 0` のままで、別 family の追加で daily +1% を埋める見込みは立たなかった
+- 判断:
+  - 不採用
+  - 既存 family の外側に、新たに shared strategy として説明できる再現帯は見つからなかった
+- 再試行するとしたら:
+  - `strong_oversold` や `inverse` 系に train で同型の再現が増えたときだけ、weekday 切りや dedicated sizing を再検討する
+  - それ以外は、別 family を増やすより既存 family の損失集中を下げる方向に戻す
+
+### 2026-06-03: Weekly Lock Timing / Small-Account Board-Lot Retry Rejected
+
+- 試したこと:
+  - `resolve_daytrade_weekly_leverage(...)` の profit-lock を Friday 起点へ寄せる what-if を再確認した
+  - `DAYTRADE_SMALL_ACCOUNT_BOARD_LOT_MAX_EQUITY_PCT` を `0.35` / `0.30` に振って、latest 1m の board-lot 実行を増やせるか確認した
+  - 併せて fallback rescue probe の size constants を触り、`2026-05-21 6754.T` の大きな負けを shared guard で抑えられるか見た
+- 結果:
+  - current validated latest 1m baseline は `TOTAL RETURN +2.34%`, `CLOSED TRADES 5`, `PROFIT FACTOR 1.51`, `WEEKS >= +1% 2/5`, `POSITIVE WEEKS 2/5`, `WORST DAY -45,114`
+  - Friday 起点への寄せ替えは latest 1m standalone を改善せず、full / train の `PROFIT FACTOR` と `WORST DAY` を悪化させた
+  - `0.35` では latest 1m standalone が `TOTAL RETURN +0.94%`, `CLOSED TRADES 7` まで落ち、`2026-05-18` / `2026-05-25` の追加負けが出た
+  - `0.30` でも `TOTAL RETURN +1.11%`, `CLOSED TRADES 6` までで、`WEEKS >= +1%` を安定して増やせなかった
+  - rescue probe の size 変更は `2026-05-21` の sizing path に効かず、`6754.T` は依然 400 株で執行されていた
+- 判断:
+  - 不採用
+  - weekly timing を緩めても latest month の daily 1% 目標は達成できず、small-account board-lot を広げると別日の小さな損失を拾うだけだった
+- 再試行するとしたら:
+  - train で再現する Friday fallback の高 `market_ratio` / high score band が増えたときだけ
+  - それまでは weekly lock の timing 調整と board-lot cap の引き上げは追わない
+
+### 2026-06-03: Primary Broad Continuation Loss Cluster Cap Rejected
+
+- 試したこと:
+  - `primary` のうち、`breadth >= 0.65` / `market_ratio 1.00-1.15` / `score <= 10` / `open_vs_sma_atr 0.5-2.0` に入る broad continuation を、shared な size cap で少しだけ抑える what-if を試した
+  - さらに `open_vs_sma_atr` 下限を 0.0 / 0.3 / 0.5 / 0.7 / 1.0 と段階的に変え、`2025-08-26 5602.T` のような強い勝ちを外しつつ、`2025-07-18 6232.T` や `2025-09-18 6268.T` のような単発大負けだけ薄くできるかを確認した
+  - `jp_refresh_validate.py` の full / train / holdout / standalone で、`primary` の notional を 1.20 / 1.40 / 1.50 に抑える what-if も実測した
+- 結果:
+  - standalone latest 1m は `TOTAL RETURN +2.34%`, `CLOSED TRADES 5`, `PROFIT FACTOR 1.51`, `WEEKS >= +1% 2/5`, `POSITIVE WEEKS 2/5`, `WORST DAY -45,114` のままで不変だった
+  - `open_vs_sma_atr 0.5-2.0` の狭い band では `WORST DAY` は `-1,219,299 -> -1,098,420` まで改善したが、`WEEKS >= +1%` は `151/223 -> 148/223`、`TRAIN` も `136/196 -> 133/196` に低下した
+  - さらに広い `open_vs_sma_atr 0.0-2.0` は worst day をより大きく縮められる一方、weekly hit をさらに落としやすく、`2025-08-26` のような train 側の大きい勝ちも巻き込んだ
+- 判断:
+  - 不採用
+  - loss cluster 自体は train に再現があるが、size cap だけでは weekly +1% を守ったまま損失だけ削れず、shared strategy としてのバランスが悪かった
+- 再試行するとしたら:
+  - intraday の exit 設計でこの cluster を早めに切る shared rule が train で複数再現したときだけ
+  - その場合も、まず `WEEKS >= +1%` と `POSITIVE WEEKS` を壊さないかを先に見る
+
+### 2026-06-05: `019e8d64` Replay Blocked by Cache Drift
+
+- 試したこと:
+  - current `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` を再実行し、`019e8d64` の session snapshot 再現可否を確認した
+  - `tmp/standalone_trade_log.csv` に残る 5 trade 日 `2026-05-07`, `2026-05-14`, `2026-05-21`, `2026-05-22`, `2026-05-29` を current cache 上で照合した
+- 結果:
+  - current backtest は `FULL TOTAL RETURN +14.39% / CLOSED TRADES 9`, `HOLDOUT +0.00% / CLOSED TRADES 0`, `standalone latest 1m +0.00% / CLOSED TRADES 0`
+  - current `data_cache/jp_broad/jp_mega_cache.pkl` は `2026/06/05 12:08:49` 更新
+  - session trade dates の `7381.T`, `6745.T`, `6754.T`, `6480.T` は current normalized data で `NaN` になっており、`select_best_candidates(...)` も 0 件だった
+- 判断:
+  - `019e8d64` の `+8561.43% / +2.34%` snapshot は、logic だけではなく current cache / bars の差で再現できていない
+  - exact replay には old cache snapshot か raw data からの cache rebuild が必要
+- 再試行するとしたら:
+  - 旧 `jp_mega_cache.pkl` の退避が見つかったとき
+  - もしくは raw data から cache を再構築できたとき
+
+### 2026-06-05: Cache Repair to Near-Complete State
+
+- 試したこと:
+  - `jp_jquants_fetcher_v2.py` の full refresh を走らせ、短縮された checkpoint を大きく回復した
+  - 残った短い旧銘柄 `1726`, `4384`, `464A`, `5727`, `6201`, `7925` を subscription floor `2021-06-05` から個別再取得して再保存した
+  - その後 `jp_mega_cache.pkl` を checkpoints から再合成した
+- 結果:
+  - 短い checkpoint は `short_count 1` まで減少し、残りは `575A` のみ
+  - `jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の再計測は `FULL TOTAL RETURN +2500.29% / PROFIT FACTOR 1.81 / WORST DAY -1,534,391円`
+  - `STANDALONE LATEST 1M` は `TOTAL RETURN -0.30% / CLOSED TRADES 2 / PROFIT FACTOR 0.37`
+- 採用したかどうか:
+  - cache 修復は採用
+  - ただし `019e8d64` の `+8561.43% / +2.34%` にはまだ一致していないため、exact replay は未達
+- 再試行するとしたら:
+  - 残る `575A` が将来データで伸びたとき
+  - あるいは `019e8d64` 時点のロジック差分をさらに特定できたとき
+
+### 2026-06-05: Global RSI2 Relaxation Rejected
+
+- 試したこと:
+  - repaired cache 上で `DAYTRADE_MAX_RSI2` と `DAYTRADE_FALLBACK_MAX_RSI2` を 100 まで緩める what-if を行い、`019e8d64` の standalone 5 trade を取り戻せるかを確認した
+  - 併せて train 側の `prev_rsi2` 帯ごとの損益を再集計し、高 RSI の shared cluster が本当に存在するかを見直した
+- 結果:
+  - standalone latest 1m は `TOTAL RETURN -0.48% / CLOSED TRADES 7 / PROFIT FACTOR 0.31` まで悪化した
+  - full は `TOTAL RETURN +605.15% / PROFIT FACTOR 1.40` まで悪化し、`WEEKS >= +1%` も `139/223` に低下した
+  - train では `prev_rsi2 80-90` 帯は `catchup_rs` だけがわずかに正で、`primary` と `fallback` の高 RSI 帯は train 支持が弱かった
+- 判断:
+  - 不採用
+  - 高 RSI を広く開けると、`019e8d64` の見た目は少し拾えても、train / full の PF と week hit を大きく壊した
+- 再試行するとしたら:
+  - 高 RSI の primary / fallback に train-supported な独立帯が増えたときのみ
+  - それまでは RSI ceiling の一律緩和は行わない

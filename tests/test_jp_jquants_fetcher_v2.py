@@ -130,6 +130,29 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
             self.assertEqual(float(merged.loc[1, "Open"]), 201.0)
             self.assertEqual(float(merged.loc[2, "Close"]), 202.5)
 
+    def test_save_checkpoint_frame_keeps_existing_history_when_candidate_is_shorter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            existing = pd.DataFrame(
+                [
+                    {"Date": "2026-05-14", "Code": "72030", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000},
+                    {"Date": "2026-05-15", "Code": "72030", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100},
+                ]
+            )
+            existing.to_pickle(os.path.join(temp_dir, "7203.pkl"))
+            shorter = pd.DataFrame(
+                [
+                    {"Date": "2026-05-15", "Code": "72030", "Open": 301.0, "High": 302.0, "Low": 300.0, "Close": 301.5, "Volume": 3100},
+                ]
+            )
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir):
+                fetcher._save_checkpoint_frame("7203", shorter)
+
+            saved = pd.read_pickle(os.path.join(temp_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
+
+        self.assertEqual(list(pd.to_datetime(saved["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
+        self.assertEqual(float(saved.loc[1, "Close"]), 301.5)
+
     def test_fetch_ticker_turbo_returns_failure_detail_for_non_200_response(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir), patch.object(
@@ -183,6 +206,163 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
             self.assertEqual(list(pd.to_datetime(restored["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
             self.assertEqual(float(restored.loc[0, "Open"]), 100.0)
             self.assertEqual(float(restored.loc[1, "Close"]), 101.5)
+
+    def test_seed_missing_checkpoints_from_output_cache_repairs_short_checkpoint_when_cache_has_longer_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            dates = pd.date_range("2026-01-02", periods=120, freq="B")
+            cached = pd.DataFrame(
+                {
+                    ("7203.T", "Open"): [100.0 + i for i in range(len(dates))],
+                    ("7203.T", "High"): [101.0 + i for i in range(len(dates))],
+                    ("7203.T", "Low"): [99.0 + i for i in range(len(dates))],
+                    ("7203.T", "Close"): [100.5 + i for i in range(len(dates))],
+                    ("7203.T", "Volume"): [1000 + i for i in range(len(dates))],
+                },
+                index=dates,
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+            short = pd.DataFrame(
+                [
+                    {"Date": "2026-06-01", "Code": "72030", "Open": 201.0, "High": 202.0, "Low": 200.0, "Close": 201.5, "Volume": 2100},
+                    {"Date": "2026-06-02", "Code": "72030", "Open": 202.0, "High": 203.0, "Low": 201.0, "Close": 202.5, "Volume": 2200},
+                ]
+            )
+            short.to_pickle(os.path.join(temp_dir, "7203.pkl"))
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir):
+                seeded = fetcher.seed_missing_checkpoints_from_output_cache(output_path, ["72030"])
+
+            self.assertEqual(seeded, 1)
+            restored = pd.read_pickle(os.path.join(temp_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
+            self.assertEqual(len(restored), len(cached))
+            expected_dates = list(pd.to_datetime(cached.index).strftime("%Y-%m-%d"))
+            restored_dates = list(pd.to_datetime(restored["Date"]).dt.strftime("%Y-%m-%d"))
+            self.assertEqual(restored_dates[:2], expected_dates[:2])
+            self.assertEqual(restored_dates[-2:], expected_dates[-2:])
+            self.assertEqual(float(restored.loc[0, "Open"]), 100.0)
+            self.assertEqual(float(restored.loc[len(restored) - 1, "Close"]), 100.5 + len(cached) - 1)
+
+    def test_full_snapshot_can_be_restored_back_to_live_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_dir = os.path.join(temp_dir, "checkpoints")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            original_checkpoint = pd.DataFrame(
+                [
+                    {"Date": "2026-05-14", "Code": "72030", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000},
+                    {"Date": "2026-05-15", "Code": "72030", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100},
+                ]
+            )
+            original_output = pd.DataFrame(
+                [[100.0, 101.0, 99.0, 100.5, 1000], [101.0, 102.0, 100.0, 101.5, 1100]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("7203.T", "Open"),
+                        ("7203.T", "High"),
+                        ("7203.T", "Low"),
+                        ("7203.T", "Close"),
+                        ("7203.T", "Volume"),
+                    ]
+                ),
+            )
+            original_checkpoint.to_pickle(os.path.join(checkpoint_dir, "7203.pkl"))
+            with open(output_path, "wb") as handle:
+                pickle.dump(original_output, handle)
+
+            mutated_checkpoint = pd.DataFrame(
+                [{"Date": "2026-05-15", "Code": "72030", "Open": 301.0, "High": 302.0, "Low": 300.0, "Close": 301.5, "Volume": 3100}]
+            )
+            mutated_output = pd.DataFrame(
+                [[301.0, 302.0, 300.0, 301.5, 3100]],
+                index=pd.to_datetime(["2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("7203.T", "Open"),
+                        ("7203.T", "High"),
+                        ("7203.T", "Low"),
+                        ("7203.T", "Close"),
+                        ("7203.T", "Volume"),
+                    ]
+                ),
+            )
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", checkpoint_dir):
+                snapshot_root = fetcher._snapshot_current_cache_state(output_path=output_path, snapshot_tag="snap1")
+                self.assertTrue(os.path.exists(os.path.join(snapshot_root, "manifest.json")))
+
+                mutated_checkpoint.to_pickle(os.path.join(checkpoint_dir, "7203.pkl"))
+                with open(output_path, "wb") as handle:
+                    pickle.dump(mutated_output, handle)
+
+                restored = fetcher._restore_snapshot("snap1", output_path=output_path)
+
+            self.assertEqual(restored["snapshot_tag"], "snap1")
+            restored_checkpoint = pd.read_pickle(os.path.join(checkpoint_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
+            restored_output = pd.read_pickle(output_path)
+            self.assertEqual(list(pd.to_datetime(restored_checkpoint["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
+            self.assertEqual(float(restored_checkpoint.loc[1, "Close"]), 101.5)
+            self.assertEqual(list(restored_output.index.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15"])
+            self.assertEqual(float(restored_output.loc[pd.Timestamp("2026-05-15"), ("7203.T", "Close")]), 101.5)
+
+    def test_refresh_runs_preflight_audit_before_ticker_master(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_dir = os.path.join(temp_dir, "checkpoints")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+
+            checkpoint = pd.DataFrame(
+                [
+                    {"Date": "2026-05-14", "Code": "72030", "Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.5, "Volume": 1000},
+                    {"Date": "2026-05-15", "Code": "72030", "Open": 101.0, "High": 102.0, "Low": 100.0, "Close": 101.5, "Volume": 1100},
+                ]
+            )
+            checkpoint.to_pickle(os.path.join(checkpoint_dir, "7203.pkl"))
+
+            output = pd.DataFrame(
+                [[100.0, 101.0, 99.0, 100.5, 1000], [101.0, 102.0, 100.0, 101.5, 1100]],
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+                columns=pd.MultiIndex.from_tuples(
+                    [
+                        ("7203.T", "Open"),
+                        ("7203.T", "High"),
+                        ("7203.T", "Low"),
+                        ("7203.T", "Close"),
+                        ("7203.T", "Volume"),
+                    ]
+                ),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(output, handle)
+
+            call_order = []
+
+            def _audit_stub(**_kwargs):
+                call_order.append("audit")
+                return {"missing": 0, "truncated": 0, "aligned": 1, "repaired": 0}
+
+            def _master_stub(**_kwargs):
+                call_order.append("master")
+                return ["7203"], False
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", checkpoint_dir), patch.object(
+                fetcher,
+                "_run_cache_audit_only",
+                side_effect=_audit_stub,
+            ), patch.object(
+                fetcher,
+                "fetch_ticker_master_with_fallback",
+                side_effect=_master_stub,
+            ), patch.object(
+                fetcher.os,
+                "getenv",
+                side_effect=lambda key: "dummy-token" if key in {"JQUANTS_REFRESH_TOKEN", "JQUANTS_API_KEY"} else None,
+            ):
+                fetcher.fetch_jquants_v2_turbo_revelation(output_path=output_path, debug_failure_samples=0)
+
+            self.assertEqual(call_order, ["audit", "master"])
 
     def test_fetch_ticker_master_with_fallback_uses_cached_universe_after_rate_limit(self):
         with tempfile.TemporaryDirectory() as temp_dir:

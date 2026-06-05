@@ -10,7 +10,7 @@ import pandas as pd
 sys.path.append(os.getcwd())
 
 from backtest import run_backtest_v16_production
-from core.config import INITIAL_CASH, SLIPPAGE_RATE
+from core.config import INITIAL_CASH, SLIPPAGE_RATE, TAX_RATE
 from core.logic import get_daytrade_week_key
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
 
@@ -52,6 +52,18 @@ def parse_args():
         type=int,
         default=7,
         help="When refreshing against an existing cache, re-fetch this many trailing days before the cached latest day.",
+    )
+    parser.add_argument(
+        "--standalone-latest-months",
+        type=int,
+        default=0,
+        help="Run a standalone replay for the latest N months with 1,000,000 yen initial cash.",
+    )
+    parser.add_argument(
+        "--standalone-initial-cash",
+        type=float,
+        default=float(INITIAL_CASH),
+        help="Initial cash for the standalone latest-window replay.",
     )
     return parser.parse_args()
 
@@ -106,6 +118,36 @@ def _build_global_period_boundaries(day_keys):
         month_record = month_bounds.setdefault(month_key, {"first": day_key, "last": day_key})
         month_record["last"] = day_key
     return week_bounds, month_bounds
+
+
+def _print_daily_rows(daily_stats, start_date, end_date):
+    window_day_keys = [
+        day_key
+        for day_key in sorted(daily_stats.keys())
+        if start_date <= day_key <= end_date
+    ]
+    if not window_day_keys:
+        return
+
+    first_day = window_day_keys[0]
+    start_equity = float(daily_stats[first_day]["equity"]) - float(daily_stats[first_day]["day_pnl"])
+
+    print("-" * 50)
+    print("STANDALONE DAILY RESULT")
+    print("-" * 50)
+    print("DATE           | DAY_PNL     | TRADES | END_EQUITY  | CUM_RETURN")
+    for day_key in window_day_keys:
+        item = daily_stats[day_key]
+        day_pnl = float(item["day_pnl"])
+        end_equity = float(item["equity"])
+        cum_return_pct = ((end_equity / start_equity) - 1.0) * 100.0 if start_equity > 0 else 0.0
+        print(
+            f"{day_key} | "
+            f"{day_pnl:+11,.0f} | "
+            f"{int(item['trade_count']):>6} | "
+            f"{end_equity:11,.0f} | "
+            f"{cum_return_pct:+9.2f}%"
+        )
 
 
 def _summarize_window(
@@ -317,6 +359,8 @@ def run_jp_broad_backtest(
     refresh_cache=False,
     refresh_start_date="",
     refresh_overlap_days=7,
+    standalone_latest_months=0,
+    standalone_initial_cash=float(INITIAL_CASH),
 ):
     _refresh_cache_if_requested(
         cache_path=cache_path,
@@ -343,7 +387,7 @@ def run_jp_broad_backtest(
         [
             idx
             for idx, ticker in enumerate(tickers)
-            if str(ticker).endswith(".T") and ticker not in {"1306.T", "1321.T"}
+            if str(ticker).endswith(".T")
         ],
         dtype=int,
     )
@@ -363,7 +407,7 @@ def run_jp_broad_backtest(
         initial_cash=INITIAL_CASH,
         slippage=SLIPPAGE_RATE,
         explicit_trade_cost=0.0,
-        profit_tax_rate=0.0,
+        profit_tax_rate=TAX_RATE,
         return_daily_stats=True,
         return_trade_log=True,
         verbose=False,
@@ -411,6 +455,75 @@ def run_jp_broad_backtest(
         if holdout_summary is not None:
             split_summaries.append(holdout_summary)
 
+    standalone_summary = None
+    standalone_daily_stats = None
+    standalone_start = None
+    standalone_end = None
+    standalone_context_start = None
+    if standalone_latest_months is not None and int(standalone_latest_months) > 0:
+        standalone_start = _resolve_holdout_start_date(timeline, standalone_latest_months)
+        standalone_end = str(pd.Timestamp(timeline[-1]).date())
+        if standalone_start is not None:
+            standalone_bundle_np = bundle_np
+            standalone_timeline = timeline
+            standalone_breadth_series = breadth_series
+            standalone_context_start = standalone_start
+            (
+                _sa_final_assets,
+                _sa_trade_count,
+                _sa_monthly_assets,
+                _sa_trade_results,
+                standalone_daily_stats,
+                standalone_trade_log,
+            ) = run_backtest_v16_production(
+                univ_indices=univ_indices,
+                bundle_np=standalone_bundle_np,
+                timeline=standalone_timeline,
+                breadth_ratio=standalone_breadth_series,
+                initial_cash=float(standalone_initial_cash),
+                slippage=SLIPPAGE_RATE,
+                explicit_trade_cost=0.0,
+                profit_tax_rate=TAX_RATE,
+                evaluation_start_date=standalone_start,
+                return_daily_stats=True,
+                return_trade_log=True,
+                verbose=False,
+            )
+            if standalone_daily_stats is not None and standalone_start is not None:
+                standalone_day_keys = sorted(standalone_daily_stats.keys())
+                baseline_day_keys = [
+                    day_key for day_key in standalone_day_keys if day_key < standalone_start
+                ]
+                if baseline_day_keys:
+                    baseline_day_key = baseline_day_keys[-1]
+                    baseline_equity = float(standalone_daily_stats[baseline_day_key]["equity"])
+                    equity_offset = float(standalone_initial_cash) - baseline_equity
+                    if abs(equity_offset) > 1e-9:
+                        for day_key in standalone_day_keys:
+                            if day_key >= standalone_start:
+                                item = dict(standalone_daily_stats[day_key])
+                                item["equity"] = float(item["equity"]) + equity_offset
+                                standalone_daily_stats[day_key] = item
+            standalone_summary = _summarize_window(
+                daily_stats=standalone_daily_stats,
+                trade_log=standalone_trade_log,
+                label=f"STANDALONE LATEST {int(standalone_latest_months)}M",
+                start_date=standalone_start,
+                end_date=standalone_end,
+                global_day_keys=[pd.Timestamp(ts).strftime("%Y-%m-%d") for ts in timeline],
+            )
+            if standalone_summary is not None:
+                print("-" * 50)
+                print(
+                    "NOTE: standalone latest-window replay starts from "
+                    f"Y{float(standalone_initial_cash):,.0f} and includes prior context days only for signal calculation."
+                )
+                if standalone_context_start is not None:
+                    print(f"CONTEXT START: {standalone_context_start}")
+                _print_window_summary(standalone_summary)
+                if standalone_daily_stats is not None and standalone_start is not None and standalone_end is not None:
+                    _print_daily_rows(standalone_daily_stats, standalone_start, standalone_end)
+
     _print_report(full_summary, split_summaries=split_summaries, monthly_assets=monthly_assets)
     return 0
 
@@ -424,5 +537,7 @@ if __name__ == "__main__":
             refresh_cache=args.refresh_cache,
             refresh_start_date=args.refresh_start_date,
             refresh_overlap_days=args.refresh_overlap_days,
+            standalone_latest_months=args.standalone_latest_months,
+            standalone_initial_cash=args.standalone_initial_cash,
         )
     )
