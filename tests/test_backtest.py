@@ -7,7 +7,7 @@ from core.monthly_rotation_strategy import get_prod_monthly_rotation_backtest_pa
 
 def _build_daytrade_bundle(exit_mode="close"):
     T = 110
-    dates = pd.date_range("2024-01-01", periods=T)
+    dates = pd.date_range("2024-01-07", periods=T)
 
     close_data = np.full((T, 1), 100.0)
     open_data = np.full((T, 1), 100.0)
@@ -231,12 +231,12 @@ def test_daytrade_can_return_daily_stats():
     assert trade_count == 1
     assert final_assets > 10_000_000
     assert isinstance(daily_stats, dict)
-    assert "2024-04-12" in daily_stats
-    assert daily_stats["2024-04-12"]["day_pnl"] > 0
-    assert daily_stats["2024-04-12"]["trade_count"] == 1
+    assert "2024-04-18" in daily_stats
+    assert daily_stats["2024-04-18"]["day_pnl"] > 0
+    assert daily_stats["2024-04-18"]["trade_count"] == 1
 
 
-def test_daytrade_blocks_low_breadth_tuesday_catchup_rs():
+def test_daytrade_allows_low_breadth_tuesday_catchup_rs_probe():
     dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle()
     final_assets, trade_count, monthly, results = run_backtest_v16_production(
         univ_indices=np.arange(1),
@@ -253,14 +253,15 @@ def test_daytrade_blocks_low_breadth_tuesday_catchup_rs():
         max_hold_days=1,
     )
 
-    assert trade_count == 0
-    assert results == []
-    assert final_assets == 10_000_000.0
+    assert trade_count == 1
+    assert len(results) == 1
+    assert results[0] > 0
+    assert final_assets > 10_000_000.0
 
 
 def test_daytrade_tries_next_candidate_when_top_is_too_large():
     T = 104
-    dates = pd.date_range("2024-01-01", periods=T)
+    dates = pd.date_range("2024-01-07", periods=T)
     close_data = np.full((T, 2), [8_500.0, 1_000.0])
     open_data = close_data.copy()
     high_data = close_data * 1.01

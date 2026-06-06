@@ -112,6 +112,7 @@ DAYTRADE_PRIMARY_WEDNESDAY_HOT_GAP_BELOW_SMA_WEEKDAY = 2
 DAYTRADE_PRIMARY_WEDNESDAY_HOT_GAP_BELOW_SMA_MIN_GAP = 0.012
 DAYTRADE_PRIMARY_WEDNESDAY_HOT_GAP_BELOW_SMA_MAX_OPEN_VS_SMA_ATR = 0.0
 DAYTRADE_PRIMARY_WEDNESDAY_HOT_GAP_BELOW_SMA_EQUITY_NOTIONAL_PCT = 0.50
+DAYTRADE_WEEKDAY_THURSDAY = 3
 DAYTRADE_PRIMARY_TUESDAY_NEUTRAL_TREND_MID_HIGH_BREADTH_MIN = 0.60
 DAYTRADE_PRIMARY_TUESDAY_NEUTRAL_TREND_MID_HIGH_BREADTH_MAX = 0.70
 DAYTRADE_PRIMARY_TUESDAY_NEUTRAL_TREND_MIN_OPEN_VS_SMA_ATR = 0.0
@@ -153,6 +154,87 @@ DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_BREADTH_MAX = 0.70
 DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_MIN_PREV_RETURN_PCT = 0.05
 DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_MAX_GAP = 0.006
 DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_MAX_RS_ALPHA = 10.0
+# Low-score hot-market primary continuation was a train-only loss cluster
+# across all weekdays. Keep it tradable but cut size down to probe-only size.
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_WEEKDAYS = {
+    DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY,
+    DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_WEEKDAY,
+    DAYTRADE_PRIMARY_WEDNESDAY_STALL_WEEKDAY,
+    DAYTRADE_PRIMARY_THURSDAY_MID_BREADTH_WEEKDAY,
+    DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY,
+}
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_BREADTH_MIN = 0.43
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MIN = 1.00
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MAX = 1.15
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_SCORE_MAX = 8.0
+DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.10
+# Monday still has a medium-score hot-market pocket that keeps losing in train.
+DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_BREADTH_MIN = 0.43
+DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_MARKET_RATIO_MIN = 1.05
+DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_MARKET_RATIO_MAX = 1.10
+DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_SCORE_MAX = 10.0
+DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.50
+# Tepid market + strong prior-day move + mid/high-score primary continuation
+# has been a persistent loss pocket across train, so keep it tradable but smaller.
+DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MAX_MARKET_RATIO = 1.05
+DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MIN_PREV_RETURN_PCT = 0.03
+DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MIN_SCORE = 8.0
+# Monday / Thursday / Friday are the negative side of this pocket in train.
+DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_NO_TRADE_WEEKDAYS = {
+    DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY,
+    DAYTRADE_PRIMARY_THURSDAY_MID_BREADTH_WEEKDAY,
+    DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY,
+}
+DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_EQUITY_NOTIONAL_PCT = 0.25
+# Mid-gap primary continuation on Mon/Tue/Wed/Fri is a train-only loss pocket;
+# keep Thursday as the only weekday allowed in this band.
+DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_NO_TRADE_WEEKDAYS = {
+    DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY,
+    DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_WEEKDAY,
+    DAYTRADE_PRIMARY_WEDNESDAY_STALL_WEEKDAY,
+    DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY,
+}
+DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_MIN_GAP = 0.01
+DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_MAX_GAP = 0.015
+# Tuesday still has a one-off high-breadth / large-gap / mid-high-score loss
+# cluster in train. Keep it out rather than trying to size through it.
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_NO_TRADE_WEEKDAY = (
+    DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_WEEKDAY
+)
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_BREADTH_MIN = 0.80
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MIN_GAP = 0.02
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MIN_SCORE = 12.0
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MAX_SCORE = 14.0
+# Friday low breadth / small-gap / mid-score primary continuation also keeps
+# showing up as a stop-heavy pocket in train.
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_NO_TRADE_WEEKDAY = (
+    DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY
+)
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_BREADTH = 0.60
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MIN_GAP = 0.0
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_GAP = 0.005
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MIN_SCORE = 10.0
+DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_SCORE = 12.0
+# Tepid market + low-score primary continuation stays weak in train unless the
+# broader breadth is very strong. Keep it tradable, but trim size sharply.
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_MARKET_RATIO = 1.05
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_BREADTH = 0.75
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_SCORE = 8.0
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_HIGH_GAP_MIN = 0.02
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_HIGH_GAP_EQUITY_NOTIONAL_PCT = 0.25
+DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_EQUITY_NOTIONAL_PCT = 0.10
+# Monday primary still loses in the broad train slice when the market is only
+# moderately hot and the candidate is not obviously strong.
+DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_MARKET_RATIO = 1.15
+DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_BREADTH = 0.75
+DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_SCORE = 10.0
+DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_EQUITY_NOTIONAL_PCT = 0.10
+# High-breadth primary continuation with only mid-hot market_ratio remains a
+# train-only loss cluster on Monday / Wednesday / Thursday / Friday.
+DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_BREADTH = 0.75
+DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MAX_RATIO = 1.20
+DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_SCORE = 8.0
+DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.50
 DAYTRADE_MIN_RS_ALPHA = 0.0
 DAYTRADE_MIN_RSI2 = 35.0
 DAYTRADE_MAX_RSI2 = 80.0
@@ -281,12 +363,22 @@ DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_MONDAY_HOT_GAP_MIN = 0.012
 DAYTRADE_CATCHUP_RS_MONDAY_EXTENDED_TREND_MIN_OPEN_VS_SMA_ATR = 1.5
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_EQUITY_NOTIONAL_PCT = 0.75
+DAYTRADE_CATCHUP_RS_WEDNESDAY_LOW_BREADTH_WEEKDAY = 2
+DAYTRADE_CATCHUP_RS_WEDNESDAY_LOW_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_WEEKDAY = 4
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_FRIDAY_HOT_GAP_MIN = 0.010
 DAYTRADE_CATCHUP_RS_FRIDAY_LOW_BREADTH_EQUITY_NOTIONAL_PCT = 0.75
 DAYTRADE_CATCHUP_RS_FRIDAY_EXTENDED_TREND_MIN_OPEN_VS_SMA_ATR = 2.0
 DAYTRADE_CATCHUP_RS_FRIDAY_EXTENDED_TREND_EQUITY_NOTIONAL_PCT = 0.35
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEEKDAY = 1
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MIN = 0.18
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MAX = 0.36
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_TOP_SCORE_MIN = 12.0
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MODERATE_SCORE_MIN = 8.0
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MODERATE_SCORE_MAX = 12.0
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MAX_GAP_PCT = 0.01
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_LEVERAGE = 0.20
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_BREADTH_MAX = 0.22
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_GAP = 0.03
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_PREV_RETURN_PCT = 0.0
@@ -296,6 +388,14 @@ DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MIN_SETUP_SCORE = 6.0
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE = 0.45
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_NOTIONAL_PCT = 1.00
 DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_EQUITY_NOTIONAL_PCT = 1.00
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAY_MIN = 2
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAY_MAX = 4
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_BREADTH_MIN = 0.18
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_BREADTH_MAX = 0.36
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_SCORE_MIN = 6.0
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_SCORE_MAX = 8.0
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_GAP_PCT = -0.01
+DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE = 0.35
 DAYTRADE_BULL_ETF_CODES = ("1306", "1321", "1570", "1579", "2558")
 DAYTRADE_INVERSE_CODES = ("1356", "1357", "1360", "1366", "1368", "1459", "1469")
 DAYTRADE_ETF_REPLACEMENT_BREADTH_MIN = 0.65
@@ -895,6 +995,101 @@ def resolve_daytrade_primary_equity_notional_pct(
             DAYTRADE_PRIMARY_HEATED_CONTINUATION_EQUITY_NOTIONAL_PCT,
         )
     if (
+        not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(prev_return)
+        and not _is_invalid_number(primary_score)
+        and float(market_ratio) <= DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MAX_MARKET_RATIO
+        and float(prev_return) >= DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MIN_PREV_RETURN_PCT
+        and float(primary_score) > DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_MIN_SCORE
+    ):
+        if weekday in DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_NO_TRADE_WEEKDAYS:
+            return 0.0
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_TEPID_MARKET_STRONG_PRIOR_EQUITY_NOTIONAL_PCT,
+        )
+    if (
+        weekday in DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_NO_TRADE_WEEKDAYS
+        and not _is_invalid_number(gap_pct)
+        and DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_MIN_GAP
+        <= float(gap_pct)
+        < DAYTRADE_PRIMARY_MID_GAP_1P0_TO_1P5_MAX_GAP
+    ):
+        return 0.0
+    if (
+        weekday == DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_NO_TRADE_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(gap_pct)
+        and not _is_invalid_number(primary_score)
+        and DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_BREADTH_MIN
+        <= float(breadth_val)
+        and float(gap_pct) >= DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MIN_GAP
+        and DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MIN_SCORE
+        <= float(primary_score)
+        < DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HOT_GAP_MAX_SCORE
+    ):
+        return 0.0
+    if (
+        weekday == DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_NO_TRADE_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(gap_pct)
+        and not _is_invalid_number(primary_score)
+        and float(breadth_val) < DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_BREADTH
+        and DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MIN_GAP
+        < float(gap_pct)
+        < DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_GAP
+        and DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MIN_SCORE
+        <= float(primary_score)
+        < DAYTRADE_PRIMARY_FRIDAY_LOW_BREADTH_SMALL_GAP_MAX_SCORE
+    ):
+        return 0.0
+    if (
+        weekday == DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(primary_score)
+        and float(market_ratio) <= DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_MARKET_RATIO
+        and float(breadth_val) < DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_BREADTH
+        and float(primary_score) <= DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_MAX_SCORE
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_MONDAY_BROAD_MID_SCORE_EQUITY_NOTIONAL_PCT,
+        )
+    if (
+        not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(primary_score)
+        and float(market_ratio) <= DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_MARKET_RATIO
+        and float(breadth_val) < DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_BREADTH
+        and float(primary_score) <= DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_MAX_SCORE
+    ):
+        if (
+            not _is_invalid_number(gap_pct)
+            and float(gap_pct) >= DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_HIGH_GAP_MIN
+        ):
+            return min(
+                float(default_pct),
+                DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_HIGH_GAP_EQUITY_NOTIONAL_PCT,
+            )
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_TEPID_LOW_BREADTH_EQUITY_NOTIONAL_PCT,
+        )
+    if (
+        weekday != DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(primary_score)
+        and float(breadth_val) >= DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_BREADTH
+        and float(market_ratio) < DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MAX_RATIO
+        and float(primary_score) > DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_SCORE
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+        )
+    if (
         not _is_invalid_number(breadth_val)
         and not _is_invalid_number(gap_pct)
         and not _is_invalid_number(open_vs_sma_atr)
@@ -934,6 +1129,38 @@ def resolve_daytrade_primary_equity_notional_pct(
         return min(
             float(default_pct),
             DAYTRADE_PRIMARY_TUESDAY_OVERHEATED_EQUITY_NOTIONAL_PCT,
+        )
+    if (
+        weekday == DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(primary_score)
+        and DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_BREADTH_MIN
+        <= float(breadth_val)
+        and DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_MARKET_RATIO_MIN
+        <= float(market_ratio)
+        < DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_MARKET_RATIO_MAX
+        and float(primary_score) <= DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_SCORE_MAX
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+        )
+    if (
+        weekday in DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_WEEKDAYS
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(primary_score)
+        and DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_BREADTH_MIN
+        <= float(breadth_val)
+        and DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MIN
+        <= float(market_ratio)
+        < DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MAX
+        and float(primary_score) <= DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_SCORE_MAX
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_EQUITY_NOTIONAL_PCT,
         )
     # When the index is already overheated but breadth is still narrow, only
     # allow full-size primary continuation if the candidate is decisively strong.
@@ -985,6 +1212,8 @@ def resolve_daytrade_fallback_equity_notional_pct(
     weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
     if weekday is None:
         return float(default_pct)
+    if weekday == DAYTRADE_WEEKDAY_THURSDAY:
+        return 0.0
     resolved_pct = float(default_pct)
     if (
         not _is_invalid_number(breadth_val)
@@ -1063,6 +1292,8 @@ def resolve_daytrade_catchup_equity_notional_pct(
     weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
     if weekday is None:
         return float(default_pct)
+    if weekday == DAYTRADE_WEEKDAY_THURSDAY:
+        return 0.0
     if (
         setup_type == "catchup_rs"
         and not _is_invalid_number(breadth_val)
@@ -1352,6 +1583,45 @@ def should_replace_fallback_with_catchup_rs_hot_market(
     )
 
 
+def is_daytrade_tuesday_low_breadth_catchup_rs_probe_candidate(
+    candidate,
+    breadth_val,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    if weekday != DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEEKDAY or _is_invalid_number(breadth_val):
+        return False
+    score = candidate.get("score")
+    gap_pct = candidate.get("gap_pct")
+    if _is_invalid_number(score) or _is_invalid_number(gap_pct):
+        return False
+    return (
+        DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MIN
+        <= float(breadth_val)
+        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MAX
+        and str(candidate.get("setup_type")) == "catchup_rs"
+        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MODERATE_SCORE_MIN
+        <= float(score)
+        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MODERATE_SCORE_MAX
+        and float(gap_pct) <= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_MAX_GAP_PCT
+    )
+
+
+def is_daytrade_catchup_rs_wednesday_low_breadth_filtered(
+    breadth_val,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    if weekday is None or _is_invalid_number(breadth_val):
+        return False
+    return (
+        weekday == DAYTRADE_CATCHUP_RS_WEDNESDAY_LOW_BREADTH_WEEKDAY
+        and float(breadth_val) < DAYTRADE_CATCHUP_RS_WEDNESDAY_LOW_BREADTH_MAX
+    )
+
+
 def is_daytrade_fallback_low_breadth_flat_gap_filtered(breadth_val, gap_pct):
     if _is_invalid_number(breadth_val) or _is_invalid_number(gap_pct):
         return False
@@ -1634,6 +1904,38 @@ def resolve_daytrade_selected_leverage(
             if open_vs_sma_atr > DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_MAX_OPEN_VS_SMA_ATR:
                 return 0.0
             return DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_LEVERAGE
+    if (
+        not _is_invalid_number(base_leverage)
+        and float(base_leverage) <= 0
+        and is_daytrade_tuesday_low_breadth_catchup_rs_probe_candidate(
+            top_candidate,
+            breadth_val,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        )
+    ):
+        return DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_PROBE_LEVERAGE
+    if (
+        not _is_invalid_number(base_leverage)
+        and float(base_leverage) <= 0
+        and weekday is not None
+        and DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAY_MIN
+        <= weekday
+        <= DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_WEEKDAY_MAX
+        and str(top_candidate.get("setup_type")) == "catchup_gapdown"
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(top_candidate.get("score"))
+        and not _is_invalid_number(top_candidate.get("gap_pct"))
+        and DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_BREADTH_MIN
+        <= float(breadth_val)
+        < DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_BREADTH_MAX
+        and DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_SCORE_MIN
+        <= float(top_candidate.get("score"))
+        < DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_SCORE_MAX
+        and float(top_candidate.get("gap_pct"))
+        <= DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_MAX_GAP_PCT
+    ):
+        return DAYTRADE_CATCHUP_GAPDOWN_LOW_BREADTH_PROBE_LEVERAGE
 
     if not _is_invalid_number(base_leverage) and float(base_leverage) > 0:
         resolved_base_leverage = float(base_leverage)
@@ -2752,6 +3054,26 @@ def select_daytrade_candidates(
     catchup = sorted(catchup_candidates or [], key=lambda item: item["score"], reverse=True)
     inverse = sorted(inverse_candidates or [], key=lambda item: item["score"], reverse=True)
     bull_etf = sorted(bull_etf_candidates or [], key=lambda item: item["score"], reverse=True)
+    if (
+        weekday == DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MIN
+        <= float(breadth_val)
+        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MAX
+        and len(catchup) > 1
+        and str(catchup[0].get("setup_type")) == "catchup_rs"
+        and not _is_invalid_number(catchup[0].get("score"))
+        and float(catchup[0].get("score")) >= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_SELECTOR_TOP_SCORE_MIN
+    ):
+        for idx, item in enumerate(catchup[1:], start=1):
+            if is_daytrade_tuesday_low_breadth_catchup_rs_probe_candidate(
+                item,
+                breadth_val,
+                trade_date=trade_date,
+                trade_weekday=trade_weekday,
+            ):
+                catchup = [item] + [candidate for candidate_index, candidate in enumerate(catchup) if candidate_index != idx]
+                break
     alt_candidates = [item for item in strong_oversold + fallback + catchup + inverse + bull_etf if item]
     preferred_etf = sorted(
         [
@@ -2819,6 +3141,13 @@ def select_daytrade_candidates(
         top_primary = primary[0]
         top_catchup = catchup[0]
         selected = [top_catchup] + [item for item in selected if item is not top_primary]
+
+    if is_daytrade_catchup_rs_wednesday_low_breadth_filtered(
+        breadth_val,
+        trade_date=trade_date,
+        trade_weekday=trade_weekday,
+    ):
+        selected = [item for item in selected if str(item.get("setup_type")) != "catchup_rs"]
 
     if max_count is None:
         return selected

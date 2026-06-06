@@ -43,47 +43,49 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-05** です。
+最新確認日は **2026-06-06** です。
 使用データの最新日は **2026-06-05** です。
 `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の最新確認値:
 
-- `FINAL EQUITY: 798,066円`
-- `CLOSED TRADES: 592`
-- `WIN RATE: 42.91%`
-- `WEEKS >= +1%: 116/223`
-- `POSITIVE WEEKS: 121/223`
-- `TOTAL RETURN: -20.19%`
-- `PROFIT FACTOR: 0.97`
-- `AVG MONTH ACTIVE RATE: 56.09%`
-- `MONTHS >= 3/4 ACTIVE: 12/52`
-- `WORST DAY: -196,646円`
+- `FINAL EQUITY: 1,622,037円`
+- `CLOSED TRADES: 585`
+- `WIN RATE: 42.05%`
+- `WEEKS >= +1%: 79/223`
+- `POSITIVE WEEKS: 98/223`
+- `TOTAL RETURN: +62.20%`
+- `PROFIT FACTOR: 1.11`
+- `AVG MONTH ACTIVE RATE: 55.52%`
+- `MONTHS >= 3/4 ACTIVE: 13/52`
+- `WORST DAY: -142,617円`
 
 直近 6ヶ月 holdout `2025-12-08` から `2026-06-05` の確認値:
 
-- `CLOSED TRADES: 61`
-- `WIN RATE: 49.18%`
-- `TOTAL RETURN: +50.76%`
+- `START EQUITY: 1,250,252円`
+- `FINAL EQUITY: 1,622,037円`
+- `CLOSED TRADES: 66`
+- `WIN RATE: 43.94%`
+- `TOTAL RETURN: +29.74%`
 - `WEEKS >= +1%: 11/26`
-- `POSITIVE WEEKS: 13/26`
-- `PROFIT FACTOR: 1.70`
-- `WORST DAY: -49,496円`
-- `AVG MONTH ACTIVE RATE: 45.24%`
+- `POSITIVE WEEKS: 14/26`
+- `PROFIT FACTOR: 1.40`
+- `WORST DAY: -106,064円`
+- `AVG MONTH ACTIVE RATE: 50.01%`
 - `MONTHS >= 50% ACTIVE: 3/6`
 - `MONTHS >= 2/3 ACTIVE: 2/6`
-- `MONTHS >= 3/4 ACTIVE: 0/6`
+- `MONTHS >= 3/4 ACTIVE: 1/6`
 
 直近1ヶ月 `100万円 standalone` `2026-05-07` から `2026-06-05` の確認値:
 
 - `START EQUITY: 1,000,000円`
-- `FINAL EQUITY: 992,233円`
-- `TOTAL RETURN: -0.78%`
-- `CLOSED TRADES: 3`
-- `WIN RATE: 33.33%`
-- `PROFIT FACTOR: 0.26`
+- `FINAL EQUITY: 1,001,032円`
+- `TOTAL RETURN: +0.10%`
+- `CLOSED TRADES: 2`
+- `WIN RATE: 50.00%`
+- `PROFIT FACTOR: 1.89`
 - `WEEKS >= +1%: 0/5`
 - `POSITIVE WEEKS: 1/5`
-- `WORST DAY: -9,360円`
-- `TRADE DAY RATE: 13.64%`
+- `WORST DAY: -1,165円`
+- `TRADE DAY RATE: 9.09%`
 - `AVG MONTH ACTIVE RATE: 20.00%`
 - `MONTHS >= 50% ACTIVE: 0/1`
 - `MONTHS >= 2/3 ACTIVE: 0/1`
@@ -149,14 +151,14 @@ auto-trade/
   shared strategy を同じ形で replay するのが目的で、実運用の板・注文拒否・部分約定までを再現するものではありません。
   表示される損益・勝率は税引き後ベースです。
   `kabuステーションAPI` 経由のデイトレ信用は手数料無料なので、`explicit_trade_cost` は 0 円のままです。
-  追いかけ注文のキャンセル待ちや強制執行のぶれを少し織り込むため、`entry_slippage` / `exit_slippage` は `SLIPPAGE_RATE` より厚めにしています。
+  `slippage` と税引き後計算は `scripts/jp_refresh_validate.py` と同じ cost model を使います。
   さらに、発注数量は日次出来高比の `liquidity_limit` で上限を掛けて、薄い銘柄での過大約定を抑えています。
   改善判断では `python jp_backtest.py --holdout-months 6` を基準に、直近 6 ヶ月の `train / holdout` を分けて確認します。
   `--standalone-latest-months 1` を付けると、最新直近1ヶ月を `100万円` 初期資金の standalone replay でも併記できます。
   `--refresh-cache` を付けると、キャッシュ更新後の最新日を基準に holdout を切ります。
 
 - `scripts/jp_refresh_validate.py`
-  最新キャッシュの更新、`jp_backtest.py` 相当の再検証、直近1ヶ月 standalone の日次損益表をまとめて出す一括ツールです。
+  最新キャッシュの更新、`jp_backtest.py` と同じ universe / cost model での再検証、直近1ヶ月 standalone の日次損益表をまとめて出す一括ツールです。
   `--validate-only` を付けると、更新は飛ばして既存キャッシュだけを検証できます。
   この更新フローの skill 本体は `.codex/skills/jp-refresh-latest/` にあります。
   このリポジトリで「日付を更新して」「最新日まで更新して」と言われたら、まずこの skill とこのツールを使います。
@@ -495,6 +497,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - low breadth / hot market / score `12-16` `catchup_rs` の selected leverage cap
   - 火曜 low breadth / moderate-score `catchup_rs` の probe leverage
   - 火曜 low breadth で too-hot な `catchup_rs` を moderate candidate に差し替える selector
+  - 水曜 low breadth の `catchup_rs` を selector から除外
   - low breadth bull ETF rebound の candidate 生成と selector precedence
   - extreme risk-off breadth での low-turnover `inverse` 許可と縮小 buying power
   - panic breadth / failed rebound の `inverse_rebreak`
@@ -523,6 +526,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `jp_backtest.py` の holdout 開始日の切り方
   - `train / holdout` 分割時に、部分週を週次 +1% 集計へ混ぜないこと
   - latest standalone window 切り出しで、直前営業日の context だけ残しつつ評価期間を固定すること
+  - `jp_backtest.py` と `jp_refresh_validate.py` の universe / cost model が揃っていること
   - `PROFIT FACTOR` の非有限値を `N/A` 表示に正規化すること
 - `tests/test_jp_jquants_fetcher_v2.py`
   - `jp_jquants_fetcher_v2.py` の増分更新開始日の決め方
@@ -589,4 +593,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-05
+Last updated: 2026-06-06
