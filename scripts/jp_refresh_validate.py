@@ -14,7 +14,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from backtest import run_backtest_v16_production
 from core.config import (
+    DAYTRADE_API_EXPLICIT_TRADE_COST,
     INITIAL_CASH,
+    TAX_RATE,
     SLIPPAGE_RATE,
 )
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
@@ -181,8 +183,8 @@ def _build_full_validation_report(
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
         slippage=SLIPPAGE_RATE,
-        explicit_trade_cost=0.0,
-        profit_tax_rate=0.0,
+        explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
+        profit_tax_rate=TAX_RATE,
         return_daily_stats=True,
         return_trade_log=True,
         verbose=False,
@@ -259,8 +261,8 @@ def _build_full_validation_report(
                 breadth_ratio=standalone_breadth_series,
                 initial_cash=float(standalone_initial_cash),
                 slippage=SLIPPAGE_RATE,
-                explicit_trade_cost=0.0,
-                profit_tax_rate=0.0,
+                explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
+                profit_tax_rate=TAX_RATE,
                 return_daily_stats=True,
                 return_trade_log=True,
                 verbose=False,

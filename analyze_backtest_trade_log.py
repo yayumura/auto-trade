@@ -8,11 +8,9 @@ import pandas as pd
 
 sys.path.append(os.getcwd())
 
-from backtest import run_backtest_v16_production
+from backtest import run_backtest_v16_production, _resolve_intraday_exit
 from core.config import (
     DAYTRADE_API_EXPLICIT_TRADE_COST,
-    DAYTRADE_BACKTEST_ENTRY_SLIPPAGE_RATE,
-    DAYTRADE_BACKTEST_EXIT_SLIPPAGE_RATE,
     INITIAL_CASH,
     SLIPPAGE_RATE,
     TAX_RATE,
@@ -63,16 +61,7 @@ def load_prepared_inputs(cache_path):
     with open(cache_path, "rb") as f:
         data = pickle.load(f)
     prepared = build_rotation_backtest_inputs_from_cache(data)
-    bundle_np = prepared["bundle_np"]
-    tickers = list(bundle_np.get("tickers", []))
-    univ_indices = np.array(
-        [
-            idx
-            for idx, ticker in enumerate(tickers)
-            if str(ticker).endswith(".T") and ticker not in {"1306.T", "1321.T"}
-        ],
-        dtype=int,
-    )
+    univ_indices = np.asarray(prepared.get("univ_indices", []), dtype=int)
     return prepared, univ_indices
 
 
@@ -88,8 +77,6 @@ def replay_backtest(cache_path):
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
         slippage=SLIPPAGE_RATE,
-        entry_slippage=DAYTRADE_BACKTEST_ENTRY_SLIPPAGE_RATE,
-        exit_slippage=DAYTRADE_BACKTEST_EXIT_SLIPPAGE_RATE,
         explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
         profit_tax_rate=TAX_RATE,
         return_daily_stats=True,
@@ -99,18 +86,122 @@ def replay_backtest(cache_path):
     return prepared, daily_stats, trade_log
 
 
+def infer_trade_exit_reasons(trades_df, prepared):
+    if trades_df.empty:
+        return pd.Series(dtype=object, index=trades_df.index)
+
+    bundle_np = prepared["bundle_np"]
+    tickers = [str(ticker) for ticker in bundle_np.get("tickers", [])]
+    ticker_to_idx = {ticker: idx for idx, ticker in enumerate(tickers)}
+    day_to_idx = {str(pd.Timestamp(ts).date()): idx for idx, ts in enumerate(prepared["timeline"])}
+
+    open_np = bundle_np["Open"]
+    high_np = bundle_np["High"]
+    low_np = bundle_np["Low"]
+    close_np = bundle_np["Close"]
+
+    reasons = []
+    for row in trades_df.itertuples(index=False):
+        day_key = str(getattr(row, "day_key", ""))
+        code = str(getattr(row, "code", ""))
+        day_idx = day_to_idx.get(day_key)
+        s_idx = ticker_to_idx.get(code)
+        if day_idx is None or s_idx is None:
+            reasons.append("missing_lookup_fallback")
+            continue
+
+        entry_price = float(getattr(row, "entry_price", float("nan")))
+        stop_price = float(getattr(row, "stop_price", float("nan")))
+        target_price = float(getattr(row, "target_price", float("nan")))
+        if not np.isfinite([entry_price, stop_price, target_price]).all():
+            reasons.append("missing_ohlc_fallback")
+            continue
+
+        _raw_exit, exit_reason = _resolve_intraday_exit(
+            entry_price=entry_price,
+            open_price=float(open_np[day_idx, s_idx]),
+            high_price=float(high_np[day_idx, s_idx]),
+            low_price=float(low_np[day_idx, s_idx]),
+            close_price=float(close_np[day_idx, s_idx]),
+            stop_price=stop_price,
+            target_price=target_price,
+        )
+        reasons.append(exit_reason if isinstance(exit_reason, str) else "missing_ohlc_fallback")
+
+    return pd.Series(reasons, index=trades_df.index, dtype=object)
+
+
+def add_trade_price_features(trades_df, prepared):
+    if trades_df.empty:
+        return trades_df.copy()
+
+    bundle_np = prepared["bundle_np"]
+    tickers = [str(ticker) for ticker in bundle_np.get("tickers", [])]
+    ticker_to_idx = {ticker: idx for idx, ticker in enumerate(tickers)}
+    day_to_idx = {str(pd.Timestamp(ts).date()): idx for idx, ts in enumerate(prepared["timeline"])}
+
+    high_np = bundle_np["High"]
+    close_np = bundle_np["Close"]
+
+    enriched = trades_df.copy()
+    high_return_pct = []
+    close_return_pct = []
+    fade_from_high_pct = []
+
+    for row in enriched.itertuples(index=False):
+        day_idx = day_to_idx.get(str(getattr(row, "day_key", "")))
+        s_idx = ticker_to_idx.get(str(getattr(row, "code", "")))
+        entry_price = float(getattr(row, "entry_price", float("nan")))
+        exit_price = float(getattr(row, "exit_price", float("nan")))
+
+        if (
+            day_idx is None
+            or s_idx is None
+            or not np.isfinite(entry_price)
+            or entry_price <= 0.0
+            or not np.isfinite(exit_price)
+        ):
+            high_return_pct.append(np.nan)
+            close_return_pct.append(np.nan)
+            fade_from_high_pct.append(np.nan)
+            continue
+
+        day_high = float(high_np[day_idx, s_idx])
+        day_close = float(close_np[day_idx, s_idx])
+        if not np.isfinite(day_high) or not np.isfinite(day_close):
+            high_return_pct.append(np.nan)
+            close_return_pct.append(np.nan)
+            fade_from_high_pct.append(np.nan)
+            continue
+
+        high_ret = (day_high - entry_price) / entry_price * 100.0
+        close_ret = (exit_price - entry_price) / entry_price * 100.0
+        high_return_pct.append(high_ret)
+        close_return_pct.append(close_ret)
+        fade_from_high_pct.append(high_ret - close_ret)
+
+    enriched["high_return_pct"] = high_return_pct
+    enriched["close_return_pct"] = close_return_pct
+    enriched["fade_from_high_pct"] = fade_from_high_pct
+    return enriched
+
+
 def build_daily_frame(daily_stats):
     return pd.DataFrame([{"day_key": day_key, **values} for day_key, values in daily_stats.items()]).sort_values(
         "day_key"
     )
 
 
-def classify_exit_bucket(trades_df):
+def classify_exit_bucket(trades_df, prepared=None):
     classified = trades_df.copy()
     if classified.empty:
         classified["exit_bucket"] = pd.Series(dtype=object)
         return classified
     exit_reason = classified.get("exit_reason", pd.Series(index=classified.index, dtype=object)).fillna("")
+    if prepared is not None and (exit_reason.eq("").any() or "exit_reason" not in classified.columns):
+        inferred = infer_trade_exit_reasons(classified, prepared)
+        exit_reason = exit_reason.where(exit_reason.ne(""), inferred)
+    classified["exit_reason"] = exit_reason
     classified["exit_bucket"] = np.where(
         exit_reason.isin(STOP_EXIT_REASONS),
         "stop",
@@ -483,7 +574,8 @@ def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
     prepared, daily_stats, trade_log = replay_backtest(cache_path)
     timeline = prepared["timeline"]
     daily_df = build_daily_frame(daily_stats)
-    trades_df = classify_exit_bucket(pd.DataFrame(trade_log))
+    trades_df = classify_exit_bucket(pd.DataFrame(trade_log), prepared=prepared)
+    trades_df = add_trade_price_features(trades_df, prepared=prepared)
     trades_df["date"] = pd.to_datetime(trades_df["day_key"], errors="coerce")
     trades_df["weekday"] = trades_df["date"].dt.day_name()
 
@@ -509,24 +601,24 @@ def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
         else pd.DataFrame()
     )
     worst_day_keys = set(worst_days["day_key"]) if not worst_days.empty else set()
+    worst_day_columns = [
+        "day_key",
+        "setup_type",
+        "code",
+        "net_pnl",
+        "exit_reason",
+        "score",
+        "breadth",
+        "market_ratio",
+        "gap_pct",
+        "prev_return",
+        "open_vs_sma_atr",
+        "rs_alpha",
+    ]
+    available_worst_day_columns = [column for column in worst_day_columns if column in train_trades.columns]
     worst_day_trades = (
         train_trades[train_trades["day_key"].isin(worst_day_keys)]
-        .sort_values(["day_key", "net_pnl"])[
-            [
-                "day_key",
-                "setup_type",
-                "code",
-                "net_pnl",
-                "exit_reason",
-                "score",
-                "breadth",
-                "market_ratio",
-                "gap_pct",
-                "prev_return",
-                "open_vs_sma_atr",
-                "rs_alpha",
-            ]
-        ]
+        .sort_values(["day_key", "net_pnl"])[available_worst_day_columns]
         .copy()
         if worst_day_keys
         else pd.DataFrame()

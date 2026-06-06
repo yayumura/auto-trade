@@ -100,8 +100,6 @@ SMA_TREND_PERIOD      = 200    # Long-term trend detection
 COOLING_DAYS          = 2      # [V132] Wait after exit to avoid whip-saws
 SLIPPAGE              = 0.004  # Round-trip (buy: +0.2%, sell: -0.2%)
 SLIPPAGE_RATE         = 0.002  # ★REALISM: One-way slippage rate (0.2%)
-DAYTRADE_BACKTEST_ENTRY_SLIPPAGE_RATE = 0.003  # Backtest uses a slightly thicker entry slippage than live.
-DAYTRADE_BACKTEST_EXIT_SLIPPAGE_RATE = 0.003   # Backtest uses a slightly thicker exit slippage than live.
 DAYTRADE_API_EXPLICIT_TRADE_COST = 0.0         # Day-trade API is treated as fee-free in the shared backtest profile.
 MAX_HOLD_DAYS         = 30     # [V17.0] Time-stop parity
 

@@ -89,6 +89,8 @@ baseline を更新した場合は、[README.md](/abs/path/c:/Users/yayum/git_wor
 
 要点:
 
+- 戦略設計の第一目的は、`train` で最も利益が出る shared strategy を構築すること
+- `holdout` はその train-only 案が壊れていないかを最後に一度だけ確認する veto 用期間であり、利益最大化の主戦場ではない
 - `train` は原因分析・仮説作成・閾値比較・採用候補の順位付けを行う改善用期間
 - `holdout` は採用候補の最終確認と本番シミュレートに使う検証用期間
 - `holdout` を見ながら細かく当て込むのは避け、`train` で作った案を最後に一回だけ確認する

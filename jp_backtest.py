@@ -10,7 +10,7 @@ import pandas as pd
 sys.path.append(os.getcwd())
 
 from backtest import run_backtest_v16_production
-from core.config import INITIAL_CASH, SLIPPAGE_RATE, TAX_RATE
+from core.config import INITIAL_CASH, DAYTRADE_API_EXPLICIT_TRADE_COST, SLIPPAGE_RATE, TAX_RATE
 from core.logic import get_daytrade_week_key
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
 
@@ -382,15 +382,7 @@ def run_jp_broad_backtest(
     bundle_np = prepared["bundle_np"]
     timeline = prepared["timeline"]
     breadth_series = prepared["breadth_series"]
-    tickers = list(bundle_np.get("tickers", []))
-    univ_indices = np.array(
-        [
-            idx
-            for idx, ticker in enumerate(tickers)
-            if str(ticker).endswith(".T")
-        ],
-        dtype=int,
-    )
+    univ_indices = prepared["univ_indices"]
 
     if "1321.T" in bundle["Close"].columns:
         print("1321.T Found and Normalized.")
@@ -406,7 +398,7 @@ def run_jp_broad_backtest(
         breadth_ratio=breadth_series,
         initial_cash=INITIAL_CASH,
         slippage=SLIPPAGE_RATE,
-        explicit_trade_cost=0.0,
+        explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
         profit_tax_rate=TAX_RATE,
         return_daily_stats=True,
         return_trade_log=True,
@@ -482,7 +474,7 @@ def run_jp_broad_backtest(
                 breadth_ratio=standalone_breadth_series,
                 initial_cash=float(standalone_initial_cash),
                 slippage=SLIPPAGE_RATE,
-                explicit_trade_cost=0.0,
+                explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
                 profit_tax_rate=TAX_RATE,
                 evaluation_start_date=standalone_start,
                 return_daily_stats=True,

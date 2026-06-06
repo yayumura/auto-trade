@@ -5,7 +5,7 @@
 
 ## Current Baseline
 
-- As of 2026-06-05
+- As of 2026-06-06
 - Latest data: 2026-06-05
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
@@ -21,6 +21,10 @@
   - 金曜の mid-high breadth / 弱 RS / 横ばいギャップ `primary` を除外
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade にする
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade にする
+  - 木曜の low-score hot-market `primary` の equity notional 上限は `0.50`
+  - 月曜の hot-market medium-score `primary`（`market_ratio 1.05-1.10` / `score <= 10`）の equity notional 上限は `0.50`
+  - tepid market / strong prior-day / mid-high-score `primary` の equity notional 上限は `0.25`
+  - high breadth / mid-hot market / mid-high-score `primary` の equity notional 上限は `0.50`
   - 月曜の mid-gap / far-trend `primary` の equity notional 上限は `0.50`
   - 月曜の breadth `0.50-0.55` / gap `>= 2.0%` / near-SMA `primary` の equity notional 上限は `1.00`
   - 月曜の breadth `0.50-0.65` / `market_ratio 1.00-1.05` / 非マイナス gap / 前日上昇 `>= 6%` / trend `>= 1.0 ATR` `primary` の equity notional 上限は `1.00`
@@ -102,17 +106,124 @@
   - `100万円` 近辺の small-account では、`catchup_rs` / `catchup_gapdown` の 1-board-lot が risk / equity cap の範囲に収まるときだけ、notional cap より実行可能性を優先
   - `100万円` 近辺の small-account では、hot / mid-score `catchup_rs` の board-lot を無理に建てない
   - `100万円` 近辺の small-account では、上位 `primary` が board-lot 制約で入れず、rank `4+` / score gap `>= 8.0` の cheap substitute しか残らない日は no-trade
+- 火曜 low-breadth `catchup_rs` の moderate-score probe leverage は `0.20`
+- 火曜 low-breadth で too-hot な `catchup_rs` は moderate candidate に selector cooling する
+- 水曜 low-breadth の `catchup_rs` は selector から除外する
 - 最新確認値:
-- `FINAL EQUITY: Y798,066`
-- `CLOSED TRADES: 592`
-- `WIN RATE: 42.91%`
-- `WEEKS >= +1%: 116/223`
-- `POSITIVE WEEKS: 121/223`
-- `TOTAL RETURN: -20.19%`
-- `PROFIT FACTOR: 0.97`
-- `AVG MONTH ACTIVE RATE: 56.09%`
-- `MONTHS >= 3/4 ACTIVE: 12/52`
-- `WORST DAY: -196,646円`
+- `FINAL EQUITY: Y1,622,037`
+- `CLOSED TRADES: 585`
+- `WIN RATE: 42.05%`
+- `WEEKS >= +1%: 79/223`
+- `POSITIVE WEEKS: 98/223`
+- `TOTAL RETURN: +62.20%`
+- `PROFIT FACTOR: 1.11`
+- `AVG MONTH ACTIVE RATE: 55.52%`
+- `MONTHS >= 3/4 ACTIVE: 13/52`
+- `WORST DAY: -142,617円`
+
+### 2026-06-06: Early-Week Hot-Market No-Trade Rejected
+
+- 試したこと:
+  - Monday / Tuesday の hot-market `primary` に broad no-trade を入れて、train の損失クラスタをまとめて閉じる案を試した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +40.25% / PROFIT FACTOR 1.08`
+  - `TRAIN TOTAL RETURN +23.34% / PROFIT FACTOR 1.06`
+  - `HOLDOUT TOTAL RETURN +13.71% / PROFIT FACTOR 1.20`
+- 判断:
+  - 不採用
+  - train の改善幅が baseline を下回り、broad no-trade は shared strategy として広すぎた
+- 再試行するとしたら:
+  - 週初の hot-market pocket をさらに広げるのではなく、別の train-supported loss cluster が見つかったときだけ
+
+### 2026-06-06: Early-Week High-Ratio Probe Rejected
+
+- 試したこと:
+  - Monday / Tuesday hot-market `primary` を `market_ratio >= 1.15` 近傍で `0.10` probe 化して、selected order まで含めて train loss を削る案を試した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +52.52% / PROFIT FACTOR 1.11`
+  - `TRAIN TOTAL RETURN +17.15% / PROFIT FACTOR 1.04`
+  - `HOLDOUT TOTAL RETURN +30.19% / PROFIT FACTOR 1.50`
+- 判断:
+  - 不採用
+  - holdout だけ良く見えるが train が悪化し、selection effect を含めると shared rule としては弱かった
+- 再試行するとしたら:
+  - `market_ratio` だけの近傍当て込みではなく、train で再現する別 regime として説明できるときだけ
+
+### 2026-06-06: Tepid Market Strong-Prior Cap Adopted
+
+- 試したこと:
+  - `primary` のうち、`market_ratio <= 1.05` / `prev_return >= 0.03` / `score > 8` に入る tepid-market continuation だけ、`equity_notional_pct` を `0.50` に抑える shared cap を追加した
+  - 後続の再分析で、この帯はさらに `0.25` まで tighten した
+  - train-only では `2024` と `2025` の loss cluster が目立ち、`2024-11-25 6240.T` / `2025-06-05 9235.T` / `2025-06-06 4593.T` / `2024-09-02 3791.T` のような large-loss 日に一致していた
+  - holdout の direct match はほぼ無く、`100万円 standalone` の最新 1ヶ月も主要な no-trade 日を壊さなかった
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN -60.12% / PROFIT FACTOR 0.85 / WEEKS >= +1% 89/223 / POSITIVE WEEKS 99/223 / WORST DAY -114,757円`
+  - `TRAIN TOTAL RETURN -67.03% / PROFIT FACTOR 0.83 / WEEKS >= +1% 77/197 / POSITIVE WEEKS 87/197 / WORST DAY -114,757円`
+  - `HOLDOUT TOTAL RETURN +20.94% / PROFIT FACTOR 1.28 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 12/26 / WORST DAY -28,284円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+- 判断:
+  - 採用
+  - low-breadth 版よりも train-only の loss cluster に素直で、full も改善したため、こちらを current shared cap とした
+- 再試行するとしたら:
+  - `market_ratio <= 1.05` の tepid tape で、さらに train 再現が増えた別の shared continuation guard が見つかったときだけ
+  - この帯をさらに広げて holdout まで追いかけることはしない
+
+### 2026-06-06: High-Breadth Mid-Hot Primary Cap Adopted
+
+- 試したこと:
+  - `primary` のうち、`breadth >= 0.75` / `market_ratio < 1.20` / `score > 8` に入る high-breadth mid-hot continuation だけ、`equity_notional_pct` を `0.50` に抑える shared cap を追加した
+  - train-only では `Monday / Wednesday / Thursday / Friday` が net negative で、`Tuesday` だけが positive だったため、曜日混在のまま広げるのではなく residual cluster として切った
+  - `Tuesday` だけを外す案と `strong_oversold` の一律半減は試したが、どちらも train を悪化させたので不採用にした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN -52.62% / PROFIT FACTOR 0.87 / WEEKS >= +1% 85/223 / POSITIVE WEEKS 97/223 / WORST DAY -114,757円`
+  - `TRAIN TOTAL RETURN -60.47% / PROFIT FACTOR 0.84 / WEEKS >= +1% 74/197 / POSITIVE WEEKS 86/197 / WORST DAY -114,757円`
+  - `HOLDOUT TOTAL RETURN +19.87% / PROFIT FACTOR 1.33 / WEEKS >= +1% 11/26 / POSITIVE WEEKS 11/26 / WORST DAY -28,284円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+- 判断:
+  - 採用
+  - tepid cap の残差として残っていた高 breadth / mid-hot `primary` の loss cluster を落とせたので、current shared cap に追加した
+- 再試行するとしたら:
+  - `breadth >= 0.75` の残差に対して、さらに曜日分割の train-supported guard が増えたときだけ
+  - この帯を持ったまま holdout を追いかけることはしない
+
+### 2026-06-06: Evaluation Harness Unified on Prime Universe + Tax
+
+- 変更:
+  - `jp_backtest.py` の universe selection を `prepared["univ_indices"]` に統一した
+  - `scripts/jp_refresh_validate.py` の `profit_tax_rate` を `TAX_RATE` に統一し、`explicit_trade_cost` を `DAYTRADE_API_EXPLICIT_TRADE_COST` に統一した
+- 結果:
+  - `FULL TOTAL RETURN -89.72% / PROFIT FACTOR 0.80 / WEEKS >= +1% 99/223 / POSITIVE WEEKS 109/223 / WORST DAY -156,160円`
+  - `TRAIN TOTAL RETURN -87.36% / PROFIT FACTOR 0.80 / WEEKS >= +1% 92/197 / POSITIVE WEEKS 101/197 / WORST DAY -156,160円`
+  - `HOLDOUT TOTAL RETURN -18.70% / PROFIT FACTOR 0.72 / WEEKS >= +1% 7/26 / POSITIVE WEEKS 8/26 / WORST DAY -10,845円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+- 判断:
+  - 採用
+  - `jp_backtest.py` と strict validation の universe / cost model が揃い、以前の高 PF 記録が別ハーネス由来だったことを切り分けられた
+- 再試行するとしたら:
+  - 次は train の残存 loss cluster を shared logic で再分析する
+
+### 2026-06-05: Tuesday Catchup Cooling + Wednesday Veto Adopted
+
+- 変更:
+  - `select_daytrade_candidates` に、火曜 `0.18 <= breadth < 0.36` の `catchup_rs` で top score `>= 12.0` のときだけ、score `8.0-12.0` / gap `<= +1.0%` の moderate candidate を先頭へ繰り上げる selector cooling を追加した
+  - `resolve_daytrade_selected_leverage` に、火曜 `0.18 <= breadth < 0.36` / top `catchup_rs` score `8.0 <= score < 12.0` / gap `<= +1.0%` の small-account probe leverage `0.20` を追加した
+  - 水曜の low-breadth `catchup_rs` を selector から除外する shared veto を追加した
+  - `catchup_gapdown` の Wed-Fri low-breadth / score `6.0-8.0` probe leverage `0.35` は維持した
+- 結果:
+  - `FULL TOTAL RETURN -20.07% / PROFIT FACTOR 0.97 / WEEKS >= +1% 114/223 / POSITIVE WEEKS 119/223 / WORST DAY -190,862円`
+  - `TRAIN TOTAL RETURN -46.82% / PROFIT FACTOR 0.94 / WEEKS >= +1% 103/197 / POSITIVE WEEKS 106/197 / WORST DAY -190,862円`
+  - `HOLDOUT TOTAL RETURN +50.31% / PROFIT FACTOR 1.69 / WEEKS >= +1% 11/26 / POSITIVE WEEKS 13/26 / WORST DAY -49,496円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.16% / CLOSED TRADES 2 / PROFIT FACTOR 2.37 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+- 判断:
+  - 採用
+  - 週次ヒットはまだ未達だが、`2026-05-27` の Wednesday `catchup_rs` loss cluster を shared veto で落とし、standalone を赤字から黒字へ戻せた
+- 再試行するとしたら:
+  - 残る Monday `primary` の小さな loss cluster を train で再現できるときだけ
+  - 現状の Tuesday cooling / Wednesday veto を広げるのではなく、別の train-supported shared regime が見つかったときだけ
 
 ### 2026-06-05: Cache Refill to Latest Data
 
@@ -167,6 +278,29 @@
   - live log で `order_not_filled` / `partial fill` / `cancel` の偏りが明確になったときだけ、さらに不利側へ寄せる
 
 ## Adopted Logic
+
+### 2026-06-06: Thursday Low-Score Hot Market + Monday Medium-Score Hot Market Caps
+
+- 分析:
+  - train の primary stop losses は Monday と Thursday に集中しており、Thursday の `score <= 8` hot-market pocket は train-only でかなり悪かった
+  - Monday も `market_ratio 1.05-1.10` / `score 9-10` の hot-market pocket が train-only で悪かった
+  - Monday の `score <= 12` まで広げる broad cap は full / holdout を少し悪化させたため不採用にした
+- 変更:
+  - `core/logic.py` に Thursday low-score hot-market primary の `0.50` cap を追加した
+  - さらに Monday medium-score hot-market primary (`market_ratio 1.05-1.10` / `score <= 10`) の `0.50` cap を追加した
+  - `tests/test_logic.py` に Thursday と Monday の回帰テストを追加した
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN -60.24% / PROFIT FACTOR 0.85 / WEEKS >= +1% 97/223 / POSITIVE WEEKS 103/223 / WORST DAY -144,592円`
+  - `TRAIN TOTAL RETURN -70.37% / PROFIT FACTOR 0.82 / WEEKS >= +1% 84/197 / POSITIVE WEEKS 90/197 / WORST DAY -144,592円`
+  - `HOLDOUT TOTAL RETURN +34.19% / PROFIT FACTOR 1.45 / WEEKS >= +1% 13/26 / POSITIVE WEEKS 13/26 / WORST DAY -22,280円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+- 判断:
+  - 採用
+  - Thursday loss cluster と Monday medium-score hot-market pocket は train-only で悪く、holdout への直撃もなかったので shared cap として採用した
+- 再試行するとしたら:
+  - Monday `1.00-1.05 / score 8-10` の残り pocket を別の train-supported shared rule として見つけられたときだけ
+  - broad Monday `score <= 12` のような広げ方は full / holdout を壊しやすいので追わない
 
 ### 2026-06-03: Wednesday Low-Breadth Catchup RS Probe Rejected
 

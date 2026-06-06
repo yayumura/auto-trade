@@ -1,8 +1,20 @@
+import pickle
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
-from jp_backtest import _resolve_holdout_start_date, _summarize_window
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import jp_refresh_validate
+from jp_backtest import _resolve_holdout_start_date, _summarize_window, run_jp_broad_backtest
 
 
 class TestJpBacktestWindowing(unittest.TestCase):
@@ -74,6 +86,107 @@ class TestJpBacktestWindowing(unittest.TestCase):
         self.assertEqual(summary["plus_1pct_weeks"], 1)
         self.assertEqual(summary["positive_weeks"], 1)
         self.assertEqual(summary["full_month_rates"], [])
+
+
+class TestJpBacktestHarness(unittest.TestCase):
+    def test_run_jp_broad_backtest_uses_prepared_univ_indices(self):
+        cache_path = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", suffix=".pkl", delete=False) as handle:
+                pickle.dump({"ignored": True}, handle)
+                cache_path = handle.name
+
+            bundle = {"Close": pd.DataFrame(columns=["1000.T", "1321.T", "2000.T"])}
+            prepared = {
+                "bundle": bundle,
+                "bundle_np": {"tickers": ["1000.T", "1321.T", "2000.T"]},
+                "timeline": pd.to_datetime(["2026-01-06"]),
+                "breadth_series": np.array([0.50], dtype=float),
+                "univ_indices": np.array([0, 2], dtype=int),
+            }
+
+            with patch("jp_backtest.build_rotation_backtest_inputs_from_cache", return_value=prepared), \
+                patch("jp_backtest._summarize_window", return_value={"start_date": "2026-01-06", "end_date": "2026-01-06"}), \
+                patch("jp_backtest._print_report"), \
+                patch(
+                    "jp_backtest.run_backtest_v16_production",
+                    return_value=(1_000_000.0, 0, {}, [], {}, []),
+                ) as mock_run:
+                result = run_jp_broad_backtest(cache_path=cache_path, holdout_months=0, standalone_latest_months=0)
+
+            self.assertEqual(result, 0)
+            self.assertTrue(mock_run.called)
+            self.assertTrue(np.array_equal(mock_run.call_args.kwargs["univ_indices"], prepared["univ_indices"]))
+        finally:
+            if cache_path is not None:
+                Path(cache_path).unlink(missing_ok=True)
+
+    def test_refresh_validate_uses_tax_rate_for_full_and_standalone(self):
+        prepared = {
+            "bundle": {"Close": pd.DataFrame(columns=["1000.T", "1321.T", "2000.T"])},
+            "bundle_np": {"tickers": ["1000.T", "1321.T", "2000.T"]},
+            "timeline": pd.to_datetime(["2026-05-01", "2026-05-02", "2026-05-06"]),
+            "breadth_series": np.array([0.45, 0.46, 0.47], dtype=float),
+            "univ_indices": np.array([0, 2], dtype=int),
+        }
+
+        sliced_inputs = (
+            prepared["bundle_np"],
+            prepared["timeline"],
+            prepared["breadth_series"],
+            "2026-05-01",
+        )
+
+        def summarize_side_effect(*, label, start_date=None, end_date=None, **_kwargs):
+            return {"label": label, "start_date": start_date, "end_date": end_date}
+
+        with patch.object(jp_refresh_validate, "_load_cache", return_value={"ignored": True}), \
+            patch.object(
+                jp_refresh_validate,
+                "build_rotation_backtest_inputs_from_cache",
+                return_value=prepared,
+            ), \
+            patch.object(
+                jp_refresh_validate,
+                "_slice_backtest_inputs_for_window",
+                return_value=sliced_inputs,
+            ), \
+            patch.object(
+                jp_refresh_validate,
+                "_summarize_window",
+                side_effect=summarize_side_effect,
+            ), \
+            patch.object(
+                jp_refresh_validate,
+                "run_backtest_v16_production",
+                return_value=(1_000_000.0, 0, {}, [], {}, []),
+            ) as mock_run:
+            (
+                full_summary,
+                train_summary,
+                holdout_summary,
+                standalone_summary,
+                *_rest,
+            ) = jp_refresh_validate._build_full_validation_report(
+                cache_path="dummy.pkl",
+                holdout_months=1,
+                standalone_latest_months=1,
+                standalone_initial_cash=1_000_000.0,
+            )
+
+        self.assertIsNotNone(full_summary)
+        self.assertIsNotNone(train_summary)
+        self.assertIsNotNone(holdout_summary)
+        self.assertIsNotNone(standalone_summary)
+        self.assertEqual(len(mock_run.call_args_list), 2)
+        for call in mock_run.call_args_list:
+            self.assertTrue(np.array_equal(call.kwargs["univ_indices"], prepared["univ_indices"]))
+            self.assertAlmostEqual(call.kwargs["profit_tax_rate"], jp_refresh_validate.TAX_RATE)
+            self.assertAlmostEqual(call.kwargs["slippage"], jp_refresh_validate.SLIPPAGE_RATE)
+            self.assertAlmostEqual(
+                call.kwargs["explicit_trade_cost"],
+                jp_refresh_validate.DAYTRADE_API_EXPLICIT_TRADE_COST,
+            )
 
 
 if __name__ == "__main__":
