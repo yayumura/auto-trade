@@ -1438,6 +1438,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 breadth_val=breadth_ratio[i],
                 market_ratio=market_ratio,
                 trade_weekday=curr_time.weekday(),
+                current_equity=day_start_equity,
+                week_start_equity=week_start_equity,
+                current_time=curr_time,
+                account_cash=cash,
+                base_leverage=base_dynamic_lev,
             )
             inverse_only = bool(selected) and all(
                 is_daytrade_inverse_setup_type(item.get("setup_type")) for item in selected

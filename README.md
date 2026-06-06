@@ -31,8 +31,11 @@
   - 稼働率も見るが、低品質なエントリーの水増しはしない
   - 1トレード当たりの equity risk budget と equity notional cap で大負け日を抑える
   - setup ごとの脆弱性が明確なら、shared な setup 別 risk budget で損失集中を下げる
-  - 月火水の high-RS / overheated low-breadth `primary` は no-trade を許容する
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade に寄せる
+  - `primary` の Tuesday high-market mid-breadth では、stop-heavy な low-score / low-RS サブクラスターだけを quarter-size に落とす
+  - `primary` の Monday high-market high-breadth / low-RS は no-trade を許容する
+  - `primary` の Monday high-market high-breadth / high-RS / stretched continuation は no-trade を許容する
+  - `primary` の Wednesday high-market mid-breadth / high-RS / stretched open は quarter-size に落とす
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade を許容する
   - リスク、流動性、スリッページ、急落時損失を無視した過大建玉は採らない
 
@@ -47,32 +50,32 @@
 使用データの最新日は **2026-06-05** です。
 `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の最新確認値:
 
-- `FINAL EQUITY: 1,622,037円`
-- `CLOSED TRADES: 585`
-- `WIN RATE: 42.05%`
-- `WEEKS >= +1%: 79/223`
-- `POSITIVE WEEKS: 98/223`
-- `TOTAL RETURN: +62.20%`
-- `PROFIT FACTOR: 1.11`
-- `AVG MONTH ACTIVE RATE: 55.52%`
+- `FINAL EQUITY: 2,505,626円`
+- `CLOSED TRADES: 609`
+- `WIN RATE: 43.19%`
+- `WEEKS >= +1%: 82/223`
+- `POSITIVE WEEKS: 104/223`
+- `TOTAL RETURN: +150.56%`
+- `PROFIT FACTOR: 1.25`
+- `AVG MONTH ACTIVE RATE: 57.83%`
 - `MONTHS >= 3/4 ACTIVE: 13/52`
-- `WORST DAY: -142,617円`
+- `WORST DAY: -162,631円`
 
 直近 6ヶ月 holdout `2025-12-08` から `2026-06-05` の確認値:
 
-- `START EQUITY: 1,250,252円`
-- `FINAL EQUITY: 1,622,037円`
-- `CLOSED TRADES: 66`
-- `WIN RATE: 43.94%`
-- `TOTAL RETURN: +29.74%`
+- `START EQUITY: 1,832,794円`
+- `FINAL EQUITY: 2,505,626円`
+- `CLOSED TRADES: 65`
+- `WIN RATE: 43.08%`
+- `TOTAL RETURN: +36.71%`
 - `WEEKS >= +1%: 11/26`
 - `POSITIVE WEEKS: 14/26`
-- `PROFIT FACTOR: 1.40`
-- `WORST DAY: -106,064円`
-- `AVG MONTH ACTIVE RATE: 50.01%`
-- `MONTHS >= 50% ACTIVE: 3/6`
+- `PROFIT FACTOR: 1.50`
+- `WORST DAY: -162,631円`
+- `AVG MONTH ACTIVE RATE: 49.21%`
+- `MONTHS >= 50% ACTIVE: 2/6`
 - `MONTHS >= 2/3 ACTIVE: 2/6`
-- `MONTHS >= 3/4 ACTIVE: 1/6`
+- `MONTHS >= 3/4 ACTIVE: 0/6`
 
 直近1ヶ月 `100万円 standalone` `2026-05-07` から `2026-06-05` の確認値:
 
@@ -423,6 +426,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 月曜 breadth `0.50-0.65` / `market_ratio 1.00-1.05` / strong-prev / trend `>= 1 ATR` `primary` の追加 equity cap
   - 月曜の extreme gap / modest-trend `primary` の追加 equity cap
   - breadth `0.45-0.65` / `market_ratio 1.05-1.10` / score `<= 6` / gap `<= 1%` `primary` の追加 equity cap
+  - breadth `0.63-0.75` / `market_ratio 1.05-1.11` / score `4.0-7.3` / `open_vs_sma_atr >= 0.2` `primary` の half-size equity cap
   - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `>= 2.0%` / RS `<= 50` `primary` の no-trade guard
   - 火曜 mid-high breadth / positive-gap / neutral-trend `primary` の追加 equity cap
   - 火曜 mid-high breadth / 非プラスギャップ `primary` の equity 建玉上限
@@ -453,6 +457,12 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `catchup_rs` の setup 別 risk budget
   - `100万円` 近辺の small-account で、`catchup` の board-lot 最低実行単位と cheap `primary` substitute skip が shared sizing に反映されること
   - `100万円` 近辺の small-account で、hot / mid-score `catchup_rs` の board-lot を無理に建てないこと
+  - `100万円` 近辺の small-account で、fallback が board-lot を建てられないときだけ executable な `catchup_rs` / `catchup_gapdown` に限定差し替えすること
+  - `catchup_rs` / `catchup_gapdown` の差し替えが、score 優位が足りない場合は fallback を維持すること
+  - `catchup_rs` の Monday weak-market / moderate-gap pocket を selector から除外すること
+  - `catchup_gapdown` の Wednesday negative-trend pocket を selector から除外すること
+  - `primary` の hot-market no-trade pocket を board-lot 回復で壊さないこと
+  - Tuesday breadth `0.65-0.75` / `market_ratio 1.15-1.30` / score `<= 8.5` / RS `<= 50` / `open_vs_sma_atr <= 4.0` `primary` の quarter-size equity cap
   - `100万円` 近辺の small-account で、木曜 low breadth の `primary` probe 候補を 0.30 notional / 1.0 leverage floor で優先できること
   - `100万円` 近辺の small-account で、月曜 low breadth / high market_ratio `catchup_rs` probe 候補を 0.35 notional / 4.9 equity / 0.155 risk floor で拡大できること
   - weekly profit lock / Thursday selected leverage の rescue で、train-supported narrow fallback band を board-lot rescue できること
