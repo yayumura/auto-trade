@@ -47,6 +47,10 @@ def _build_daytrade_bundle(exit_mode="close"):
         close_data[102, 0] = 108.5
         high_data[102, 0] = 109.2
         low_data[102, 0] = 104.8
+    elif exit_mode == "failed_runup":
+        close_data[102, 0] = 104.8
+        high_data[102, 0] = 107.6
+        low_data[102, 0] = 104.6
     else:
         raise ValueError(f"Unknown exit_mode: {exit_mode}")
 
@@ -70,9 +74,9 @@ def _build_daytrade_bundle(exit_mode="close"):
     return dates, bundle_np
 
 
-def _build_low_breadth_tuesday_catchup_bundle():
+def _build_low_breadth_tuesday_catchup_bundle(start_date="2024-01-05"):
     T = 110
-    dates = pd.date_range("2024-01-05", periods=T)
+    dates = pd.date_range(start_date, periods=T)
     tickers = ["1000.T", "1321.T"]
 
     close_data = np.full((T, 2), [100.0, 100.0])
@@ -119,7 +123,7 @@ def _build_low_breadth_tuesday_catchup_bundle():
     return dates, bundle_np
 
 
-def _run_single_trade_backtest(exit_mode):
+def _run_single_trade_backtest(exit_mode, return_trade_log=False, sl_mult=5.0, tp_mult=20.0):
     dates, bundle_np = _build_daytrade_bundle(exit_mode=exit_mode)
     return run_backtest_v16_production(
         univ_indices=np.arange(1),
@@ -128,15 +132,16 @@ def _run_single_trade_backtest(exit_mode):
         breadth_ratio=np.ones(len(dates)) * 0.8,
         initial_cash=10_000_000,
         max_pos=1,
-        sl_mult=5.0,
-        tp_mult=20.0,
+        sl_mult=sl_mult,
+        tp_mult=tp_mult,
         leverage_rate=1.0,
         breadth_threshold=0.3,
         max_hold_days=1,
+        return_trade_log=return_trade_log,
     )
 
 
-def _run_single_trade_backtest_with_costs(exit_mode, **kwargs):
+def _run_single_trade_backtest_with_costs(exit_mode, sl_mult=5.0, tp_mult=20.0, **kwargs):
     dates, bundle_np = _build_daytrade_bundle(exit_mode=exit_mode)
     return run_backtest_v16_production(
         univ_indices=np.arange(1),
@@ -145,8 +150,8 @@ def _run_single_trade_backtest_with_costs(exit_mode, **kwargs):
         breadth_ratio=np.ones(len(dates)) * 0.8,
         initial_cash=10_000_000,
         max_pos=1,
-        sl_mult=5.0,
-        tp_mult=20.0,
+        sl_mult=sl_mult,
+        tp_mult=tp_mult,
         leverage_rate=1.0,
         breadth_threshold=0.3,
         max_hold_days=1,
@@ -179,6 +184,21 @@ def test_daytrade_intraday_target_locks_gain():
     assert len(results) == 1
     assert results[0] > 0
     assert final_assets > 10_000_000
+
+
+def test_daytrade_intraday_failed_runup_exits_near_break_even():
+    final_assets, trade_count, monthly, results, trade_log = _run_single_trade_backtest(
+        "failed_runup",
+        return_trade_log=True,
+        tp_mult=40.0,
+    )
+
+    assert trade_count == 1, f"Expected 1 trade, got {trade_count}"
+    assert len(results) == 1
+    assert trade_log[0]["exit_reason"] == "intraday_failed_runup"
+    assert trade_log[0]["modeled_exit_price"] == trade_log[0]["entry_price"]
+    assert trade_log[0]["exit_price"] <= trade_log[0]["entry_price"]
+    assert results[0] <= 0
 
 
 def test_daytrade_explicit_cost_reduces_equity():
@@ -257,6 +277,28 @@ def test_daytrade_allows_low_breadth_tuesday_catchup_rs_probe():
     assert len(results) == 1
     assert results[0] > 0
     assert final_assets > 10_000_000.0
+
+
+def test_daytrade_filters_low_breadth_friday_catchup_rs_probe():
+    dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle(start_date="2024-01-01")
+    final_assets, trade_count, monthly, results = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.30,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        slippage=0.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+    )
+
+    assert trade_count == 0
+    assert len(results) == 0
+    assert final_assets == 10_000_000.0
 
 
 def test_daytrade_tries_next_candidate_when_top_is_too_large():
@@ -624,6 +666,69 @@ def test_daytrade_can_trade_strong_oversold_in_bull_market():
     assert trade_count == 1
     assert final_assets > 1_000_000
     assert results[0] > 0
+
+
+def test_daytrade_strong_oversold_tuesday_stretched_open_is_filtered_in_backtest():
+    T = 104
+    dates = pd.date_range("2024-01-05", periods=T, freq="B")
+    tickers = ["9000.T", "1321.T"]
+
+    close_data = np.full((T, 2), [100.0, 100.0])
+    open_data = np.full((T, 2), [100.0, 100.0])
+    high_data = np.full((T, 2), [101.0, 101.0])
+    low_data = np.full((T, 2), [99.0, 99.0])
+    atr_data = np.full((T, 2), 2.0)
+    rsi2_data = np.full((T, 2), [20.0, 50.0])
+    rs_alpha_data = np.full((T, 2), [15.0, 0.0])
+
+    close_data[100] = [103.5, 100.0]
+    open_data[100] = [103.0, 100.0]
+    high_data[100] = [103.8, 101.0]
+    low_data[100] = [102.8, 99.5]
+
+    close_data[101] = [103.0, 101.0]
+    open_data[101] = [103.2, 101.0]
+    high_data[101] = [103.4, 101.5]
+    low_data[101] = [102.9, 100.8]
+    rsi2_data[101] = [1.5, 50.0]
+
+    open_data[102] = [100.0, 101.5]
+    close_data[102] = [102.8, 102.0]
+    high_data[102] = [103.2, 102.2]
+    low_data[102] = [99.8, 101.2]
+
+    bundle_np = {
+        "Close": close_data,
+        "Open": open_data,
+        "High": high_data,
+        "Low": low_data,
+        "SMA5": np.full((T, 2), [99.0, 100.0]),
+        "SMA20": np.full((T, 2), [98.0, 100.0]),
+        "SMA100": np.full((T, 2), [96.0, 100.0]),
+        "SMA200": np.full((T, 2), [95.0, 100.0]),
+        "ATR": atr_data,
+        "RSI2": rsi2_data,
+        "RS_Alpha": rs_alpha_data,
+        "Turnover": np.full((T, 2), 2_000_000_000.0),
+        "BB_LOWER_2": np.full((T, 2), [94.0, 95.0]),
+        "tickers": tickers,
+    }
+
+    final_assets, trade_count, monthly, results = run_backtest_v16_production(
+        univ_indices=np.array([0]),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=1_000_000,
+        max_pos=1,
+        slippage=0.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+    )
+
+    assert trade_count == 0
+    assert final_assets == 1_000_000
+    assert results == []
 
 
 def test_monthly_rotation_can_hold_a_winner():

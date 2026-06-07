@@ -20,22 +20,33 @@
   - 前日リターンと寄りギャップ
   - ATR、RSI2、相対強度
 - 補助セットアップ:
-  - `fallback`
-  - `strong_oversold`
-  - `catchup`
-  - `inverse`
-  - `inverse_pullback`
-  - `inverse_rebreak`
+- `fallback`
+- `strong_oversold`
+- `catchup`
+- `inverse`
+- `inverse_pullback`
+- `inverse_rebreak`
 - 設計方針:
   - 週初資産比 `+1%` の達成週数を最適化目標として追う
   - 稼働率も見るが、低品質なエントリーの水増しはしない
   - 1トレード当たりの equity risk budget と equity notional cap で大負け日を抑える
   - setup ごとの脆弱性が明確なら、shared な setup 別 risk budget で損失集中を下げる
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade に寄せる
+  - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
+  - `catchup_rs` の Monday / Friday 高 breadth hot-market は selector から除外する
+  - `fallback` の high breadth / hot-market pocket は selector から除外する
+  - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）は selector から除外する
+  - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional は `0.25` に抑える
+  - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
   - `primary` の Tuesday high-market mid-breadth では、stop-heavy な low-score / low-RS サブクラスターだけを quarter-size に落とす
+  - `primary` の Tuesday high breadth / high-score / stretched open は half-size に落とす
+  - `strong_oversold` の Tuesday 伸び切り open は selector から除外する
   - `primary` の Monday high-market high-breadth / low-RS は no-trade を許容する
   - `primary` の Monday high-market high-breadth / high-RS / stretched continuation は no-trade を許容する
   - `primary` の Wednesday high-market mid-breadth / high-RS / stretched open は quarter-size に落とす
+  - `primary` の high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap は quarter-size に落とす
+  - `primary` の Wednesday low-breadth / high-gap / high-score / strong-open は quarter-size に落とす
+  - `primary` の Thursday high-score / moderate-prev-return / hot-market / stretched open は quarter-size に落とす
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade を許容する
   - リスク、流動性、スリッページ、急落時損失を無視した過大建玉は採らない
 
@@ -46,34 +57,34 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-06** です。
+最新確認日は **2026-06-07** です。
 使用データの最新日は **2026-06-05** です。
 `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の最新確認値:
 
-- `FINAL EQUITY: 2,505,626円`
-- `CLOSED TRADES: 609`
-- `WIN RATE: 43.19%`
-- `WEEKS >= +1%: 82/223`
-- `POSITIVE WEEKS: 104/223`
-- `TOTAL RETURN: +150.56%`
-- `PROFIT FACTOR: 1.25`
-- `AVG MONTH ACTIVE RATE: 57.83%`
-- `MONTHS >= 3/4 ACTIVE: 13/52`
-- `WORST DAY: -162,631円`
+- `FINAL EQUITY: 6,023,918円`
+- `CLOSED TRADES: 627`
+- `WIN RATE: 44.50%`
+- `WEEKS >= +1%: 87/223`
+- `POSITIVE WEEKS: 111/223`
+- `TOTAL RETURN: +502.39%`
+- `PROFIT FACTOR: 1.62`
+- `AVG MONTH ACTIVE RATE: 59.51%`
+- `MONTHS >= 3/4 ACTIVE: 17/52`
+- `WORST DAY: -388,901円`
 
 直近 6ヶ月 holdout `2025-12-08` から `2026-06-05` の確認値:
 
-- `START EQUITY: 1,832,794円`
-- `FINAL EQUITY: 2,505,626円`
-- `CLOSED TRADES: 65`
-- `WIN RATE: 43.08%`
-- `TOTAL RETURN: +36.71%`
-- `WEEKS >= +1%: 11/26`
+- `START EQUITY: 4,083,431円`
+- `FINAL EQUITY: 6,023,918円`
+- `CLOSED TRADES: 72`
+- `WIN RATE: 41.67%`
+- `TOTAL RETURN: +47.52%`
+- `WEEKS >= +1%: 12/26`
 - `POSITIVE WEEKS: 14/26`
-- `PROFIT FACTOR: 1.50`
-- `WORST DAY: -162,631円`
-- `AVG MONTH ACTIVE RATE: 49.21%`
-- `MONTHS >= 50% ACTIVE: 2/6`
+- `PROFIT FACTOR: 1.66`
+- `WORST DAY: -388,901円`
+- `AVG MONTH ACTIVE RATE: 55.16%`
+- `MONTHS >= 50% ACTIVE: 5/6`
 - `MONTHS >= 2/3 ACTIVE: 2/6`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
 
@@ -144,7 +155,7 @@ auto-trade/
   本番の自動売買実行エントリです。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
-  live 側の intraday stop / target と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
+  live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
 
 - `backtest.py`
   共有戦略ロジックを使って仮想約定を行うバックテスト実行レイヤーです。
@@ -168,6 +179,7 @@ auto-trade/
 
 - `analyze_backtest_trade_log.py`
   `jp_backtest.py` と同じ shared strategy replay を 1 回だけ行い、`train` 側の miss week、worst day、`primary` stop cluster、`primary close_exit` の fade cluster を再集計する分析スクリプトです。
+  `primary` の failed-runup fade cluster も独立に追跡できます。
   miss week については、「worst trade をどれだけ浅くすれば週次 +1% が反転するか」「loss の何割を単一 trade が占めているか」も定量化できます。
   `backtest.py` の `trade_log` に含まれる `exit_reason`、stop/target 距離、equity 比 notional、日中高安から見た run-up / fade も確認できます。
 
@@ -427,6 +439,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 月曜の extreme gap / modest-trend `primary` の追加 equity cap
   - breadth `0.45-0.65` / `market_ratio 1.05-1.10` / score `<= 6` / gap `<= 1%` `primary` の追加 equity cap
   - breadth `0.63-0.75` / `market_ratio 1.05-1.11` / score `4.0-7.3` / `open_vs_sma_atr >= 0.2` `primary` の half-size equity cap
+  - Wednesday low-breadth / high-gap / high-score / strong-open `primary` の追加 equity cap
   - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `>= 2.0%` / RS `<= 50` `primary` の no-trade guard
   - 火曜 mid-high breadth / positive-gap / neutral-trend `primary` の追加 equity cap
   - 火曜 mid-high breadth / 非プラスギャップ `primary` の equity 建玉上限
@@ -435,6 +448,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 水曜 hot gap / below-SMA `primary` の追加 equity cap
   - 木曜 breadth `0.55-0.70` / 小幅ギャップ continuation `primary` の tighter equity cap
   - 木曜 mid breadth / 小幅ギャップ / continuation `primary` の追加 equity cap
+  - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の quarter-size cap
+  - 木曜 high-score / moderate-prev-return / hot-market / stretched open の quarter-size cap
   - 月曜 high breadth / 小幅ギャップ `primary` の equity 建玉上限
   - 高 breadth / mildly crowded market / mid-score `primary` の equity cap
   - 火曜の指数過熱局面 `primary` の equity cap
@@ -451,6 +466,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `fallback` の score 再較正と mid-score size-up / small-account board-lot floor 回帰
   - `fallback` の equity 建玉上限
   - 高 breadth / 前日上昇 / SMA から遠い `fallback` の equity 建玉上限
+  - `catchup_rs` の Monday / Friday 高 breadth hot-market selector フィルタ
+  - `fallback` の hot-market / high-breadth selector フィルタ
   - 火曜 mid-breadth continuation / 水曜 high breadth `fallback` の曜日別 equity cap
   - 水曜 high breadth / gap `> 0.5%` `fallback` の追加 equity cap
   - `inverse_pullback` の high-confidence probe leverage / executable-share 回帰
@@ -460,7 +477,9 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `100万円` 近辺の small-account で、fallback が board-lot を建てられないときだけ executable な `catchup_rs` / `catchup_gapdown` に限定差し替えすること
   - `catchup_rs` / `catchup_gapdown` の差し替えが、score 優位が足りない場合は fallback を維持すること
   - `catchup_rs` の Monday weak-market / moderate-gap pocket を selector から除外すること
+  - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）を selector から除外すること
   - `catchup_gapdown` の Wednesday negative-trend pocket を selector から除外すること
+  - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑えること
   - `primary` の hot-market no-trade pocket を board-lot 回復で壊さないこと
   - Tuesday breadth `0.65-0.75` / `market_ratio 1.15-1.30` / score `<= 8.5` / RS `<= 50` / `open_vs_sma_atr <= 4.0` `primary` の quarter-size equity cap
   - `100万円` 近辺の small-account で、木曜 low breadth の `primary` probe 候補を 0.30 notional / 1.0 leverage floor で優先できること
@@ -603,4 +622,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-06
+Last updated: 2026-06-07

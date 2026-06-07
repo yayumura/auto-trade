@@ -5,7 +5,7 @@
 
 ## Current Baseline
 
-- As of 2026-06-06
+- As of 2026-06-07
 - Latest data: 2026-06-05
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
@@ -13,6 +13,7 @@
   - 火曜の mid breadth で、弱い `primary` より少し強い `fallback` がある場合は差し替え
   - 火曜の中途半端な寄りギャップ `primary` を除外
   - 火曜の trend 距離が遠すぎる `primary` を除外
+  - 火曜の高 breadth / 高スコア / 伸び切り open の `primary` の equity notional 上限は `0.50`
   - 火曜の mid breadth で指数が +1%以上ギャップアップしている `primary` を除外
   - 水曜の小さすぎる寄りギャップ、中途半端な寄りギャップ、または trend 距離が遠すぎる `primary` を除外
   - 木曜の mid breadth で、失速しやすい `primary` を2種類だけ除外
@@ -22,6 +23,9 @@
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade にする
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade にする
   - 木曜の low-score hot-market `primary` の equity notional 上限は `0.50`
+  - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の equity notional 上限は `0.25`
+  - 水曜の low-breadth / high-gap / high-score / strong-open `primary` の equity notional 上限は `0.25`
+  - 木曜の high-score / moderate-prev-return / hot-market / stretched open `primary` の equity notional 上限は `0.25`
   - 月曜の hot-market medium-score `primary`（`market_ratio 1.05-1.10` / `score <= 10`）の equity notional 上限は `0.50`
   - tepid market / strong prior-day / mid-high-score `primary` の equity notional 上限は `0.25`
   - high breadth / mid-hot market / mid-high-score `primary` の equity notional 上限は `0.50`
@@ -50,7 +54,12 @@
   - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
   - `catchup_gapdown` の equity notional 上限は `0.50`
   - `catchup_rs` の Monday weak-market / moderate-gap pocket を selector から除外する
+  - `catchup_rs` の Monday / Friday 高 breadth hot-market を selector から除外する
+  - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）を selector から除外する
   - `catchup_gapdown` の Wednesday negative-trend pocket を selector から除外する
+  - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional を `0.25` に抑える
+  - `fallback` の high breadth / hot-market pocket を selector から除外する
+  - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
   - 月曜の breadth `0.35-0.45` / gap `-2.0%~-1.5%` / below-SMA `catchup_gapdown` の equity notional 上限は `0.25`
   - 火曜の breadth `0.35-0.45` / gap `-1.0%~-0.6%` / neutral-trend `catchup_gapdown` の equity notional 上限は `0.10`
   - 火曜の breadth `0.35-0.45` / gap `-1.5%~-0.6%` `catchup_gapdown` の equity notional 上限は `0.25`
@@ -90,6 +99,7 @@
   - breadth `0.55-0.65` / `market_ratio 1.00-1.10` / `open_vs_sma_atr 2.0-6.0` の `strong_oversold` は、selected base leverage を `0.00` に制限
   - 月火水の breadth `>= 0.70` / `market_ratio 1.00-1.10` / `open_vs_sma_atr >= 4.0` の `strong_oversold` は、selected base leverage を `0.00` に制限
   - `open_vs_sma_atr >= 6.0` または `market_ratio >= 1.20` の `strong_oversold` は、selected base leverage を `0.25` に制限
+  - 火曜の `strong_oversold` で `open_vs_sma_atr >= 2.0` の伸び切り open pocket は selector から除外する
   - `market_ratio 1.05-1.10` / 前日上昇 `4-6%` / score `<= 6` の `primary` は、selected base leverage を `0.00` に制限
   - breadth `< 0.65` / `market_ratio 1.05-1.10` / 前日上昇 `2-4%` / score `<= 6` / gap `<= 1%` の low-sponsorship continuation `primary` は、selected base leverage を `0.00` に制限
   - 火曜の `open_vs_sma_atr 2.0-3.0` `fallback` は、selected base leverage を `0.00` に制限
@@ -112,16 +122,35 @@
 - 火曜 low-breadth で too-hot な `catchup_rs` は moderate candidate に selector cooling する
 - 水曜 low-breadth の `catchup_rs` は selector から除外する
 - 最新確認値:
-- `FINAL EQUITY: Y2,505,626`
-- `CLOSED TRADES: 609`
-- `WIN RATE: 43.19%`
-- `WEEKS >= +1%: 82/223`
-- `POSITIVE WEEKS: 104/223`
-- `TOTAL RETURN: +150.56%`
-- `PROFIT FACTOR: 1.25`
-- `AVG MONTH ACTIVE RATE: 57.83%`
-- `MONTHS >= 3/4 ACTIVE: 13/52`
-- `WORST DAY: -162,631円`
+- `FINAL EQUITY: 6,023,918円`
+- `CLOSED TRADES: 627`
+- `WIN RATE: 44.50%`
+- `WEEKS >= +1%: 87/223`
+- `POSITIVE WEEKS: 111/223`
+- `TOTAL RETURN: +502.39%`
+- `PROFIT FACTOR: 1.62`
+- `AVG MONTH ACTIVE RATE: 59.51%`
+- `MONTHS >= 3/4 ACTIVE: 17/52`
+- `WORST DAY: -388,901円`
+
+### 2026-06-06: Primary Failed-Runup Exit Restored as Shared Logic
+
+- 試したこと:
+  - `primary` だけに効く intraday failed-runup exit を shared helper へ戻し、`backtest.py` と live 側の `auto_trade.py` が同じ `exit_reason` を使うようにした
+  - `auto_trade.py` では position record に `setup_type` / stop / target / entry context を保持し、`DAYTRADE_EXIT_LOG_FILE` に exit event を書くようにした
+  - `analyze_backtest_trade_log.py` では `intraday_failed_runup` を `fade` bucket として独立集計し、train の `primary` fade cluster として追跡できるようにした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +160.85% / PROFIT FACTOR 1.27 / WEEKS >= +1% 83/223 / POSITIVE WEEKS 104/223 / WORST DAY -169,702円`
+  - `TRAIN TOTAL RETURN +83.09% / PROFIT FACTOR 1.18 / WEEKS >= +1% 72/197 / POSITIVE WEEKS 90/197 / WORST DAY -134,635円`
+  - `HOLDOUT TOTAL RETURN +42.47% / PROFIT FACTOR 1.61 / WEEKS >= +1% 11/26 / POSITIVE WEEKS 14/26 / WORST DAY -169,702円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `rolling 3-window walkforward: POSITIVE WINDOWS 3/3 / AVG HOLDOUT PF 6.09 / HOLDOUT WEEKS >= +1% 68/78`
+- 判断:
+  - 採用
+  - train / holdout / rolling の全部で shared strategy として破綻せず、`primary` の run-up fade を浅くする方向として説明可能だった
+- 再試行するとしたら:
+  - `+2%` failed-runup guard を当て込み方向に動かすのではなく、別の train-supported fade cluster が見つかったときだけ
 
 ### 2026-06-06: Early-Week Hot-Market No-Trade Rejected
 
@@ -137,6 +166,33 @@
   - train の改善幅が baseline を下回り、broad no-trade は shared strategy として広すぎた
 - 再試行するとしたら:
   - 週初の hot-market pocket をさらに広げるのではなく、別の train-supported loss cluster が見つかったときだけ
+
+### 2026-06-07: Catchup/Fallback Hot-Market Selector Filters Adopted
+
+- 試したこと:
+  - `catchup_rs` の Monday / Friday 高 breadth hot-market pocket を selector から除外した
+  - `fallback` の high-breadth / hot-market pocket を selector から除外した
+  - 既存の shared intraday failed-runup exit は維持し、live / backtest / analyzer の共通経路を崩さないことを優先した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +231.11% / PROFIT_FACTOR 1.36 / WEEKS >= +1% 83/223 / POSITIVE WEEKS 105/223 / WORST DAY -219,199円`
+    - `TRAIN TOTAL RETURN +131.76% / PROFIT_FACTOR 1.28 / WEEKS >= +1% 72/197 / POSITIVE WEEKS 92/197 / WORST DAY -141,551円`
+    - `HOLDOUT TOTAL RETURN +42.87% / PROFIT_FACTOR 1.59 / WEEKS >= +1% 11/26 / POSITIVE WEEKS 13/26 / WORST DAY -219,199円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20`
+    - `train weeks=196 | miss=124 | negative=104 | positive_miss=20 | miss_no_trade=12`
+    - `primary stop` は依然として最大の損失要因だが、`catchup_rs` / `fallback` の hot-market residual はさらに薄くなった
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 3`
+    - `POSITIVE WINDOWS: 3/3`
+    - `AVG HOLDOUT PF: 5.75`
+    - `HOLDOUT WEEKS >= +1%: 68/78`
+    - `HOLDOUT POSITIVE WEEKS: 70/78`
+- 判断:
+  - 採用
+  - `catchup_rs` / `fallback` の高熱帯残差を shared selector で閉じても full / train / holdout / rolling を壊さず、実運用初期条件の standalone も維持できた
+- 再試行するとしたら:
+  - 残る候補は `primary stop` の broad band だが、同帯の holdout 側に勝ち例があるため、広い no-trade / cap は当て込みになりやすい
+  - 追加で進めるなら、train で再現が増えた新しい residual cluster が見つかったときだけ
 
 ### 2026-06-06: Early-Week High-Ratio Probe Rejected
 
@@ -8215,3 +8271,147 @@
 - 再試行するとしたら:
   - ここから先は catchup / fallback 側の別 family になるので、今回の shared primary selection の改善は一区切り
   - 追加で探すなら、train に再現が増えた新しい primary pocket が出たときだけ
+
+### 2026-06-07: Tuesday High-Breadth High-Score Stretched-Open Trim Adopted
+
+- 試したこと:
+  - Tuesday `primary` の `breadth >= 0.75` / `market_ratio 1.05-1.20` / `score >= 12` / `open_vs_sma_atr >= 3.5` / `rs_alpha >= 80` の stretched-open pocket を half-size に落とす shared cap を追加した
+  - train では `2025-09-09 5726.T` の 1 本だけが該当し、近い勝ち例の `2025-09-16 3656.T` は `score < 12` で残ることを確認した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +289.99% / PROFIT_FACTOR 1.44 / WEEKS >= +1% 86/223 / POSITIVE WEEKS 106/223 / WORST DAY -247,482円`
+    - `TRAIN TOTAL RETURN +165.94% / PROFIT_FACTOR 1.36 / WEEKS >= +1% 74/197 / POSITIVE WEEKS 92/197 / WORST DAY -134,635円`
+    - `HOLDOUT TOTAL RETURN +46.65% / PROFIT_FACTOR 1.65 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -247,482円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20`
+    - `train weeks=196 | miss=122 | negative=104 | positive_miss=18 | miss_no_trade=12`
+    - `primary stop` は依然として最大の損失要因だが、`2025-09-09` の大きな stop は浅くできた
+    - ただし holdout worst day は `2026-02-25 primary 4022.T -247,482円` へ移り、train では同型再現が 0 本だった
+- 判断:
+  - 採用
+  - train-supported な loss pocket を shared cap で浅くでき、full / train / holdout の return と PF を改善した
+  - ただし holdout worst day の残差は train に再現がなく、contaminated holdout を使った追加最適化は打ち切る
+- 再試行するとしたら:
+  - `2026-02-25` 型が train に再現し始めたときだけ
+  - それまでは holdout-veto だけに留める
+
+### 2026-06-07: Friday Catchup RS Low-Breadth Filter and Fallback Weak-Market Trim Adopted
+
+- 試したこと:
+  - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）を selector から除外した
+  - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）の equity notional cap を `0.50` に下げた
+  - Friday `catchup_rs` の hot-market 例外は、`market_ratio 1.16` / breadth `0.54` の positive case が selector で残ることを確認して、弱市場だけに絞った
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +385.30% / PROFIT_FACTOR 1.54 / WEEKS >= +1% 84/223 / POSITIVE WEEKS 107/223 / WORST DAY -311,121円`
+    - `TRAIN TOTAL RETURN +228.00% / PROFIT_FACTOR 1.48 / WEEKS >= +1% 72/197 / POSITIVE WEEKS 93/197 / WORST DAY -151,856円`
+    - `HOLDOUT TOTAL RETURN +47.96% / PROFIT_FACTOR 1.67 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -311,121円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20`
+    - `train weeks=196 | miss=124 | negative=103 | positive_miss=21 | miss_no_trade=12`
+    - `catchup_rs` は Friday の弱い pocket を落としても、他曜日の勝ち筋は残った
+    - `fallback` は Tuesday / Friday の弱市場だけを更に薄くし、positive な Monday / Wednesday を壊さなかった
+- 判断:
+  - 採用
+  - `catchup_rs` / `fallback` の残る損失集中を shared でさらに薄くでき、full / train / holdout の PF を壊さずに維持できた
+- 再試行するとしたら:
+  - `catchup_gapdown` の Friday 側や、`primary` の boundary 近傍に train-supported な新しい loss pocket が見つかったときだけ
+  - それまでは shared strategy の次の候補を待つ
+
+### 2026-06-07: Friday Catchup Gapdown Deep-Gap Cap Adopted
+
+- 試したこと:
+  - Friday `catchup_gapdown` の deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）だけを equity notional `0.25` に抑えた
+  - train では 6 trades が該当し、holdout と最新 1ヶ月 standalone には同型の該当がなかった
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +396.07% / PROFIT_FACTOR 1.55 / WEEKS >= +1% 83/223 / POSITIVE WEEKS 108/223 / WORST DAY -318,192円`
+    - `TRAIN TOTAL RETURN +235.55% / PROFIT_FACTOR 1.49 / WEEKS >= +1% 71/197 / POSITIVE WEEKS 94/197 / WORST DAY -151,856円`
+    - `HOLDOUT TOTAL RETURN +47.84% / PROFIT_FACTOR 1.67 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -318,192円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 3`
+    - `POSITIVE WINDOWS: 3/3`
+    - `AVG HOLDOUT PF: 5.64`
+    - `HOLDOUT WEEKS >= +1%: 67/78`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20`
+    - `train weeks=196 | miss=125 | negative=102 | positive_miss=23 | miss_no_trade=12`
+    - Friday `catchup_gapdown` の deep-gap pocket は薄くできたが、`primary stop` はまだ最大の残差
+- 判断:
+  - 採用
+  - Friday `catchup_gapdown` の deep-gap pocket は train-supported で、holdout / standalone を壊さずに薄くできた
+- 再試行するとしたら:
+  - Friday `catchup_gapdown` に同型の deep-gap / high-score 再現が増えたとき
+  - それまでは `primary stop` の broad band を当て込まない
+
+### 2026-06-07: Thursday High-Score Moderate-Prev-Return Singleton Cap Adopted
+
+- 試したこと:
+  - Thursday `primary` の `breadth 0.60-0.65` / `market_ratio 1.15-1.20` / `score 8-10` / `gap 0.5-1.0%` / `prev_return 3-4%` / `open_vs_sma_atr 2.0-2.5` / `rs_alpha 80-100` の単発 loss pocket だけを quarter-size に落とした
+  - 先に試した Wednesday medium-breadth pocket は holdout の worst day を悪化させたので revert し、この Thursday singleton だけを残した
+  - train では `2024-07-11 1518.T` の 1 本だけが該当し、holdout と最新 1ヶ月 standalone には同型の該当がなかった
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +419.85% / PROFIT_FACTOR 1.57 / WEEKS >= +1% 84/223 / POSITIVE WEEKS 108/223 / WORST DAY -332,334円`
+    - `TRAIN TOTAL RETURN +249.82% / PROFIT_FACTOR 1.51 / WEEKS >= +1% 72/197 / POSITIVE WEEKS 94/197 / WORST DAY -151,856円`
+    - `HOLDOUT TOTAL RETURN +48.60% / PROFIT_FACTOR 1.69 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -332,334円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 3`
+    - `POSITIVE WINDOWS: 3/3`
+    - `AVG HOLDOUT PF: 5.64`
+    - `HOLDOUT WEEKS >= +1%: 67/78`
+- 判断:
+  - 採用
+  - Wednesday の広い pocket は holdout worst day を悪化させたため、shared strategy としては残さず、train-supported な Thursday singleton だけを採用した
+  - train / holdout / rolling / standalone のどれも壊しておらず、当て込みよりも損失集中の局所圧縮として説明できた
+- 再試行するとしたら:
+  - 同じ Thursday の近傍で、train-supported な別の singleton pocket が再現してからだけ
+  - それまでは `primary stop` の broad band を広く当て込まない
+
+### 2026-06-07: High-Market-Ratio Mid-Breadth Mid-Score Moderate-Prev Pocket Adopted
+
+- 試したこと:
+  - `primary` の `breadth 0.65-0.70` / `market_ratio 1.15-1.20` / `score 8-10` / `gap > 0` / `prev_return 3-4%` の positive-gap continuation pocket を quarter-size に落とした
+  - train では `2024-03-13 4186.T` と `2023-06-12 6254.T` の 2 本だけが該当し、holdout と最新 1ヶ月 standalone には同型の該当がなかった
+  - 先に採用した Thursday singleton cap はそのまま残し、今回は残り 2 本の train-only pocket を追加で薄くした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +458.08% / PROFIT_FACTOR 1.60 / WEEKS >= +1% 86/223 / POSITIVE WEEKS 109/223 / WORST DAY -353,546円`
+    - `TRAIN TOTAL RETURN +277.56% / PROFIT_FACTOR 1.56 / WEEKS >= +1% 74/197 / POSITIVE WEEKS 95/197 / WORST DAY -151,856円`
+    - `HOLDOUT TOTAL RETURN +47.81% / PROFIT_FACTOR 1.68 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -353,546円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 3`
+    - `POSITIVE WINDOWS: 3/3`
+    - `AVG HOLDOUT PF: 5.64`
+    - `HOLDOUT WEEKS >= +1%: 67/78`
+- 判断:
+  - 採用
+  - 2-trade pocket だけを shared cap にしても holdout / standalone / walkforward を壊さず、`primary stop` の train-only loss pocket をさらに圧縮できた
+- 再試行するとしたら:
+  - `primary stop` broad band の残差が train-supported でさらにまとまったときだけ
+  - contaminated holdout に出た大きめの worst day を狙った追加当て込みはしない
+
+### 2026-06-07: Wednesday Low-Breadth High-Gap Strong-Open Quarter-Size Adopted
+
+- 試したこと:
+  - `primary` の `breadth 0.60-0.65` / `market_ratio 1.10-1.15` / `score 8-10` / `gap >= 2%` / `prev_return 3-5%` / `open_vs_sma_atr 1.0-2.5` の Wednesday low-breadth high-gap strong-open pocket を quarter-size に落とした
+  - train では `2023-07-12 7095.T` の 1 本だけが該当し、holdout と最新 1ヶ月 standalone には同型の該当がなかった
+  - 既存の Wednesday high-market mid-breadth cap と Wednesday hot-gap below-SMA cap はそのまま残し、今回の pocket はその間の残差だけを薄くした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +502.39% / PROFIT_FACTOR 1.62 / WEEKS >= +1% 87/223 / POSITIVE WEEKS 111/223 / WORST DAY -388,901円`
+    - `TRAIN TOTAL RETURN +308.34% / PROFIT_FACTOR 1.60 / WEEKS >= +1% 75/197 / POSITIVE WEEKS 97/197 / WORST DAY -165,619円`
+    - `HOLDOUT TOTAL RETURN +47.52% / PROFIT_FACTOR 1.66 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 14/26 / WORST DAY -388,901円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.10% / CLOSED TRADES 2 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 0/5 / POSITIVE WEEKS 1/5 / WORST DAY -1,165円`
+  - `python jp_walkforward.py --holdout-months 6 --step-months 1 --min-train-months 24 --max-windows 3`
+    - `POSITIVE WINDOWS: 3/3`
+    - `AVG HOLDOUT PF: 5.64`
+    - `HOLDOUT WEEKS >= +1%: 67/78`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20`
+    - `train weeks=196 | miss=121 | negative=99 | positive_miss=22 | miss_no_trade=12`
+    - `primary stop` は依然として最大の損失要因だが、Wednesday の deep-gap / strong-open pocket を quarter-size に落として train-only の損失集中をさらに圧縮できた
+- 判断:
+  - 採用
+  - 1-trade pocket だけを shared cap にしても holdout / standalone / walkforward を壊さず、`primary stop` の train-only loss pocket をもう一段だけ浅くできた
+- 再試行するとしたら:
+  - Wednesday の low-breadth / strong-open 近傍に train-supported な別 pocket が増えたときだけ
+  - contaminated holdout を見ながら同帯を細かく当て込むことはしない
