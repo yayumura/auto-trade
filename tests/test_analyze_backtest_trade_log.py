@@ -4,6 +4,7 @@ from analyze_backtest_trade_log import (
     build_miss_week_flip_potential_table,
     build_miss_week_loss_dominance_table,
     build_miss_week_sensitivity_table,
+    build_primary_failed_runup_table,
     build_primary_close_fade_table,
     build_train_week_table,
     classify_exit_bucket,
@@ -16,13 +17,14 @@ def test_classify_exit_bucket_uses_exit_reason():
         [
             {"exit_reason": "intraday_stop"},
             {"exit_reason": "open_target"},
+            {"exit_reason": "intraday_failed_runup"},
             {"exit_reason": "close_exit"},
         ]
     )
 
     classified = classify_exit_bucket(trades)
 
-    assert classified["exit_bucket"].tolist() == ["stop", "target", "close_or_open"]
+    assert classified["exit_bucket"].tolist() == ["stop", "target", "fade", "close_or_open"]
 
 
 def test_build_train_week_table_skips_partial_weeks():
@@ -116,6 +118,48 @@ def test_build_primary_close_fade_table_sorts_largest_givebacks_first():
 
     assert fades["code"].tolist() == ["1111.T", "2222.T"]
     assert "fade_from_high_pct" in fades.columns
+
+
+def test_build_primary_failed_runup_table_sorts_largest_givebacks_first():
+    trades = pd.DataFrame(
+        [
+            {
+                "day_key": "2026-01-05",
+                "code": "1111.T",
+                "net_pnl": -200000.0,
+                "high_return_pct": 2.5,
+                "close_return_pct": -0.8,
+                "fade_from_high_pct": -3.3,
+                "exit_reason": "intraday_failed_runup",
+                "breadth": 0.62,
+                "market_ratio": 1.04,
+                "gap_pct": 0.004,
+                "prev_return": 0.03,
+                "open_vs_sma_atr": 1.5,
+                "rs_alpha": 45.0,
+            },
+            {
+                "day_key": "2026-01-06",
+                "code": "2222.T",
+                "net_pnl": -150000.0,
+                "high_return_pct": 1.5,
+                "close_return_pct": -0.2,
+                "fade_from_high_pct": -1.7,
+                "exit_reason": "intraday_failed_runup",
+                "breadth": 0.58,
+                "market_ratio": 1.02,
+                "gap_pct": 0.001,
+                "prev_return": 0.01,
+                "open_vs_sma_atr": 0.9,
+                "rs_alpha": 22.0,
+            },
+        ]
+    )
+
+    fades = build_primary_failed_runup_table(trades, top_n=5)
+
+    assert fades["code"].tolist() == ["1111.T", "2222.T"]
+    assert "exit_reason" in fades.columns
 
 
 def test_build_miss_week_sensitivity_table_quantifies_flip_paths():

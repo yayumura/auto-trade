@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 from unittest.mock import patch
 
-from auto_trade import compute_daytrade_snapshot, is_inverse_only_candidate_set
+from auto_trade import build_daytrade_position_record, compute_daytrade_snapshot, is_inverse_only_candidate_set
+from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
 
 
 def _build_snapshot_df():
@@ -47,3 +48,76 @@ def test_inverse_only_candidate_set_accepts_inverse_pullback():
     )
     assert not is_inverse_only_candidate_set([{"setup_type": "inverse_pullback"}, {"setup_type": "fallback"}])
     assert not is_inverse_only_candidate_set([])
+
+
+def test_build_daytrade_position_record_preserves_setup_and_risk_context():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+            "candidate_rank": 3,
+            "breadth": 0.62,
+            "market_ratio": 1.05,
+            "gap_pct": 0.004,
+            "prev_return": 0.03,
+            "open_vs_sma_atr": 1.2,
+            "score": 8.4,
+            "rs_alpha": 42.0,
+            "prev_rsi2": 63.0,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+    )
+
+    assert record["setup_type"] == "primary"
+    assert record["entry_stop_price"] == 103.0
+    assert record["entry_target_price"] == 108.0
+    assert record["entry_candidate_rank"] == 3
+    assert record["buy_rs"] == 42.0
+    assert record["buy_rsi2"] == 63.0
+
+
+def test_daytrade_primary_failed_runup_exit_uses_live_session_high():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+    )
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        104.8,
+        1_000,
+        pd.Timestamp("2026-04-21 10:00:00"),
+        open_price=105.0,
+        high_price=107.6,
+        low_price=104.6,
+    )
+
+    exit_price, exit_reason = resolve_daytrade_live_exit_decision(
+        setup_type=record["setup_type"],
+        buy_price=record["buy_price"],
+        open_price=buffer.get_session_open(),
+        high_price=buffer.get_session_high(),
+        low_price=buffer.get_session_low(),
+        current_price=buffer.get_latest_price(),
+        stop_price=record["entry_stop_price"],
+        target_price=record["entry_target_price"],
+        session_high=buffer.get_session_high(),
+        allow_close_exit=False,
+    )
+
+    assert exit_reason == "intraday_failed_runup"
+    assert exit_price == record["buy_price"]

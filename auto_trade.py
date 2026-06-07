@@ -40,7 +40,7 @@ def get_market_phase(now_time) -> MarketPhase:
 from core.config import (
     PROJECT_ROOT, DATA_ROOT,
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE,
-    EXECUTION_LOG_FILE, TARGET_MARKETS,
+    EXECUTION_LOG_FILE, TARGET_MARKETS, DAYTRADE_EXIT_LOG_FILE,
     DEBUG_MODE, TRADE_MODE,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
     SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
@@ -102,6 +102,9 @@ from core.logic import (
     resolve_daytrade_buying_power,
     resolve_daytrade_selected_leverage,
     resolve_daytrade_selected_inverse_buying_power_leverage,
+    resolve_daytrade_intraday_target_mult,
+    resolve_daytrade_live_exit_decision,
+    calculate_position_stops,
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
@@ -159,16 +162,131 @@ def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=N
 
 
 def build_daytrade_position_record(item, executed_price, shares, buy_time):
+    setup_type = str(item.get("setup_type", ""))
+    stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
+    target_mult = float(item.get("target_mult", resolve_daytrade_intraday_target_mult()))
+    buy_atr = float(item.get("atr", 0.0))
+    entry_stop_price = max(0.01, float(executed_price) - (buy_atr * stop_mult))
+    entry_target_price = float(executed_price) + (buy_atr * target_mult)
+
     return {
         "code": str(item["code"]),
         "name": item.get("name", str(item["code"])),
+        "setup_type": setup_type,
         "buy_time": buy_time,
         "buy_price": round(float(executed_price), 1),
         "highest_price": round(float(executed_price), 1),
         "current_price": round(float(executed_price), 1),
         "shares": int(shares),
-        "buy_atr": float(item.get("atr", 0.0)),
+        "buy_atr": buy_atr,
+        "stop_mult": stop_mult,
+        "target_mult": target_mult,
+        "entry_stop_price": round(float(entry_stop_price), 1),
+        "entry_target_price": round(float(entry_target_price), 1),
+        "entry_candidate_rank": item.get("candidate_rank"),
+        "entry_breadth": item.get("breadth"),
+        "entry_market_ratio": item.get("market_ratio"),
+        "buy_gap_pct": item.get("gap_pct"),
+        "buy_live_gap_pct": item.get("live_gap_pct", item.get("gap_pct")),
+        "buy_prev_return": item.get("prev_return"),
+        "buy_open_vs_sma_atr": item.get("open_vs_sma_atr"),
+        "buy_score": item.get("score"),
+        "buy_rs": item.get("rs_alpha"),
+        "buy_rsi2": item.get("prev_rsi2"),
     }
+
+
+def build_daytrade_exit_log_row(
+    position,
+    *,
+    exit_reason,
+    observed_price,
+    modeled_exit_price,
+    exit_time,
+    session_open=None,
+    session_high=None,
+    session_low=None,
+    filled_shares=None,
+    remaining_shares=0,
+    is_simulation=True,
+    is_partial_fill=False,
+):
+    buy_price = float(position["buy_price"])
+    buy_atr = float(position.get("buy_atr", 0.0))
+    shares = int(position.get("shares", 0) if filled_shares is None else filled_shares)
+    stop_price = float(position.get("entry_stop_price", max(0.01, buy_price - (buy_atr * float(position.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))))))
+    target_price = float(position.get("entry_target_price", buy_price + (buy_atr * float(position.get("target_mult", resolve_daytrade_intraday_target_mult())))))
+
+    observed_price = float(observed_price if observed_price is not None else buy_price)
+    modeled_exit_price = float(modeled_exit_price if modeled_exit_price is not None else observed_price)
+    session_open = float(session_open if session_open not in (None, 0) else buy_price)
+    session_high = float(session_high if session_high not in (None, 0) else max(buy_price, observed_price))
+    session_low = float(session_low if session_low not in (None, 0) else min(buy_price, observed_price))
+
+    observed_pnl = (observed_price - buy_price) * shares
+    modeled_pnl = (modeled_exit_price - buy_price) * shares
+    observed_return_pct = (observed_price / buy_price - 1.0) if buy_price > 0 else 0.0
+    modeled_return_pct = (modeled_exit_price / buy_price - 1.0) if buy_price > 0 else 0.0
+    session_runup_pct = (session_high / buy_price - 1.0) if buy_price > 0 else 0.0
+    session_drawdown_pct = (session_low / buy_price - 1.0) if buy_price > 0 else 0.0
+    drawdown_from_session_high_pct = (observed_price / session_high - 1.0) if session_high > 0 else 0.0
+    fade_from_session_high_pct = drawdown_from_session_high_pct
+    rebound_from_session_low_pct = (observed_price / session_low - 1.0) if session_low > 0 else 0.0
+
+    return {
+        "time": exit_time,
+        "trade_id": f"{position['code']}|{position['buy_time']}",
+        "code": str(position["code"]),
+        "name": position.get("name", position["code"]),
+        "buy_time": position["buy_time"],
+        "setup_type": position.get("setup_type", ""),
+        "exit_reason": str(exit_reason or ""),
+        "is_simulation": bool(is_simulation),
+        "is_partial_fill": bool(is_partial_fill),
+        "observed_price": round(observed_price, 4),
+        "modeled_exit_price": round(modeled_exit_price, 4),
+        "observed_pnl": round(observed_pnl, 4),
+        "modeled_pnl": round(modeled_pnl, 4),
+        "observed_return_pct": round(observed_return_pct, 6),
+        "modeled_return_pct": round(modeled_return_pct, 6),
+        "session_open": round(session_open, 4),
+        "session_high": round(session_high, 4),
+        "session_low": round(session_low, 4),
+        "held_shares": int(position.get("shares", 0)),
+        "filled_shares": int(shares),
+        "remaining_shares": int(remaining_shares),
+        "buy_price": round(buy_price, 4),
+        "buy_atr": round(buy_atr, 4),
+        "entry_candidate_rank": position.get("entry_candidate_rank"),
+        "entry_stop_mult": position.get("stop_mult"),
+        "entry_stop_price": round(stop_price, 4),
+        "entry_target_mult": position.get("target_mult"),
+        "entry_target_price": round(target_price, 4),
+        "entry_breadth": position.get("entry_breadth"),
+        "entry_market_ratio": position.get("entry_market_ratio"),
+        "buy_gap_pct": position.get("buy_gap_pct"),
+        "buy_live_gap_pct": position.get("buy_live_gap_pct"),
+        "buy_prev_return": position.get("buy_prev_return"),
+        "buy_open_vs_sma_atr": position.get("buy_open_vs_sma_atr"),
+        "buy_score": position.get("buy_score"),
+        "buy_rs": position.get("buy_rs"),
+        "buy_rsi2": position.get("buy_rsi2"),
+        "current_pnl": round(observed_pnl, 4),
+        "current_return_pct": round(observed_return_pct, 6),
+        "distance_to_stop_pct": round((observed_price - stop_price) / buy_price if buy_price > 0 else 0.0, 6),
+        "distance_to_stop_atr": round((observed_price - stop_price) / buy_atr if buy_atr > 0 else 0.0, 6),
+        "distance_to_target_pct": round((target_price - observed_price) / buy_price if buy_price > 0 else 0.0, 6),
+        "distance_to_target_atr": round((target_price - observed_price) / buy_atr if buy_atr > 0 else 0.0, 6),
+        "session_runup_pct": round(session_runup_pct, 6),
+        "session_drawdown_pct": round(session_drawdown_pct, 6),
+        "drawdown_from_session_high_pct": round(drawdown_from_session_high_pct, 6),
+        "fade_from_session_high_pct": round(fade_from_session_high_pct, 6),
+        "rebound_from_session_low_pct": round(rebound_from_session_low_pct, 6),
+    }
+
+
+def append_daytrade_exit_log(row):
+    append_csv_rows(DAYTRADE_EXIT_LOG_FILE, [row])
 
 
 def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
@@ -240,7 +358,188 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
                 "holding_days": 0,
                 "note": "daytrade_flatten",
             })
+            append_daytrade_exit_log(
+                build_daytrade_exit_log_row(
+                    position,
+                    exit_reason="daytrade_flatten",
+                    observed_price=sell_price,
+                    modeled_exit_price=current_price,
+                    exit_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                    session_open=position.get("buy_price"),
+                    session_high=position.get("highest_price", current_price),
+                    session_low=min(float(position.get("buy_price", current_price)), float(current_price)),
+                    filled_shares=shares,
+                    remaining_shares=0,
+                    is_simulation=True,
+                    is_partial_fill=False,
+                )
+            )
+    elif original_positions:
+        for position in original_positions:
+            current_price = float(position.get("current_price", position["buy_price"]))
+            append_daytrade_exit_log(
+                build_daytrade_exit_log_row(
+                    position,
+                    exit_reason="daytrade_flatten",
+                    observed_price=current_price,
+                    modeled_exit_price=current_price,
+                    exit_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                    session_open=position.get("buy_price"),
+                    session_high=position.get("highest_price", current_price),
+                    session_low=min(float(position.get("buy_price", current_price)), float(current_price)),
+                    filled_shares=int(position["shares"]),
+                    remaining_shares=0,
+                    is_simulation=False,
+                    is_partial_fill=False,
+                )
+            )
     return updated_portfolio, sell_actions, account
+
+
+def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realtime_buffers):
+    if not portfolio:
+        return [], [], account
+
+    remaining_portfolio = []
+    exit_actions = []
+    exit_time = datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+
+    for position in portfolio:
+        code = str(position["code"])
+        buffer = realtime_buffers.get(code)
+        if buffer is None:
+            remaining_portfolio.append(position)
+            continue
+
+        current_price = float(buffer.get_latest_price() or position.get("current_price", position["buy_price"]))
+        if current_price <= 0:
+            remaining_portfolio.append(position)
+            continue
+
+        session_open = float(buffer.get_session_open() or position.get("buy_price") or current_price)
+        session_high = max(
+            float(buffer.get_session_high() or current_price),
+            float(position.get("highest_price", position["buy_price"])),
+        )
+        session_low = buffer.get_session_low()
+        if not session_low or session_low <= 0:
+            session_low = min(float(position.get("buy_price", current_price)), current_price)
+
+        buy_price = float(position["buy_price"])
+        buy_atr = float(position.get("buy_atr", 0.0))
+        stop_mult = float(position.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
+        target_mult = float(position.get("target_mult", resolve_daytrade_intraday_target_mult()))
+        fallback_stop_price, fallback_target_price = calculate_position_stops(
+            buy_price,
+            buy_atr,
+            float(position.get("highest_price", buy_price)),
+            current_price,
+            stop_mult,
+            target_mult,
+        )
+        stop_price = float(position.get("entry_stop_price", fallback_stop_price))
+        target_price = float(position.get("entry_target_price", fallback_target_price))
+
+        modeled_exit_price, exit_reason = resolve_daytrade_live_exit_decision(
+            setup_type=position.get("setup_type"),
+            buy_price=buy_price,
+            open_price=session_open,
+            high_price=session_high,
+            low_price=session_low,
+            current_price=current_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            session_high=session_high,
+            allow_close_exit=False,
+        )
+        if not exit_reason or modeled_exit_price is None:
+            remaining_portfolio.append(position)
+            continue
+
+        shares = int(position["shares"])
+        if is_sim:
+            observed_price = float(modeled_exit_price) * (1.0 - SLIPPAGE_RATE)
+            account["cash"] = round(float(account["cash"]) + (observed_price * shares), 4)
+            broker.log_trade({
+                "time": exit_time,
+                "code": position["code"],
+                "name": position.get("name", position["code"]),
+                "side": "DAYTRADE_SELL",
+                "shares": shares,
+                "buy_price": round(float(position["buy_price"]), 4),
+                "sell_price": round(float(observed_price), 4),
+                "pnl": round((observed_price - float(position["buy_price"])) * shares, 4),
+                "holding_days": 0,
+                "note": exit_reason,
+            })
+            append_daytrade_exit_log(
+                build_daytrade_exit_log_row(
+                    position,
+                    exit_reason=exit_reason,
+                    observed_price=observed_price,
+                    modeled_exit_price=modeled_exit_price,
+                    exit_time=exit_time,
+                    session_open=session_open,
+                    session_high=session_high,
+                    session_low=session_low,
+                    filled_shares=shares,
+                    remaining_shares=0,
+                    is_simulation=True,
+                    is_partial_fill=False,
+                )
+            )
+            exit_actions.append(f"SELL {code} - {exit_reason} (@{observed_price:,.1f})")
+            continue
+
+        details = broker.execute_chase_order(code, shares, side="1", atr=buy_atr)
+        filled_shares = 0
+        observed_price = current_price
+        if isinstance(details, dict) and details:
+            filled_shares = int(details.get("Qty", 0) or 0)
+            observed_price = float(details.get("Price", current_price) or current_price)
+        if filled_shares <= 0:
+            remaining_portfolio.append(position)
+            continue
+
+        remaining_shares = max(0, shares - filled_shares)
+        account["cash"] = round(float(account["cash"]) + (observed_price * filled_shares), 4)
+        broker.log_trade({
+            "time": exit_time,
+            "code": position["code"],
+            "name": position.get("name", position["code"]),
+            "side": "DAYTRADE_SELL",
+            "shares": filled_shares,
+            "buy_price": round(float(position["buy_price"]), 4),
+            "sell_price": round(float(observed_price), 4),
+            "pnl": round((observed_price - float(position["buy_price"])) * filled_shares, 4),
+            "holding_days": 0,
+            "note": exit_reason,
+        })
+        append_daytrade_exit_log(
+            build_daytrade_exit_log_row(
+                position,
+                exit_reason=exit_reason,
+                observed_price=observed_price,
+                modeled_exit_price=modeled_exit_price,
+                exit_time=exit_time,
+                session_open=session_open,
+                session_high=session_high,
+                session_low=session_low,
+                filled_shares=filled_shares,
+                remaining_shares=remaining_shares,
+                is_simulation=False,
+                is_partial_fill=remaining_shares > 0,
+            )
+        )
+        exit_actions.append(f"SELL {code} - {exit_reason} (@{observed_price:,.1f})")
+        if remaining_shares > 0:
+            remaining_position = dict(position)
+            remaining_position["shares"] = remaining_shares
+            remaining_position["current_price"] = round(observed_price, 1)
+            remaining_position["highest_price"] = round(max(float(position.get("highest_price", buy_price)), session_high), 1)
+            remaining_portfolio.append(remaining_position)
+
+    return remaining_portfolio, exit_actions, account
 
 
 def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
@@ -327,6 +626,7 @@ def _main_exec():
     from core.file_io import rotate_csv_if_large
     rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=2)
     rotate_csv_if_large(HISTORY_FILE, max_size_mb=2)
+    rotate_csv_if_large(DAYTRADE_EXIT_LOG_FILE, max_size_mb=2)
     
     from core.sim_broker import SimulationBroker
     from core.kabucom_broker import KabucomBroker
@@ -595,6 +895,15 @@ def _main_exec():
             realtime_buffers=realtime_buffers,
             latest_close_map=latest_close_map,
         )
+        portfolio, signal_close_actions, account = close_daytrade_positions_by_signal(
+            portfolio=portfolio,
+            account=account,
+            broker=broker,
+            is_sim=is_sim,
+            realtime_buffers=realtime_buffers,
+        )
+        if signal_close_actions:
+            actions_taken.extend(signal_close_actions)
 
         # [V17.0 Final Persistence]
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.

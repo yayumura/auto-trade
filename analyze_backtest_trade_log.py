@@ -22,6 +22,7 @@ from jp_backtest import WARMUP_START, _resolve_holdout_start_date
 
 STOP_EXIT_REASONS = {"open_stop", "intraday_stop", "intraday_stop_priority"}
 TARGET_EXIT_REASONS = {"open_target", "intraday_target"}
+FADE_EXIT_REASONS = {"intraday_failed_runup"}
 MISS_WEEK_REDUCTION_FRACS = (0.25, 0.50, 0.75, 1.00)
 
 
@@ -29,7 +30,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Replay the current JP day-trade backtest once and summarize train-only "
-            "miss weeks, worst days, primary stop clusters, and primary close-loss fades."
+            "miss weeks, worst days, primary stop clusters, primary close-loss fades, and primary failed-runup fades."
         )
     )
     parser.add_argument(
@@ -125,6 +126,7 @@ def infer_trade_exit_reasons(trades_df, prepared):
             close_price=float(close_np[day_idx, s_idx]),
             stop_price=stop_price,
             target_price=target_price,
+            setup_type=getattr(row, "setup_type", ""),
         )
         reasons.append(exit_reason if isinstance(exit_reason, str) else "missing_ohlc_fallback")
 
@@ -205,7 +207,11 @@ def classify_exit_bucket(trades_df, prepared=None):
     classified["exit_bucket"] = np.where(
         exit_reason.isin(STOP_EXIT_REASONS),
         "stop",
-        np.where(exit_reason.isin(TARGET_EXIT_REASONS), "target", "close_or_open"),
+        np.where(
+            exit_reason.isin(TARGET_EXIT_REASONS),
+            "target",
+            np.where(exit_reason.isin(FADE_EXIT_REASONS), "fade", "close_or_open"),
+        ),
     )
     return classified
 
@@ -352,6 +358,33 @@ def build_primary_close_fade_table(primary_close_loss_df, top_n):
     available_columns = [column for column in columns if column in primary_close_loss_df.columns]
     return (
         primary_close_loss_df.sort_values(["fade_from_high_pct", "net_pnl"])
+        .loc[:, available_columns]
+        .head(top_n)
+        .copy()
+    )
+
+
+def build_primary_failed_runup_table(primary_failed_runup_df, top_n):
+    if primary_failed_runup_df.empty:
+        return pd.DataFrame()
+    columns = [
+        "day_key",
+        "code",
+        "net_pnl",
+        "high_return_pct",
+        "close_return_pct",
+        "fade_from_high_pct",
+        "exit_reason",
+        "breadth",
+        "market_ratio",
+        "gap_pct",
+        "prev_return",
+        "open_vs_sma_atr",
+        "rs_alpha",
+    ]
+    available_columns = [column for column in columns if column in primary_failed_runup_df.columns]
+    return (
+        primary_failed_runup_df.sort_values(["fade_from_high_pct", "net_pnl"])
         .loc[:, available_columns]
         .head(top_n)
         .copy()
@@ -566,7 +599,11 @@ def build_report(summary, top_n):
     lines.extend(["", "Primary Close-Loss Clusters"])
     for key, df in summary["primary_close_clusters"].items():
         lines.extend(["", f"[{key}]", _frame_preview(df.head(top_n))])
+    lines.extend(["", "Primary Failed-Runup Clusters"])
+    for key, df in summary["primary_failed_runup_clusters"].items():
+        lines.extend(["", f"[{key}]", _frame_preview(df.head(top_n))])
     lines.extend(["", "Worst Primary Close Fades", _frame_preview(summary["primary_close_fades"].head(top_n))])
+    lines.extend(["", "Worst Primary Failed-Runup Fades", _frame_preview(summary["primary_failed_runup_fades"].head(top_n))])
     return "\n".join(lines)
 
 
@@ -592,6 +629,11 @@ def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
     primary_close_loss = train_trades[
         (train_trades["setup_type"] == "primary")
         & (train_trades["exit_bucket"] == "close_or_open")
+        & (train_trades["net_pnl"] < 0.0)
+    ].copy()
+    primary_failed_runup = train_trades[
+        (train_trades["setup_type"] == "primary")
+        & (train_trades["exit_bucket"] == "fade")
         & (train_trades["net_pnl"] < 0.0)
     ].copy()
 
@@ -661,6 +703,13 @@ def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
         ),
         "primary_close_fades": build_primary_close_fade_table(
             primary_close_loss[primary_close_loss["week_key"].isin(miss_weeks)],
+            top_n,
+        ),
+        "primary_failed_runup_clusters": summarize_trade_clusters(
+            primary_failed_runup[primary_failed_runup["week_key"].isin(miss_weeks)], top_n
+        ),
+        "primary_failed_runup_fades": build_primary_failed_runup_table(
+            primary_failed_runup[primary_failed_runup["week_key"].isin(miss_weeks)],
             top_n,
         ),
     }

@@ -12,6 +12,7 @@ from core.logic import (
     is_daytrade_bull_etf_rebound_market_allowed,
     is_daytrade_bull_etf_price_allowed,
     is_daytrade_strong_oversold_market_allowed,
+    is_daytrade_strong_oversold_tuesday_stretched_open_filtered,
     is_daytrade_catchup_market_allowed, is_daytrade_inverse_market_allowed,
     is_daytrade_inverse_pullback_market_allowed,
     is_daytrade_trend_allowed,
@@ -21,6 +22,7 @@ from core.logic import (
     is_daytrade_weekly_profit_guard_active,
     is_daytrade_monthly_risk_blocked,
     resolve_daytrade_intraday_stop_mult, resolve_daytrade_intraday_target_mult,
+    resolve_daytrade_live_exit_decision,
     resolve_daytrade_buying_power,
     resolve_daytrade_inverse_buying_power,
     resolve_daytrade_selected_leverage,
@@ -119,30 +121,32 @@ def _cap_shares_by_liquidity(desired_shares, execution_price, turnover_value, li
     return min(_floor_lot(shares), max_shares)
 
 
-def _resolve_intraday_exit(entry_price, open_price, high_price, low_price, close_price, stop_price, target_price):
+def _resolve_intraday_exit(
+    entry_price,
+    open_price,
+    high_price,
+    low_price,
+    close_price,
+    stop_price,
+    target_price,
+    setup_type=None,
+):
     """
     Resolve a same-day OHLC exit with conservative assumptions.
     If both stop and target are touched intraday, prefer the stop so results are not luck-dependent.
     """
-    values = [entry_price, open_price, high_price, low_price, close_price, stop_price, target_price]
-    if np.any(np.isnan(values)):
-        return close_price, "missing_ohlc_fallback"
-
-    if open_price <= stop_price:
-        return open_price, "open_stop"
-    if open_price >= target_price:
-        return open_price, "open_target"
-
-    stop_hit = low_price <= stop_price
-    target_hit = high_price >= target_price
-
-    if stop_hit and target_hit:
-        return stop_price, "intraday_stop_priority"
-    if stop_hit:
-        return stop_price, "intraday_stop"
-    if target_hit:
-        return target_price, "intraday_target"
-    return close_price, "close_exit"
+    return resolve_daytrade_live_exit_decision(
+        setup_type=setup_type,
+        buy_price=entry_price,
+        open_price=open_price,
+        high_price=high_price,
+        low_price=low_price,
+        current_price=close_price,
+        stop_price=stop_price,
+        target_price=target_price,
+        session_high=high_price,
+        allow_close_exit=True,
+    )
 
 
 def _resolve_execution_slippage(rate, override):
@@ -1182,6 +1186,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     prev_sma_trend=prev_sma_trend,
                 )
                 if strong_oversold_metrics is not None:
+                    if is_daytrade_strong_oversold_tuesday_stretched_open_filtered(
+                        strong_oversold_metrics["open_vs_trend_atr"],
+                        trade_weekday=curr_time.weekday(),
+                    ):
+                        continue
                     score = score_daytrade_strong_oversold_open_setup(
                         strong_oversold_metrics,
                         rs_alpha=t_rs,
@@ -1241,11 +1250,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
                     "equity_notional_pct": resolve_daytrade_fallback_equity_notional_pct(
                         gap_pct=fallback_metrics["gap_pct"],
-                                breadth_val=breadth_ratio[i],
-                                prev_return=fallback_metrics["prev_return"],
-                                open_vs_sma_atr=fallback_metrics.get("open_vs_sma_atr"),
-                                score=score,
-                                trade_weekday=curr_time.weekday(),
+                        breadth_val=breadth_ratio[i],
+                        market_ratio=market_ratio,
+                        prev_return=fallback_metrics["prev_return"],
+                        open_vs_sma_atr=fallback_metrics.get("open_vs_sma_atr"),
+                        score=score,
+                        trade_weekday=curr_time.weekday(),
                     ),
                     "stop_mult": DAYTRADE_FALLBACK_INTRADAY_STOP_MULT,
                     "target_mult": DAYTRADE_FALLBACK_INTRADAY_TARGET_MULT,
@@ -1283,6 +1293,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             gap_pct=catchup_metrics["gap_pct"],
                             prev_return=catchup_metrics["prev_return"],
                             open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                            score=score,
                             trade_weekday=curr_time.weekday(),
                             default_pct=DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
                         )
@@ -1301,6 +1312,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             gap_pct=catchup_metrics["gap_pct"],
                             prev_return=catchup_metrics["prev_return"],
                             open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                            score=score,
                             trade_weekday=curr_time.weekday(),
                             default_pct=DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
                         )
@@ -1551,6 +1563,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     close_price=candidate["close"],
                     stop_price=stop_price,
                     target_price=target_price,
+                    setup_type=candidate.get("setup_type"),
                 )
                 real_sell = raw_exit * (1.0 - sell_slippage)
                 gross_pnl = (real_sell - real_buy) * shares
@@ -1578,6 +1591,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         "shares": int(shares),
                         "entry_price": float(real_buy),
                         "exit_price": float(real_sell),
+                        "modeled_exit_price": float(raw_exit),
+                        "exit_reason": _exit_reason,
                         "stop_price": float(stop_price),
                         "target_price": float(target_price),
                         "notional": float(trade_notional),
