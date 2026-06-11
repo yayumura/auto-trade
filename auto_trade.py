@@ -45,12 +45,17 @@ from core.config import (
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
     SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
     SLIPPAGE_RATE, STOP_LOSS_ATR, load_insider_exclusion_codes,
-    INTRADAY_SNAPSHOT_FILE,
+    INTRADAY_SNAPSHOT_FILE, DATA_CACHE_ROOT,
 )
 from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
 
 # --- インスタンスロック機構 ---
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
+STOP_FILE = os.path.join(PROJECT_ROOT, "stop.txt")
+ENTRY_SCAN_CUTOFF_TIME = datetime.time(14, 0)
+FORCE_FLATTEN_TIME = datetime.time(14, 30)
+SHUTDOWN_REQUESTED = False
+SHUTDOWN_REASON = ""
 
 def acquire_lock():
     """原子的なロックファイル取得。open('x')はファイルが既存の場合FileExistsErrorを発生させる。"""
@@ -113,7 +118,9 @@ from core.ai_filter import ai_qualitative_filter, get_recent_news
 def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
     watch_codes = [str(code) for code in watchlist]
     portfolio_codes = [str(position["code"]) for position in portfolio]
-    registration_targets = list(dict.fromkeys((watch_codes + portfolio_codes + [market_index_code])[:50]))
+    # Open positions and the market index must win the 50-symbol registration budget first.
+    prioritized_codes = portfolio_codes + [market_index_code] + watch_codes
+    registration_targets = list(dict.fromkeys(prioritized_codes))[:50]
     return {
         "watchlist": watch_codes,
         "portfolio_codes": portfolio_codes,
@@ -142,8 +149,9 @@ def ensure_daytrade_week_state(account, total_equity, server_datetime):
     return account
 
 
-def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None):
+def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None, quote_time=None):
     latest_close_map = latest_close_map or {}
+    quote_time_str = quote_time.strftime('%Y-%m-%d %H:%M:%S') if quote_time is not None else None
     updated = []
     for position in portfolio:
         pos = dict(position)
@@ -157,6 +165,15 @@ def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=N
             current_price = latest_close_map[code]
         pos["current_price"] = round(float(current_price), 1)
         pos["highest_price"] = round(max(float(pos.get("highest_price", pos["buy_price"])), float(current_price)), 1)
+        pos["lowest_price"] = round(min(float(pos.get("lowest_price", pos["buy_price"])), float(current_price)), 1)
+        pos["post_entry_high"] = pos["highest_price"]
+        pos["post_entry_low"] = pos["lowest_price"]
+        if "entry_timestamp" not in pos:
+            pos["entry_timestamp"] = pos.get("buy_time")
+        if quote_time_str is not None:
+            pos["last_quote_timestamp"] = quote_time_str
+        elif "last_quote_timestamp" not in pos:
+            pos["last_quote_timestamp"] = pos.get("buy_time")
         updated.append(pos)
     return updated
 
@@ -174,9 +191,14 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time):
         "name": item.get("name", str(item["code"])),
         "setup_type": setup_type,
         "buy_time": buy_time,
+        "entry_timestamp": buy_time,
         "buy_price": round(float(executed_price), 1),
         "highest_price": round(float(executed_price), 1),
+        "lowest_price": round(float(executed_price), 1),
+        "post_entry_high": round(float(executed_price), 1),
+        "post_entry_low": round(float(executed_price), 1),
         "current_price": round(float(executed_price), 1),
+        "last_quote_timestamp": buy_time,
         "shares": int(shares),
         "buy_atr": buy_atr,
         "stop_mult": stop_mult,
@@ -333,7 +355,7 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
 
 def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffers):
     original_positions = [dict(position) for position in portfolio]
-    updated_portfolio, sell_actions = manage_positions_live(
+    updated_portfolio, sell_actions, fill_events = manage_positions_live(
         portfolio=portfolio,
         broker=broker,
         is_simulation=is_sim,
@@ -366,8 +388,8 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
                     modeled_exit_price=current_price,
                     exit_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                     session_open=position.get("buy_price"),
-                    session_high=position.get("highest_price", current_price),
-                    session_low=min(float(position.get("buy_price", current_price)), float(current_price)),
+                    session_high=position.get("post_entry_high", position.get("highest_price", current_price)),
+                    session_low=position.get("post_entry_low", min(float(position.get("buy_price", current_price)), float(current_price))),
                     filled_shares=shares,
                     remaining_shares=0,
                     is_simulation=True,
@@ -375,22 +397,40 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
                 )
             )
     elif original_positions:
-        for position in original_positions:
-            current_price = float(position.get("current_price", position["buy_price"]))
+        for fill_event in fill_events:
+            position = fill_event["position"]
+            shares = int(fill_event["filled_shares"])
+            observed_price = float(fill_event["observed_price"])
+            modeled_exit_price = float(fill_event["modeled_exit_price"])
+            exit_reason = fill_event["exit_reason"]
+            remaining_shares = int(fill_event["remaining_shares"])
+            account["cash"] = round(float(account["cash"]) + (observed_price * shares), 4)
+            broker.log_trade({
+                "time": fill_event["exit_time"],
+                "code": position["code"],
+                "name": position.get("name", position["code"]),
+                "side": "DAYTRADE_SELL",
+                "shares": shares,
+                "buy_price": round(float(position["buy_price"]), 4),
+                "sell_price": round(float(observed_price), 4),
+                "pnl": round((observed_price - float(position["buy_price"])) * shares, 4),
+                "holding_days": 0,
+                "note": exit_reason,
+            })
             append_daytrade_exit_log(
                 build_daytrade_exit_log_row(
                     position,
-                    exit_reason="daytrade_flatten",
-                    observed_price=current_price,
-                    modeled_exit_price=current_price,
-                    exit_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                    session_open=position.get("buy_price"),
-                    session_high=position.get("highest_price", current_price),
-                    session_low=min(float(position.get("buy_price", current_price)), float(current_price)),
-                    filled_shares=int(position["shares"]),
-                    remaining_shares=0,
+                    exit_reason=exit_reason,
+                    observed_price=observed_price,
+                    modeled_exit_price=modeled_exit_price,
+                    exit_time=fill_event["exit_time"],
+                    session_open=fill_event.get("session_open"),
+                    session_high=fill_event.get("session_high"),
+                    session_low=fill_event.get("session_low"),
+                    filled_shares=shares,
+                    remaining_shares=remaining_shares,
                     is_simulation=False,
-                    is_partial_fill=False,
+                    is_partial_fill=remaining_shares > 0,
                 )
             )
     return updated_portfolio, sell_actions, account
@@ -418,10 +458,10 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
 
         session_open = float(buffer.get_session_open() or position.get("buy_price") or current_price)
         session_high = max(
-            float(buffer.get_session_high() or current_price),
-            float(position.get("highest_price", position["buy_price"])),
+            float(position.get("post_entry_high", position.get("highest_price", position["buy_price"]))),
+            float(current_price),
         )
-        session_low = buffer.get_session_low()
+        session_low = float(position.get("post_entry_low", position.get("lowest_price", position["buy_price"])))
         if not session_low or session_low <= 0:
             session_low = min(float(position.get("buy_price", current_price)), current_price)
 
@@ -537,9 +577,75 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             remaining_position["shares"] = remaining_shares
             remaining_position["current_price"] = round(observed_price, 1)
             remaining_position["highest_price"] = round(max(float(position.get("highest_price", buy_price)), session_high), 1)
+            remaining_position["lowest_price"] = round(min(float(position.get("lowest_price", buy_price)), session_low), 1)
+            remaining_position["post_entry_high"] = remaining_position["highest_price"]
+            remaining_position["post_entry_low"] = remaining_position["lowest_price"]
+            remaining_position["last_quote_timestamp"] = exit_time
             remaining_portfolio.append(remaining_position)
 
     return remaining_portfolio, exit_actions, account
+
+
+def request_shutdown(reason: str):
+    global SHUTDOWN_REQUESTED, SHUTDOWN_REASON
+    SHUTDOWN_REQUESTED = True
+    SHUTDOWN_REASON = str(reason or "shutdown")
+
+
+def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, reason: str):
+    shutdown_msg = f"[STOP] 安全停止を開始します: {reason}"
+    print(f"\n{shutdown_msg}")
+    try:
+        send_discord_notify(f"🛑 {shutdown_msg}")
+    except Exception:
+        pass
+
+    updated_portfolio = list(portfolio or [])
+    updated_account = dict(account or {})
+
+    if broker and not is_sim:
+        try:
+            active_orders = broker.get_active_orders()
+            if active_orders is None:
+                print("⚠️ [STOP] 未約定注文の照会に失敗しました。キャンセルを見送ります。")
+            else:
+                for order in active_orders:
+                    order_id = order.get("ID")
+                    if order_id:
+                        broker.cancel_order(order_id)
+        except Exception as exc:
+            print(f"⚠️ [STOP] 未約定注文のキャンセル中にエラー: {exc}")
+
+    if updated_portfolio:
+        try:
+            updated_portfolio, close_actions, updated_account = close_daytrade_positions(
+                portfolio=updated_portfolio,
+                account=updated_account,
+                broker=broker,
+                is_sim=is_sim,
+                realtime_buffers=realtime_buffers,
+            )
+            if close_actions:
+                for action in close_actions:
+                    print(f"[STOP] {action}")
+        except Exception as exc:
+            print(f"⚠️ [STOP] ポジション解消中にエラー: {exc}")
+
+    try:
+        if broker:
+            broker.save_account(updated_account)
+            broker.save_portfolio(updated_portfolio)
+    except Exception as exc:
+        print(f"⚠️ [STOP] state 保存に失敗しました: {exc}")
+
+    if broker and not is_sim:
+        try:
+            if hasattr(broker, "unregister_all"):
+                broker.unregister_all()
+        except Exception as exc:
+            print(f"⚠️ [STOP] 銘柄解除中にエラー: {exc}")
+
+    return updated_portfolio, updated_account
 
 
 def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
@@ -573,8 +679,7 @@ def handle_shutdown(signum, frame):
     try:
         send_discord_notify("[STOP] 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
     except: pass
-    release_lock()
-    os._exit(0)
+    request_shutdown(f"signal:{signum}")
 
 # --- メインループ ---
 def main():
@@ -665,7 +770,7 @@ def _main_exec():
     MONITOR_INTERVAL_SEC = 30
     
     # --- [Imperial Persistence] JQuants Cache Management ---
-    JQUANTS_CACHE_FILE = os.path.join("data_cache", "jp_broad", "jp_mega_cache.pkl")
+    JQUANTS_CACHE_FILE = str(DATA_CACHE_ROOT / "jp_broad" / "jp_mega_cache.pkl")
     jp_cache = {}
     jp_cache_df = None
     if os.path.exists(JQUANTS_CACHE_FILE):
@@ -708,10 +813,23 @@ def _main_exec():
     atomic_write_json(ACCOUNT_FILE, account)
 
     while True:
-        if os.path.exists("stop.txt"):
+        if os.path.exists(STOP_FILE):
             print("[STOP] stop.txt を検出しました。安全に停止します。")
-            try: os.remove("stop.txt")
+            try: os.remove(STOP_FILE)
             except: pass
+            request_shutdown("stop.txt")
+
+        if SHUTDOWN_REQUESTED:
+            portfolio, account = perform_safe_shutdown(
+                broker=broker,
+                portfolio=portfolio,
+                account=account,
+                is_sim=is_sim,
+                realtime_buffers=realtime_buffers,
+                reason=SHUTDOWN_REASON,
+            )
+            if not is_sim:
+                terminate_kabu_station()
             break
 
         loop_start_time = time.time()
@@ -735,13 +853,16 @@ def _main_exec():
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
             send_discord_notify("🏁 【業務終了】大引けを過ぎたため運用を終了しました。")
+            portfolio, account = perform_safe_shutdown(
+                broker=broker,
+                portfolio=portfolio,
+                account=account,
+                is_sim=is_sim,
+                realtime_buffers=realtime_buffers,
+                reason="closing_time",
+            )
             if not is_sim:
-                broker.unregister_all()
-                active_orders_final = broker.get_active_orders()
-                for o in active_orders_final:
-                    oid = o.get('ID')
-                    if oid: broker.cancel_order(oid)
-            terminate_kabu_station()
+                terminate_kabu_station()
             break
 
         if not DEBUG_MODE:
@@ -758,6 +879,12 @@ def _main_exec():
         if not is_sim:
             try:
                 active_orders = broker.get_active_orders()
+                if active_orders is None:
+                    msg = "⚠️ 未約定注文の取得に失敗しました。新規エントリーを保留します。"
+                    print(msg)
+                    send_discord_notify(msg)
+                    time.sleep(MONITOR_INTERVAL_SEC)
+                    continue
                 if active_orders:
                     has_stuck_order = False
                     for order in active_orders:
@@ -894,6 +1021,7 @@ def _main_exec():
             portfolio,
             realtime_buffers=realtime_buffers,
             latest_close_map=latest_close_map,
+            quote_time=server_datetime,
         )
         portfolio, signal_close_actions, account = close_daytrade_positions_by_signal(
             portfolio=portfolio,
@@ -914,13 +1042,13 @@ def _main_exec():
         if monthly_risk_blocked and not portfolio: should_scan = False  # Block fresh entries, but still allow liquidation.
         elif not should_scan_override: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
-        elif now_time >= datetime.time(14, 0) and not DEBUG_MODE: should_scan = False
+        elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
         
         if should_scan and not force_scan:
              if time.time() - last_scan_time < SCAN_INTERVAL_SEC:
                   should_scan = False
 
-        if phase in [MarketPhase.AFTERNOON, MarketPhase.CLOSING_TIME] and portfolio:
+        if now_time >= FORCE_FLATTEN_TIME and portfolio:
             portfolio, close_actions, account = close_daytrade_positions(
                 portfolio=portfolio,
                 account=account,
@@ -994,6 +1122,7 @@ def _main_exec():
                         portfolio,
                         realtime_buffers=realtime_buffers,
                         latest_close_map=latest_close_snapshot,
+                        quote_time=server_datetime,
                     )
                     top_candidates = snapshot["top_candidates"]
                     print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")

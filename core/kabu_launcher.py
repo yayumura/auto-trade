@@ -3,8 +3,7 @@ import subprocess
 import os
 import psutil
 import requests
-from pywinauto.application import Application
-from core.config import KABUCOM_LOGIN_PASSWORD, TRADE_MODE
+from core.config import KABUCOM_LOGIN_PASSWORD, TRADE_MODE, is_placeholder_secret
 from core.log_setup import send_discord_notify
 
 def is_admin():
@@ -24,6 +23,12 @@ def ensure_kabu_station_running():
         return True
 
     print("\n[Launcher] 🚀 kabuステーションの状態を確認します...")
+
+    try:
+        from pywinauto.application import Application
+    except Exception as exc:
+        print(f"⚠️ [Launcher] pywinauto を利用できないため kabuステーション起動をスキップします: {exc}")
+        return False
 
     # 管理者権限チェック（警告のみ）
     if not is_admin():
@@ -55,10 +60,10 @@ def ensure_kabu_station_running():
             kabu_path = p
             break
             
-    if not kabu_path:
-        print("❌ kabuステーションの実行ファイルが見つかりませんでした。")
-        print(f"   探索場所: {', '.join([p for p in paths if p])}")
-        return False
+        if not kabu_path:
+            print("❌ kabuステーションの実行ファイルが見つかりませんでした。")
+            print(f"   探索場所: {', '.join([p for p in paths if p])}")
+            return False
 
     try:
         # 古い残存プロセスがあれば一度掃除する（二重起動防止とクリーンな状態の確保）
@@ -70,11 +75,9 @@ def ensure_kabu_station_running():
                 pass
         time.sleep(1)
 
-        # 起動の安定性を高めるため、カレントディレクトリを実行ファイルの場所に設定する
+        # 起動の安定性を高めるため、cwd を exe の場所に固定する
         kabu_dir = os.path.dirname(kabu_path)
-        # os.startfile は Explore でダブルクリックしたのと同等の挙動となり、依存関係のあるアプリの起動に強い
-        os.chdir(kabu_dir)
-        os.startfile(kabu_path)
+        subprocess.Popen([kabu_path], cwd=kabu_dir)
         print(f"🖥️  アプリケーションを起動しました: {kabu_path} (CWD: {kabu_dir})")
         
         # 少し待ってからプロセスが本当に存在するか軽くチェック
@@ -135,7 +138,7 @@ def ensure_kabu_station_running():
 
     try:
         # パスワードの確認
-        if not KABUCOM_LOGIN_PASSWORD or KABUCOM_LOGIN_PASSWORD == "your_app_password":
+        if is_placeholder_secret(KABUCOM_LOGIN_PASSWORD):
             msg = "⚠️ [kabuステーション] .env に有効なログインパスワードが設定されていないため、手動ログインが必要です。"
             print(msg)
             send_discord_notify(msg)
@@ -178,7 +181,9 @@ def _wait_for_manual_login_and_api(timeout_mins=5):
 def _wait_for_api_server(timeout_sec=60, silent=False):
     """APIサーバー（Port 18080/18081）の起動をポーリングで待機する"""
     port = 18080 if TRADE_MODE == "KABUCOM_LIVE" else 18081
-    url = f"http://localhost:{port}/kabusapi/auth"
+    # 文書化された info API を使い、HTTP 応答が返ること自体を起動確認とする。
+    # 認証なしでは 401 になるが、それでもサーバー稼働の確認には十分。
+    url = f"http://localhost:{port}/kabusapi/board/7203@1"
     
     start_wait = time.time()
     if not silent:
@@ -187,14 +192,16 @@ def _wait_for_api_server(timeout_sec=60, silent=False):
     start_time = time.time()
     while time.time() - start_time < timeout_sec:
         try:
-            requests.get(url, timeout=2)
-            if not silent: print(f"✨ [Success] APIサーバーの稼働を確認しました。")
-            return True
+            res = requests.get(url, timeout=2)
+            if res is not None:
+                if not silent:
+                    print(f"✨ [Success] APIサーバーの稼働を確認しました。")
+                return True
+            time.sleep(2)
         except requests.exceptions.ConnectionError:
             time.sleep(2)
         except Exception:
-            if not silent: print(f"✨ [Success] APIサーバーの稼働を確認しました。")
-            return True
+            time.sleep(2)
             
     if not silent:
         print("❌ APIサーバーの起動確認がタイムアウトしました。")

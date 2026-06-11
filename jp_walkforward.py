@@ -2,15 +2,17 @@ import argparse
 import os
 import pickle
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-# Append current directory to sys.path
-sys.path.append(os.getcwd())
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from backtest import run_backtest_v16_production
-from core.config import INITIAL_CASH, SLIPPAGE_RATE
+from core.config import DATA_CACHE_ROOT, INITIAL_CASH, SLIPPAGE_RATE
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
 from jp_backtest import WARMUP_START, _refresh_cache_if_requested, _summarize_window
 
@@ -25,7 +27,7 @@ def parse_args():
     )
     parser.add_argument(
         "--cache-path",
-        default="data_cache/jp_broad/jp_mega_cache.pkl",
+        default=str(DATA_CACHE_ROOT / "jp_broad" / "jp_mega_cache.pkl"),
         help="Path to the cached JP market data pickle.",
     )
     parser.add_argument(

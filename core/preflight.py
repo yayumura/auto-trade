@@ -5,8 +5,8 @@ import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from core.config import (
-    KABUCOM_API_PASSWORD, GEMINI_API_KEY, TRADE_MODE,
-    DATA_ROOT, LOG_DIR, CONFIG_DIR
+    KABUCOM_API_PASSWORD, TRADE_MODE, DEBUG_MODE,
+    DATA_ROOT, LOG_DIR, CONFIG_DIR, is_placeholder_secret
 )
 
 # [Imperial Safeguard] 
@@ -45,12 +45,16 @@ def pre_flight_check():
 
     # 3. 必須APIキーの存在確認 (TRADE_MODEに応じて必須キーを決定)
     missing_keys = []
-    if not GEMINI_API_KEY: missing_keys.append("GEMINI_API_KEY")
     if TRADE_MODE in ("KABUCOM_LIVE", "KABUCOM_TEST"):
-        if not KABUCOM_API_PASSWORD: missing_keys.append("KABUCOM_API_PASSWORD")
+        if is_placeholder_secret(KABUCOM_API_PASSWORD):
+            missing_keys.append("KABUCOM_API_PASSWORD")
     
     if missing_keys:
         print(f"❌ [設定漏れ] 以下の必須設定が .env にありません: {', '.join(missing_keys)}")
+        sys.exit(1)
+
+    if TRADE_MODE == "KABUCOM_LIVE" and DEBUG_MODE:
+        print("❌ [設定エラー] DEBUG_MODE=true のまま本番ライブ運用は開始できません。")
         sys.exit(1)
 
     # 4. ネットワーク接続テスト
@@ -59,8 +63,11 @@ def pre_flight_check():
         requests.get("https://www.google.com", timeout=3)
         print("✅ ネットワーク接続 OK")
     except Exception as e:
-        print(f"❌ [ネットワーク遮断] 接続できません: {e}")
-        sys.exit(1)
+        if TRADE_MODE == "SIM":
+            print(f"⚠️ [ネットワーク警告] SIMモードのため続行します: {e}")
+        else:
+            print(f"❌ [ネットワーク遮断] 接続できません: {e}")
+            sys.exit(1)
 
     # 5. JQuants Cache 動作確認
     print("📈 [Data Check] JQuantsキャッシュの健全性確認...")

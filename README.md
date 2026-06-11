@@ -142,6 +142,7 @@ auto-trade/
 └── tests/
     ├── test_analyze_backtest_trade_log.py
     ├── test_backtest.py
+    ├── test_kabucom_broker.py
     ├── test_jp_backtest.py
     ├── test_jp_jquants_fetcher_v2.py
     ├── test_jp_optimizer.py
@@ -584,10 +585,20 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - server time ベースの月次 state / 月初資産ロールオーバー
   - 保有中ポジションの intraday snapshot 行生成と entry context 付与
   - daytrade exit decision 行の modeled exit / fade 指標と、live 約定時の二重スリッページ防止
-  - live での intraday failed-runup break-even exit と highest_price 追跡
+  - live での intraday failed-runup break-even exit と post-entry high/low 追跡
   - shared intraday stop / target と `14:30` force flatten の live exit フロー
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
+  - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
+  - SIGINT/SIGTERM が安全停止フラグに変換されること
+- `tests/test_kabucom_broker.py`
+  - `core/kabucom_broker.py` の POST 再送抑止
+  - 注文 payload の tick 正規化と float 送信
+  - 逆指値 payload の trigger price 正規化
+  - 注文一覧取得失敗時の fail closed
+  - API health が 401 を成功扱いしないこと
+  - trade history の append-only 化
+  - order journal の append-only 記録
 - `tests/test_analyze_intraday_logs.py`
   - `analyze_intraday_logs.py` の decision 集計
   - intraday trade path 集計
@@ -612,6 +623,7 @@ python -m pytest tests/test_jp_jquants_fetcher_v2.py
 python -m pytest tests/test_jp_optimizer.py
 python -m pytest tests/test_jp_walkforward.py
 python -m pytest tests/test_auto_trade.py
+python -m pytest tests/test_kabucom_broker.py
 python -m pytest tests/test_analyze_intraday_logs.py
 ```
 
@@ -622,4 +634,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-07
+Last updated: 2026-06-11

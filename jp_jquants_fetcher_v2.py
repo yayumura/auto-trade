@@ -9,14 +9,16 @@ import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import jquantsapi
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-# Append current directory to sys.path
-sys.path.append(os.getcwd())
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -26,8 +28,8 @@ except Exception:
 
 load_dotenv()
 
-CHECKPOINT_DIR = "data_cache/jp_broad/checkpoints"
-DEFAULT_OUTPUT_PATH = "data_cache/jp_broad/jp_mega_cache.pkl"
+CHECKPOINT_DIR = str(REPO_ROOT / "data_cache" / "jp_broad" / "checkpoints")
+DEFAULT_OUTPUT_PATH = str(REPO_ROOT / "data_cache" / "jp_broad" / "jp_mega_cache.pkl")
 DEFAULT_START_DATE = "20210405"
 DEFAULT_REFRESH_OVERLAP_DAYS = 7
 DEFAULT_MAX_WORKERS = 4

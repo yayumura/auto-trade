@@ -1,6 +1,7 @@
 import json
 import pandas as pd
 import numpy as np
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from datetime import datetime as dt
 from core.config import (
     STOP_LOSS_ATR, TAKE_PROFIT_ATR, JST, BREADTH_THRESHOLD,
@@ -4055,9 +4056,11 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
     - Any residual position is considered invalid and should be flattened immediately.
     """
     sell_actions = []
+    fill_events = []
+    remaining_portfolio = []
 
     if not portfolio:
-        return [], sell_actions
+        return [], sell_actions, fill_events
 
     for p in portfolio:
         code = str(p['code'])
@@ -4066,13 +4069,51 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
         else:
             current_price = float(p.get('current_price', p['buy_price']))
         sell_actions.append(f"SELL {code} - Day Trade Flatten (@{current_price:,.1f})")
-        if not is_simulation and broker:
-            try:
-                broker.execute_chase_order(code, p['shares'], side="1")
-            except:
-                pass
+        if is_simulation or not broker:
+            continue
 
-    return [], sell_actions
+        try:
+            details = broker.execute_chase_order(code, p['shares'], side="1")
+        except Exception as exc:
+            sell_actions.append(f"SELL {code} - Day Trade Flatten failed ({exc})")
+            remaining_portfolio.append(dict(p))
+            continue
+
+        if not isinstance(details, dict):
+            remaining_portfolio.append(dict(p))
+            continue
+
+        filled_shares = int(details.get("Qty", 0) or 0)
+        observed_price = float(details.get("Price", current_price) or current_price)
+        if filled_shares <= 0:
+            remaining_portfolio.append(dict(p))
+            continue
+
+        remaining_shares = max(0, int(p.get("shares", 0)) - filled_shares)
+        fill_events.append({
+            "position": dict(p),
+            "filled_shares": filled_shares,
+            "observed_price": observed_price,
+            "modeled_exit_price": float(current_price),
+            "remaining_shares": remaining_shares,
+            "session_open": float(p.get("buy_price", current_price)),
+            "session_high": float(max(float(p.get("highest_price", current_price)), float(current_price))),
+            "session_low": float(min(float(p.get("lowest_price", p.get("buy_price", current_price))), float(current_price))),
+            "exit_time": dt.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+            "exit_reason": "daytrade_flatten",
+        })
+        if remaining_shares > 0:
+            remaining_position = dict(p)
+            remaining_position["shares"] = remaining_shares
+            remaining_position["current_price"] = round(observed_price, 1)
+            remaining_position["highest_price"] = round(max(float(p.get("highest_price", current_price)), float(current_price)), 1)
+            remaining_position["lowest_price"] = round(min(float(p.get("lowest_price", p.get("buy_price", current_price))), float(current_price)), 1)
+            remaining_position["last_quote_timestamp"] = dt.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+            remaining_portfolio.append(remaining_position)
+
+    if is_simulation:
+        return [], sell_actions, fill_events
+    return remaining_portfolio, sell_actions, fill_events
 
 def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
     """V17.0 Fixed Breadth Scaling: On if a shared day-trade setup can be active."""
@@ -4785,8 +4826,40 @@ def save_invalid_tickers(invalid_map):
     except:
         pass
 
+def _resolve_jpx_tick_size(price):
+    price = float(price)
+    if price < 1000:
+        return 1
+    if price < 3000:
+        return 1
+    if price < 5000:
+        return 5
+    if price < 30000:
+        return 10
+    if price < 50000:
+        return 50
+    if price < 300000:
+        return 100
+    if price < 500000:
+        return 500
+    if price < 3000000:
+        return 1000
+    if price < 5000000:
+        return 5000
+    return 10000
+
 def normalize_tick_size(price, is_buy=True):
-    return round(price, 1)
+    if _is_invalid_number(price):
+        return 0.0
+    value = float(price)
+    if value <= 0:
+        return 0.0
+    tick_size = _resolve_jpx_tick_size(value)
+    value_dec = Decimal(str(value))
+    tick_dec = Decimal(str(tick_size))
+    rounding = ROUND_CEILING if is_buy else ROUND_FLOOR
+    normalized = (value_dec / tick_dec).to_integral_value(rounding=rounding) * tick_dec
+    return float(normalized)
 
 def get_prime_tickers():
     from core.config import DATA_FILE
