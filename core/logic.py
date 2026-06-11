@@ -4068,6 +4068,11 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             current_price = realtime_buffers[code].get_latest_price()
         else:
             current_price = float(p.get('current_price', p['buy_price']))
+        ownership = str(p.get("ownership", "MANAGED_BY_BOT" if is_simulation else "AMBIGUOUS")).upper()
+        if not is_simulation and ownership != "MANAGED_BY_BOT":
+            sell_actions.append(f"SKIP {code} - unmanaged position ({ownership})")
+            remaining_portfolio.append(dict(p))
+            continue
         sell_actions.append(f"SELL {code} - Day Trade Flatten (@{current_price:,.1f})")
         if is_simulation or not broker:
             continue
@@ -4083,8 +4088,8 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             remaining_portfolio.append(dict(p))
             continue
 
-        filled_shares = int(details.get("Qty", 0) or 0)
-        observed_price = float(details.get("Price", current_price) or current_price)
+        filled_shares = int(details.get("filled_qty", details.get("Qty", 0)) or 0)
+        observed_price = float(details.get("average_price", details.get("Price", current_price)) or current_price)
         if filled_shares <= 0:
             remaining_portfolio.append(dict(p))
             continue
@@ -4743,11 +4748,21 @@ class RealtimeBuffer:
         self.latest_price = 0
         self.latest_volume = 0
         self.prices = [] # Simplified history for RSI2
+        self.previous_close = 0
         self.session_open = 0
         self.session_high = 0
         self.session_low = 0
         self.last_trade_date = None
         
+    def set_previous_close(self, previous_close):
+        if _is_invalid_number(previous_close):
+            self.previous_close = 0
+        else:
+            self.previous_close = float(previous_close)
+
+    def get_previous_close(self):
+        return float(self.previous_close or 0)
+
     def update(self, price, volume, server_time, open_price=None, high_price=None, low_price=None):
         trade_date = None
         if server_time is not None:

@@ -9,6 +9,14 @@ from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv, append_csv_rows
 from core.order_journal import append_order_journal
+from core.kabucom_order_state import (
+    OrderProcessState,
+    OrderTerminalReason,
+    SubmissionStatus,
+    classify_submission_response,
+    parse_kabucom_order,
+)
+from core.kabucom_quote import parse_board_quote
 
 class KabucomBroker(BaseBroker):
     """
@@ -135,7 +143,7 @@ class KabucomBroker(BaseBroker):
         except Exception:
             return fallback
 
-    def get_active_orders(self) -> list | None:
+    def get_active_orders(self) -> dict | None:
         """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
         if not self.token: return None
         try:
@@ -145,9 +153,31 @@ class KabucomBroker(BaseBroker):
                 return None
             if res.status_code == 200:
                 orders = res.json()
-                # State 3:受付, 4:受付済, 5:執行中 のものを抽出
-                active = [o for o in orders if o.get('State') in [3, 4, 5]]
-                return active
+                if not isinstance(orders, list):
+                    return None
+                active = []
+                has_unknown = False
+                unresolved_order_ids = []
+                for order in orders:
+                    if not isinstance(order, dict):
+                        continue
+                    parsed = parse_kabucom_order(order)
+                    if parsed.process_state == OrderProcessState.ACTIVE:
+                        enriched = dict(order)
+                        enriched["__parsed_process_state__"] = parsed.process_state.value
+                        enriched["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
+                        enriched["__parsed_cumulative_qty__"] = parsed.cumulative_qty
+                        enriched["__parsed_order_qty__"] = parsed.order_qty
+                        enriched["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+                        active.append(enriched)
+                    elif parsed.process_state == OrderProcessState.UNKNOWN:
+                        has_unknown = True
+                        unresolved_order_ids.append(parsed.order_id or "")
+                return {
+                    "orders": active,
+                    "has_unknown": has_unknown,
+                    "unresolved_order_ids": [order_id for order_id in unresolved_order_ids if order_id],
+                }
             return None
         except Exception as e:
             print(f"⚠️ 注文一覧取得エラー: {e}")
@@ -178,17 +208,47 @@ class KabucomBroker(BaseBroker):
             return account
 
         # 本番モード(LIVE)の場合はAPIから取得
-        res = self._api_request("GET", "wallet/cash", timeout=10)
-        if res and res.status_code == 200:
-            data = res.json()
-            margin = data.get('MarginAccountWallet')
-            stock = data.get('StockAccountWallet')
-            m_val = float(margin) if margin is not None else 0.0
-            s_val = float(stock) if stock is not None else 0.0
-            return {"cash": max(m_val, s_val)}
-        
-        print(f"⚠️ 余力取得エラー: {res.text if res else 'No Response'}")
-        return {"cash": 0}
+        cash_res = self._api_request("GET", "wallet/cash", timeout=10)
+        margin_res = self._api_request("GET", "wallet/margin", timeout=10)
+        cash_ok = bool(cash_res and cash_res.status_code == 200)
+        margin_ok = bool(margin_res and margin_res.status_code == 200)
+
+        stock_buying_power = 0.0
+        margin_buying_power = 0.0
+        if cash_ok:
+            try:
+                cash_data = cash_res.json()
+                stock_buying_power = float(cash_data.get("StockAccountWallet") or 0.0)
+            except Exception:
+                cash_ok = False
+        if margin_ok:
+            try:
+                margin_data = margin_res.json()
+                margin_buying_power = float(margin_data.get("MarginAccountWallet") or 0.0)
+            except Exception:
+                margin_ok = False
+
+        if not cash_ok or not margin_ok:
+            print(
+                "⚠️ 口座余力取得エラー: "
+                f"cash={'ok' if cash_ok else (cash_res.text if cash_res else 'No Response')}, "
+                f"margin={'ok' if margin_ok else (margin_res.text if margin_res else 'No Response')}"
+            )
+
+        return {
+            "cash": 0.0,
+            "stock_buying_power": stock_buying_power if cash_ok else 0.0,
+            "margin_buying_power": margin_buying_power if margin_ok else 0.0,
+            "configured_risk_capital": 0.0,
+            "realized_pnl_today": 0.0,
+            "unrealized_pnl": 0.0,
+            "gross_position_notional": 0.0,
+            "net_position_notional": 0.0,
+            "broker_position_count": 0,
+            "wallet_snapshot_incomplete": not (cash_ok and margin_ok),
+            "wallet_cash_ok": cash_ok,
+            "wallet_margin_ok": margin_ok,
+        }
 
     def get_positions(self) -> list:
         """ 
@@ -210,16 +270,25 @@ class KabucomBroker(BaseBroker):
         # 2. ローカルデータマージ (中身は以前と同じ)
         from core.config import PORTFOLIO_FILE
         local_data = {}
+        managed_execution_ids = set()
         df_local = safe_read_csv(PORTFOLIO_FILE)
         if not df_local.empty:
             for _, row in df_local.iterrows():
-                local_data[str(row['code'])] = row.to_dict()
+                row_data = row.to_dict()
+                local_data[str(row['code'])] = row_data
+                execution_id = str(row_data.get("execution_id") or "").strip()
+                if execution_id:
+                    managed_execution_ids.add(execution_id)
 
         final_positions = []
         for p in api_positions:
             if p.get('LeavesQty', 0) == 0: continue
             code_sym = str(p['Symbol'])
             current_price = float(p['CurrentPrice']) if p.get('CurrentPrice') is not None else 0.0
+            leaves_qty = int(p.get('LeavesQty', 0) or 0)
+            hold_qty = int(p.get('HoldQty', 0) or 0)
+            available_qty = max(0, leaves_qty - hold_qty)
+            execution_id = str(p.get('ExecutionID') or "").strip() or None
             
             if code_sym in local_data:
                 hist = local_data[code_sym]
@@ -233,20 +302,135 @@ class KabucomBroker(BaseBroker):
                 buy_time = "Real API Position"
                 partial_sold = False
 
+            if execution_id and execution_id in managed_execution_ids:
+                ownership = "MANAGED_BY_BOT"
+                ownership_reason = "matched_execution_id"
+            elif code_sym in local_data:
+                ownership = "AMBIGUOUS"
+                ownership_reason = "symbol_match_only"
+            else:
+                ownership = "UNMANAGED"
+                ownership_reason = "no_local_match"
+
             final_positions.append({
                 "code": code_sym, 
                 "name": p.get('SymbolName', ''), 
-                "shares": int(p.get('LeavesQty', 0)),
+                "shares": leaves_qty,
+                "leaves_qty": leaves_qty,
+                "hold_qty": hold_qty if p.get('HoldQty') is not None else None,
+                "available_qty": available_qty,
                 "buy_price": float(p['Price']) if p.get('Price') is not None else 0.0, 
                 "current_price": current_price,
                 "highest_price": round(highest_price, 1),
                 "buy_time": buy_time,
                 "partial_sold": partial_sold,
-                "hold_id": p.get('ExecutionID') # 信用返済用に保持
+                "hold_id": p.get('ExecutionID'), # 信用返済用に保持
+                "execution_id": p.get('ExecutionID'),
+                "exchange": p.get('Exchange'),
+                "margin_trade_type": p.get('MarginTradeType'),
+                "ownership": ownership,
+                "ownership_reason": ownership_reason,
             })
         return final_positions
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None) -> str:
+    def _build_close_positions_for_symbol(self, code: str, requested_qty: int) -> dict | None:
+        """信用返済用に、同一銘柄・同一Exchange・同一MarginTradeTypeの建玉へ数量を安全に割り当てる。"""
+        if requested_qty <= 0:
+            return {"close_positions": [], "exchange": None, "margin_trade_type": None}
+        try:
+            positions = self.get_positions()
+        except Exception as exc:
+            print(f"⚠️ 返済建玉の再取得に失敗しました: {exc}")
+            return None
+
+        matches = [p for p in positions if p.get("code") == str(code) and p.get("hold_id")]
+        if not matches:
+            return None
+
+        candidate_exchange = None
+        candidate_margin_trade_type = None
+        for position in matches:
+            exchange = position.get("exchange")
+            margin_trade_type = position.get("margin_trade_type")
+            if exchange is None or margin_trade_type is None:
+                return None
+            if candidate_exchange is None:
+                candidate_exchange = int(exchange)
+                candidate_margin_trade_type = int(margin_trade_type)
+            elif candidate_exchange != int(exchange) or candidate_margin_trade_type != int(margin_trade_type):
+                print(
+                    f"⚠️ 返済対象建玉のExchange/MarginTradeTypeが混在しています: "
+                    f"{code} exchange={candidate_exchange}/{exchange} margin={candidate_margin_trade_type}/{margin_trade_type}"
+                )
+                return None
+
+        remaining_qty = int(requested_qty)
+        close_positions = []
+        for position in sorted(
+            matches,
+            key=lambda item: (
+                str(item.get("buy_time", "")),
+                str(item.get("execution_id", "")),
+                str(item.get("hold_id", "")),
+            ),
+        ):
+            available_qty = position.get("available_qty")
+            if available_qty is None:
+                leaves_qty = int(position.get("leaves_qty", position.get("shares", 0)) or 0)
+                hold_qty = int(position.get("hold_qty", 0) or 0)
+                available_qty = max(0, leaves_qty - hold_qty)
+            available_qty = max(0, int(available_qty))
+            if available_qty <= 0:
+                continue
+
+            take_qty = min(remaining_qty, available_qty)
+            if take_qty > 0:
+                close_positions.append({
+                    "HoldID": position["hold_id"],
+                    "Qty": take_qty,
+                })
+                remaining_qty -= take_qty
+            if remaining_qty <= 0:
+                break
+
+        if remaining_qty > 0:
+            print(f"⚠️ 返済可能数量が不足しています: {code} requested={requested_qty} available={requested_qty - remaining_qty}")
+            return None
+        return {
+            "close_positions": close_positions,
+            "exchange": candidate_exchange,
+            "margin_trade_type": candidate_margin_trade_type,
+        }
+
+    def _resolve_hold_route(self, hold_id: str) -> dict | None:
+        """hold_id に紐づく建玉の Exchange / MarginTradeType を特定する。"""
+        if not hold_id:
+            return None
+        try:
+            positions = self.get_positions()
+        except Exception as exc:
+            print(f"⚠️ 返済建玉の再取得に失敗しました: {exc}")
+            return None
+
+        matches = [p for p in positions if p.get("hold_id") == hold_id]
+        if not matches:
+            return None
+
+        exchange = matches[0].get("exchange")
+        margin_trade_type = matches[0].get("margin_trade_type")
+        if exchange is None or margin_trade_type is None:
+            return None
+
+        for position in matches[1:]:
+            if position.get("exchange") != exchange or position.get("margin_trade_type") != margin_trade_type:
+                return None
+
+        return {
+            "exchange": int(exchange),
+            "margin_trade_type": int(margin_trade_type),
+        }
+
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None, exchange: int | None = None, margin_trade_type: int | None = None) -> str:
         """
         現物・信用の成行・指値注文を発注する。
         side: "1" (売), "2" (買)
@@ -258,7 +442,21 @@ class KabucomBroker(BaseBroker):
         
         cash_margin = 2 if side == "2" else 3
         # 買付余力(2) または 信用売(3)
-        margin_trade_type = 3
+        if margin_trade_type is None:
+            margin_trade_type = 3 if side == "2" else None
+        if exchange is None:
+            if side == "2":
+                try:
+                    exchange = int(os.environ.get("KABUCOM_ORDER_EXCHANGE", 1))
+                except (TypeError, ValueError):
+                    exchange = 1
+            else:
+                exchange = None
+        if side == "1" and (exchange is None or margin_trade_type is None):
+            print(f"⚠️ 返済注文のExchange/MarginTradeTypeが未確定のため発注を中止します: {code}")
+            return None
+        if margin_trade_type is None:
+            margin_trade_type = 3
         
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         normalized_price = 0.0
@@ -276,13 +474,15 @@ class KabucomBroker(BaseBroker):
             "price": float(normalized_price) if front_order_type == 20 else 0.0,
             "cash_margin": cash_margin,
             "front_order_type": front_order_type,
+            "exchange": None if exchange is None else int(exchange),
+            "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
             "is_production": bool(self.is_production),
         })
 
         data = {
             "Password": self.password,
             "Symbol": code,
-            "Exchange": 1,      # 1: 東証
+            "Exchange": int(exchange),
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
             "CashMargin": cash_margin,
@@ -303,61 +503,75 @@ class KabucomBroker(BaseBroker):
             return None
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
-        if res and res.status_code == 200:
-            order_res = res.json()
-            if order_res.get('Result') == 0:
-                order_id = order_res.get('OrderId')
-                env = "【本番】" if self.is_production else "【検証API】"
-                act = "買い" if side == "2" else "売り"
-                otype = "指値" if price > 0 else "成行"
-                append_order_journal({
-                    "event": "ACCEPTED",
-                    "intent_id": intent_id,
-                    "kind": "market",
-                    "symbol": str(code),
-                    "side": side,
-                    "qty": int(shares),
-                    "price": float(normalized_price) if front_order_type == 20 else 0.0,
-                    "order_id": order_id,
-                    "http_status": res.status_code,
-                    "result": order_res,
-                    "is_production": bool(self.is_production),
-                })
-                print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
-                return order_id
-            else:
-                append_order_journal({
-                    "event": "REJECTED",
-                    "intent_id": intent_id,
-                    "kind": "market",
-                    "symbol": str(code),
-                    "side": side,
-                    "qty": int(shares),
-                    "price": float(normalized_price) if front_order_type == 20 else 0.0,
-                    "http_status": res.status_code,
-                    "result": order_res,
-                    "is_production": bool(self.is_production),
-                })
-                print(f"⚠️ 注文拒否: {order_res}")
-        else:
+        submission = classify_submission_response(
+            intent_id=intent_id,
+            symbol=str(code),
+            side=side,
+            qty=shares,
+            price=float(normalized_price) if front_order_type == 20 else 0.0,
+            response=res,
+        )
+        self._last_submission_result = submission
+        if submission.status == SubmissionStatus.ACCEPTED:
+            order_id = submission.broker_order_id
+            env = "【本番】" if self.is_production else "【検証API】"
+            act = "買い" if side == "2" else "売り"
+            otype = "指値" if price > 0 else "成行"
             append_order_journal({
-                "event": "UNKNOWN",
+                "event": "ACCEPTED",
                 "intent_id": intent_id,
                 "kind": "market",
                 "symbol": str(code),
                 "side": side,
                 "qty": int(shares),
                 "price": float(normalized_price) if front_order_type == 20 else 0.0,
-                "http_status": None if res is None else res.status_code,
-                "response_text": None if res is None else res.text,
+                "order_id": order_id,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
             })
+            print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
+            return order_id
+        if submission.status == SubmissionStatus.REJECTED:
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "price": float(normalized_price) if front_order_type == 20 else 0.0,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "rejection_reason": submission.rejection_reason,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
+            print(f"⚠️ 注文拒否: {submission.rejection_reason}")
+            return None
+        append_order_journal({
+            "event": "UNKNOWN",
+            "intent_id": intent_id,
+            "kind": "market",
+            "symbol": str(code),
+            "side": side,
+            "qty": int(shares),
+            "price": float(normalized_price) if front_order_type == 20 else 0.0,
+            "http_status": submission.http_status,
+            "response_text": submission.response_text,
+            "rejection_reason": submission.rejection_reason,
+            "exchange": None if exchange is None else int(exchange),
+            "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+            "is_production": bool(self.is_production),
+        })
         return None
 
     def cancel_order(self, order_id: str) -> bool:
         """ API経由で注文を取り消す (オートキャンセル機構用) """
         if not self.token: return False
-        cancel_url = f"{self.base_url}/cancelorder"
         cancel_data = {"OrderId": order_id, "Password": self.password}
         append_order_journal({
             "event": "CANCEL_REQUESTED",
@@ -366,25 +580,66 @@ class KabucomBroker(BaseBroker):
         })
         
         res = self._api_request("PUT", "cancelorder", json=cancel_data, timeout=10)
-        if res and res.status_code == 200:
-            order_res = res.json()
-            cancelled = order_res.get('Result') == 0
+        submission = classify_submission_response(
+            intent_id=f"cancel-{time.time_ns()}",
+            symbol="",
+            side="",
+            qty=0,
+            price=None,
+            response=res,
+            allow_missing_order_id=True,
+        )
+        if submission.status == SubmissionStatus.ACCEPTED:
+            confirmed = self._confirm_terminal_order_state(order_id, timeout_sec=5)
             append_order_journal({
-                "event": "CANCELLED" if cancelled else "REJECTED",
+                "event": "CANCELLED" if confirmed else "UNKNOWN",
                 "order_id": order_id,
-                "http_status": res.status_code,
-                "result": order_res,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "is_production": bool(self.is_production),
+                "confirmed": bool(confirmed),
+            })
+            return bool(confirmed)
+        if submission.status == SubmissionStatus.REJECTED:
+            append_order_journal({
+                "event": "REJECTED",
+                "order_id": order_id,
+                "http_status": submission.http_status,
+                "rejection_reason": submission.rejection_reason,
                 "is_production": bool(self.is_production),
             })
-            return cancelled
+            return False
         append_order_journal({
             "event": "UNKNOWN",
             "order_id": order_id,
-            "http_status": None if res is None else res.status_code,
-            "response_text": None if res is None else res.text,
+            "http_status": submission.http_status,
+            "response_text": submission.response_text,
+            "rejection_reason": submission.rejection_reason,
             "is_production": bool(self.is_production),
         })
         return False
+
+    def _confirm_terminal_order_state(self, order_id: str, timeout_sec: int = 5) -> dict | None:
+        """Cancel request or timeout後に、終端状態を確認する。"""
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            details = self.get_order_details(order_id)
+            if not details:
+                time.sleep(1)
+                continue
+            parsed = parse_kabucom_order(details)
+            if parsed.process_state != OrderProcessState.TERMINAL:
+                time.sleep(1)
+                continue
+            enriched = dict(details)
+            enriched["__parsed_process_state__"] = parsed.process_state.value
+            enriched["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
+            enriched["__parsed_cumulative_qty__"] = parsed.cumulative_qty
+            enriched["__parsed_order_qty__"] = parsed.order_qty
+            enriched["__parsed_average_fill_price__"] = parsed.average_fill_price
+            enriched["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+            return enriched
+        return None
 
     def get_order_details(self, order_id: str) -> dict:
         """ 注文詳細（ステータス・約定単価等）を取得する """
@@ -463,19 +718,31 @@ class KabucomBroker(BaseBroker):
             time.sleep(0.1)
             if res and res.status_code == 200:
                 data = res.json()
+                quote = parse_board_quote(code, data)
+                if not quote.is_valid:
+                    print(f"⚠️ 板情報スキップ: {code} ({quote.rejection_reason})")
+                    continue
                 results[code] = {
-                    "price": data.get('CurrentPrice'),
-                    "prev_close": data.get('PreviousClose'),
-                    "status": data.get('CurrentPriceStatus'),
-                    "bid": data.get('BidPrice'),
-                    "ask": data.get('AskPrice'),
+                    "symbol": quote.symbol,
+                    "price": quote.current_price,
+                    "current_price": quote.current_price,
+                    "best_sell_price": quote.best_sell_price,
+                    "best_sell_qty": quote.best_sell_qty,
+                    "best_buy_price": quote.best_buy_price,
+                    "best_buy_qty": quote.best_buy_qty,
+                    "quote_timestamp": quote.quote_timestamp,
+                    "current_price_timestamp": quote.current_price_timestamp,
+                    "bid_sign_raw": quote.bid_sign_raw,
+                    "ask_sign_raw": quote.ask_sign_raw,
+                    "current_price_status": quote.current_price_status,
                     "open": data.get('OpeningPrice'),
                     "high": data.get('HighPrice'),
                     "low": data.get('LowPrice'),
                     "volume": data.get('TradingVolume'),
-                    "current_price_time": data.get('CurrentPriceTime'),
-                    "upper_limit": data.get('UpperLimit'),
-                    "lower_limit": data.get('LowerLimit')
+                    "prev_close": data.get('PreviousClose'),
+                    "upper_limit": quote.upper_limit,
+                    "lower_limit": quote.lower_limit,
+                    "is_valid": quote.is_valid,
                 }
         return results
 
@@ -488,139 +755,279 @@ class KabucomBroker(BaseBroker):
         
         remaining_shares = shares
         total_filled_qty = 0
-        total_filled_value = 0
-        
+        total_filled_value = 0.0
+        total_execution_ids: list[str] = []
+        unresolved = False
+        last_order_id = None
+        last_submission = None
+        last_terminal_reason = None
+        last_process_state = OrderProcessState.UNKNOWN
+
         from core.logic import normalize_tick_size
         for attempt in range(1, 4):
-            if remaining_shares <= 0: break
+            if remaining_shares <= 0:
+                break
             time.sleep(0.2)
-            
+
             board = self.get_board_data([code])
             b_info = board.get(str(code).replace(".T", ""))
-            if not b_info: break
-            
-            c_price = b_info.get('price', 0)
-            if side == "2" and c_price >= b_info.get('upper_limit', 999999):
+            if not b_info:
+                break
+
+            c_price = float(b_info.get("current_price") or b_info.get("price") or 0.0)
+            if side == "2" and c_price >= float(b_info.get("upper_limit", 999999) or 999999):
                 print(f"🚨 {code} はストップ高に達しているため、買い注文を中止します。")
                 break
-            if side == "1" and c_price <= b_info.get('lower_limit', 0):
+            if side == "1" and c_price <= float(b_info.get("lower_limit", 0) or 0):
                 print(f"🚨 {code} はストップ安に達しているため、売り注文を中止します。")
                 break
 
-            # [Professional Audit] Marketable Limit Order: 買値はAsk, 売値はBidを基準にする
             if side == "2":
-                # 買い：最良売気配(Ask)で確実に約定、取得できない場合は現在値
-                limit_price = b_info.get('ask') or b_info.get('price')
+                limit_price = b_info.get("best_sell_price") or b_info.get("price") or c_price
                 limit_price = normalize_tick_size(limit_price, is_buy=True)
             else:
-                # 売り：最良買気配(Bid)で確実に約定、取得できない場合は現在値
-                limit_price = b_info.get('bid') or b_info.get('price')
+                limit_price = b_info.get("best_buy_price") or b_info.get("price") or c_price
                 limit_price = normalize_tick_size(limit_price, is_buy=False)
-            
+
             if not limit_price or limit_price <= 0:
                 print(f"⚠️ {code} の有効な価格が取得できないため、追従を中断します。")
                 break
 
-            # 信用返済時は HoldID を取得して指定（FIFO自動選択がエラーになるのを防ぐため）
             close_pos_list = None
+            close_route = None
             if side == "1":
-                all_p = self.get_positions()
-                match_p = [p for p in all_p if p['code'] == str(code) and p.get('hold_id')]
-                if match_p:
-                    # 最初の建玉から順に割り当て (簡易実装)
-                    close_pos_list = [{"HoldID": match_p[0]['hold_id'], "Qty": remaining_shares}]
+                close_route = self._build_close_positions_for_symbol(code, remaining_shares)
+                if close_route is None:
+                    print(f"⚠️ {code} の返済建玉を正しく特定できないため、追従を中止します。")
+                    unresolved = True
+                    break
+                close_pos_list = close_route["close_positions"]
 
-            # 注文発注
-            order_id = self.execute_market_order(code, remaining_shares, side, price=limit_price, close_positions=close_pos_list)
-            if not order_id: break
-            
+            order_id = self.execute_market_order(
+                code,
+                remaining_shares,
+                side,
+                price=limit_price,
+                close_positions=close_pos_list,
+                exchange=None if close_route is None else close_route.get("exchange"),
+                margin_trade_type=None if close_route is None else close_route.get("margin_trade_type"),
+            )
+            last_submission = getattr(self, "_last_submission_result", None)
+            last_order_id = order_id
+            if not order_id:
+                if last_submission and last_submission.status == SubmissionStatus.REJECTED:
+                    rejection_reason = last_submission.rejection_reason or "rejected"
+                    return {
+                        "order_id": None,
+                        "submission_status": last_submission.status.value,
+                        "process_state": OrderProcessState.UNKNOWN.value,
+                        "terminal_reason": OrderTerminalReason.REJECTED.value,
+                        "Qty": total_filled_qty,
+                        "filled_qty": total_filled_qty,
+                        "Price": total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0,
+                        "average_price": total_filled_value / total_filled_qty if total_filled_qty > 0 else None,
+                        "remaining_qty": remaining_shares,
+                        "Symbol": code,
+                        "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                        "rejection_reason": rejection_reason,
+                        "unresolved": False,
+                    }
+                if last_submission and last_submission.status == SubmissionStatus.UNKNOWN:
+                    unresolved = True
+                break
+
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
             start_wait = time.time()
-            current_order_filled = False
-            
-            # [Professional Audit] 見せ玉判定を避けるため待機時間を30秒に延長
+            terminal_details = None
+
             while time.time() - start_wait < 30:
                 details = self.get_order_details(order_id)
                 if details:
-                    state = details.get('State')
-                    if state == 6: # 全部約定
-                        print(f"✨ 注文 ID: {order_id} が全部約定しました。")
-                        qty = int(details.get('CumQty', remaining_shares))
-                        total_filled_qty += qty
-                        total_filled_value += (float(details.get('Price', limit_price)) * qty)
-                        remaining_shares = 0
-                        current_order_filled = True
+                    parsed = parse_kabucom_order(details)
+                    if parsed.process_state == OrderProcessState.UNKNOWN:
+                        print(f"⚠️ 注文 ID: {order_id} の状態が不明です。再注文は行わず終了します。")
+                        unresolved = True
+                        terminal_details = details
+                        last_process_state = parsed.process_state
+                        last_terminal_reason = parsed.terminal_reason
+                        break
+                    if parsed.process_state == OrderProcessState.TERMINAL:
+                        for execution_id in parsed.execution_ids:
+                            if execution_id not in total_execution_ids:
+                                total_execution_ids.append(execution_id)
+                        terminal_details = dict(details)
+                        terminal_details["__parsed_process_state__"] = parsed.process_state.value
+                        terminal_details["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
+                        terminal_details["__parsed_cumulative_qty__"] = parsed.cumulative_qty
+                        terminal_details["__parsed_average_fill_price__"] = parsed.average_fill_price
+                        terminal_details["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+                        last_process_state = parsed.process_state
+                        last_terminal_reason = parsed.terminal_reason
+                        if parsed.terminal_reason == OrderTerminalReason.REJECTED and parsed.cumulative_qty <= 0:
+                            return {
+                                "order_id": order_id,
+                                "submission_status": None if last_submission is None else last_submission.status.value,
+                                "process_state": OrderProcessState.UNKNOWN.value,
+                                "terminal_reason": OrderTerminalReason.REJECTED.value,
+                                "Qty": 0,
+                                "filled_qty": 0,
+                                "Price": 0.0,
+                                "average_price": None,
+                                "remaining_qty": shares,
+                                "Symbol": code,
+                                "has_partial_fill": False,
+                                "rejection_reason": "broker_rejected",
+                                "unresolved": False,
+                                "execution_ids": tuple(total_execution_ids),
+                                "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                            }
                         break
                 time.sleep(1)
-            
-            if current_order_filled: break
-            
-            print(f"⏰ 待機時間終了。注文 ID: {order_id} を一度取り消して残数を確認します。")
-            if self.cancel_order(order_id):
-                time.sleep(0.5)
-                for _ in range(5):
-                    d = self.get_order_details(order_id)
-                    if d and d.get('State') in [8, 9, 10, 6]:
-                        cum_qty = int(d.get('CumQty', 0))
-                        if cum_qty > 0:
-                            print(f"⚠️ 注文 ID: {order_id} は一部約定（{cum_qty}株）していました。")
-                            total_filled_qty += cum_qty
-                            total_filled_value += (float(d.get('Price', limit_price)) * cum_qty)
-                        remaining_shares -= cum_qty
-                        break
-                    time.sleep(1)
-            else:
-                d = self.get_order_details(order_id)
-                if d and d.get('State') == 6:
-                    print(f"✨ 注文 ID: {order_id} の取消には失敗しましたが、既に全約定していました。")
-                    qty = int(d.get('CumQty', remaining_shares))
-                    total_filled_qty += qty
-                    total_filled_value += (float(d.get('Price', limit_price)) * qty)
-                    remaining_shares = 0
-                    break
+
+            if terminal_details is None and not unresolved:
+                print(f"⏰ 待機時間終了。注文 ID: {order_id} を一度取り消して残数を確認します。")
+                cancel_confirmed = self.cancel_order(order_id)
+                if cancel_confirmed:
+                    terminal_details = self._confirm_terminal_order_state(order_id, timeout_sec=5)
                 else:
-                    print(f"⛔ キャセル失敗かつ約定不明のため、安全のため追従を中断します。")
+                    terminal_details = self._confirm_terminal_order_state(order_id, timeout_sec=5)
+                if terminal_details is None:
+                    print("⛔ 取消完了が確認できないため、新規再発注は行わず終了します。")
+                    unresolved = True
                     break
 
-        # --- 最終手段: 強制執行 (Marketable Limit Order) ---
+            if terminal_details:
+                parsed = parse_kabucom_order(terminal_details)
+                last_terminal_reason = parsed.terminal_reason
+                if parsed.process_state == OrderProcessState.UNKNOWN:
+                    unresolved = True
+                    break
+                if parsed.cumulative_qty > 0:
+                    for execution_id in parsed.execution_ids:
+                        if execution_id not in total_execution_ids:
+                            total_execution_ids.append(execution_id)
+                    fill_qty = parsed.cumulative_qty
+                    fill_price = parsed.average_fill_price
+                    if fill_price is None:
+                        raw_price = terminal_details.get("Price", limit_price)
+                        fill_price = float(raw_price if raw_price not in (None, 0) else limit_price)
+                    total_filled_qty += fill_qty
+                    total_filled_value += float(fill_price) * fill_qty
+                    remaining_shares = max(0, shares - total_filled_qty)
+                    print(
+                        f"⚠️ 注文 ID: {order_id} は {fill_qty}株 約定済みです"
+                        + (" (部分約定)" if remaining_shares > 0 else "")
+                    )
+                if parsed.terminal_reason == OrderTerminalReason.FILLED or remaining_shares <= 0:
+                    break
+                continue
+
+        if unresolved:
+            avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
+            return {
+                "order_id": last_order_id,
+                "submission_status": None if last_submission is None else last_submission.status.value,
+                "process_state": OrderProcessState.UNKNOWN.value,
+                "terminal_reason": None,
+                "Qty": total_filled_qty,
+                "filled_qty": total_filled_qty,
+                "Price": avg_price,
+                "average_price": avg_price if total_filled_qty > 0 else None,
+                "remaining_qty": max(0, shares - total_filled_qty),
+                "Symbol": code,
+                "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                "execution_ids": tuple(total_execution_ids),
+                "execution_id": total_execution_ids[0] if total_execution_ids else None,
+            }
+
         if remaining_shares > 0:
             print(f"🔥 【強制執行】残数 {remaining_shares}株 をマージン付の価格で即時約定させます。")
             board = self.get_board_data([code])
             b_info = board.get(str(code).replace(".T", ""))
-            current_price = b_info.get('price') or b_info.get('bid', 0)
-            
-            from core.logic import normalize_tick_size
+            current_price = float(b_info.get("current_price") or b_info.get("price") or 0.0)
+
             if side == "2":
                 force_price = normalize_tick_size(current_price + (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=True)
             else:
                 force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
 
             close_pos_list = None
+            close_route = None
             if side == "1":
-                all_p = self.get_positions()
-                match_p = [p for p in all_p if p['code'] == str(code) and p.get('hold_id')]
-                if match_p:
-                    close_pos_list = [{"HoldID": match_p[0]['hold_id'], "Qty": remaining_shares}]
+                close_route = self._build_close_positions_for_symbol(code, remaining_shares)
+                if close_route is None:
+                    print(f"⚠️ {code} の返済建玉を正しく特定できないため、強制執行を中止します。")
+                    return {
+                        "order_id": last_order_id,
+                        "submission_status": None if last_submission is None else last_submission.status.value,
+                        "process_state": OrderProcessState.UNKNOWN.value,
+                        "terminal_reason": None,
+                        "Qty": total_filled_qty,
+                        "filled_qty": total_filled_qty,
+                        "Price": total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0,
+                        "average_price": total_filled_value / total_filled_qty if total_filled_qty > 0 else None,
+                        "remaining_qty": remaining_shares,
+                        "Symbol": code,
+                        "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                        "rejection_reason": "close_positions_unavailable",
+                        "unresolved": True,
+                    }
+                close_pos_list = close_route["close_positions"]
 
-            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price, close_positions=close_pos_list)
+            order_id = self.execute_market_order(
+                code,
+                remaining_shares,
+                side,
+                price=force_price,
+                close_positions=close_pos_list,
+                exchange=None if close_route is None else close_route.get("exchange"),
+                margin_trade_type=None if close_route is None else close_route.get("margin_trade_type"),
+            )
+            last_order_id = order_id or last_order_id
+            last_submission = getattr(self, "_last_submission_result", last_submission)
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:
-                    qty = int(f_details.get('CumQty', remaining_shares))
-                    total_filled_qty += qty
-                    total_filled_value += (float(f_details.get('Price', force_price)) * qty)
-                    remaining_shares -= qty
+                    parsed = parse_kabucom_order(f_details)
+                    if parsed.process_state == OrderProcessState.UNKNOWN:
+                        unresolved = True
+                    elif parsed.cumulative_qty > 0:
+                        last_terminal_reason = parsed.terminal_reason or last_terminal_reason
+                        for execution_id in parsed.execution_ids:
+                            if execution_id not in total_execution_ids:
+                                total_execution_ids.append(execution_id)
+                        fill_qty = parsed.cumulative_qty
+                        fill_price = parsed.average_fill_price
+                        if fill_price is None:
+                            raw_price = f_details.get("Price", force_price)
+                            fill_price = float(raw_price if raw_price not in (None, 0) else force_price)
+                        total_filled_qty += fill_qty
+                        total_filled_value += float(fill_price) * fill_qty
+                        remaining_shares = max(0, shares - total_filled_qty)
 
-        # [Professional Audit] 合算した結果（VWAP）を返却
-        avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0
+        avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
+        terminal_reason = None if last_terminal_reason is None else last_terminal_reason.value
+        process_state = OrderProcessState.UNKNOWN.value if unresolved else (
+            OrderProcessState.TERMINAL.value if total_filled_qty > 0 or terminal_reason is not None else OrderProcessState.UNKNOWN.value
+        )
         return {
-            "State": 6 if total_filled_qty >= shares else 7,
+            "order_id": last_order_id,
+            "submission_status": None if last_submission is None else last_submission.status.value,
+            "process_state": process_state,
+            "terminal_reason": terminal_reason,
             "Qty": total_filled_qty,
+            "filled_qty": total_filled_qty,
             "Price": avg_price,
-            "Symbol": code
+            "average_price": avg_price if total_filled_qty > 0 else None,
+            "remaining_qty": max(0, shares - total_filled_qty),
+            "Symbol": code,
+            "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+            "unresolved": unresolved,
+            "execution_ids": tuple(total_execution_ids),
+            "execution_id": total_execution_ids[0] if total_execution_ids else None,
         }
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None) -> str:
+    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, hold_id: str = None, exchange: int | None = None, margin_trade_type: int | None = None) -> str:
         """
         逆指値（ストップロス）注文を発注する。
         side: "1" (売), "2" (買)
@@ -632,7 +1039,24 @@ class KabucomBroker(BaseBroker):
 
         # ストップロス売り(1) または ストップロス買い(2)
         cash_margin = 2 if side == "2" else 3
-        margin_trade_type = 3
+        if margin_trade_type is None:
+            margin_trade_type = 3 if side == "2" else None
+        if exchange is None:
+            if side == "2":
+                try:
+                    exchange = int(os.environ.get("KABUCOM_ORDER_EXCHANGE", 1))
+                except (TypeError, ValueError):
+                    exchange = 1
+            elif hold_id:
+                route = self._resolve_hold_route(hold_id)
+                if route:
+                    exchange = route["exchange"]
+                    margin_trade_type = route["margin_trade_type"]
+        if side == "1" and (exchange is None or margin_trade_type is None):
+            print(f"⚠️ 逆指値の返済建玉ルートが不明なため、発注を中止します: {code}")
+            return None
+        if margin_trade_type is None:
+            margin_trade_type = 3
         
         # 逆指値の設定
         # 公式仕様の UnderOver に合わせる。
@@ -651,13 +1075,15 @@ class KabucomBroker(BaseBroker):
             "qty": int(shares),
             "trigger_price": float(normalized_trigger_price),
             "hold_id": hold_id,
+            "exchange": None if exchange is None else int(exchange),
+            "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
             "is_production": bool(self.is_production),
         })
 
         data = {
             "Password": self.password,
             "Symbol": code,
-            "Exchange": 1,
+            "Exchange": int(exchange),
             "SecurityType": 1,
             "Side": side,
             "CashMargin": cash_margin,
@@ -684,44 +1110,19 @@ class KabucomBroker(BaseBroker):
             return None
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
-        if res and res.status_code == 200:
-            order_res = res.json()
-            if order_res.get('Result') == 0:
-                order_id = order_res.get('OrderId')
-                append_order_journal({
-                    "event": "ACCEPTED",
-                    "intent_id": intent_id,
-                    "kind": "stop",
-                    "symbol": str(code),
-                    "side": side,
-                    "qty": int(shares),
-                    "trigger_price": float(normalized_trigger_price),
-                    "hold_id": hold_id,
-                    "order_id": order_id,
-                    "http_status": res.status_code,
-                    "result": order_res,
-                    "is_production": bool(self.is_production),
-                })
-                print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
-                return order_id
-            else:
-                append_order_journal({
-                    "event": "REJECTED",
-                    "intent_id": intent_id,
-                    "kind": "stop",
-                    "symbol": str(code),
-                    "side": side,
-                    "qty": int(shares),
-                    "trigger_price": float(normalized_trigger_price),
-                    "hold_id": hold_id,
-                    "http_status": res.status_code,
-                    "result": order_res,
-                    "is_production": bool(self.is_production),
-                })
-                print(f"⚠️ 逆指値注文エラー: {order_res}")
-        else:
+        submission = classify_submission_response(
+            intent_id=intent_id,
+            symbol=str(code),
+            side=side,
+            qty=shares,
+            price=float(normalized_trigger_price),
+            response=res,
+        )
+        self._last_submission_result = submission
+        if submission.status == SubmissionStatus.ACCEPTED:
+            order_id = submission.broker_order_id
             append_order_journal({
-                "event": "UNKNOWN",
+                "event": "ACCEPTED",
                 "intent_id": intent_id,
                 "kind": "stop",
                 "symbol": str(code),
@@ -729,59 +1130,100 @@ class KabucomBroker(BaseBroker):
                 "qty": int(shares),
                 "trigger_price": float(normalized_trigger_price),
                 "hold_id": hold_id,
-                "http_status": None if res is None else res.status_code,
-                "response_text": None if res is None else res.text,
+                "order_id": order_id,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
             })
+            print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
+            return order_id
+        if submission.status == SubmissionStatus.REJECTED:
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "stop",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "trigger_price": float(normalized_trigger_price),
+                "hold_id": hold_id,
+                "http_status": submission.http_status,
+                "rejection_reason": submission.rejection_reason,
+                "result": submission.result_code,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
+            print(f"⚠️ 逆指値注文エラー: {submission.rejection_reason}")
+            return None
+        append_order_journal({
+            "event": "UNKNOWN",
+            "intent_id": intent_id,
+            "kind": "stop",
+            "symbol": str(code),
+            "side": side,
+            "qty": int(shares),
+            "trigger_price": float(normalized_trigger_price),
+            "hold_id": hold_id,
+            "http_status": submission.http_status,
+            "response_text": submission.response_text,
+            "rejection_reason": submission.rejection_reason,
+            "exchange": None if exchange is None else int(exchange),
+            "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+            "is_production": bool(self.is_production),
+        })
         return None
 
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
         """ 注文が約定（または失敗）するまで待機する """
         print(f"⏳ 注文 ID: {order_id} の約定を待機中...")
         start_time = time.time()
+        last_details = None
         while time.time() - start_time < timeout_sec:
             details = self.get_order_details(order_id)
             if details:
-                state = details.get('State')
-                # 5: 執行中, 3: 受付(現物), 4: 受付済
-                # 6: 全部約定, 7: 一部約定, 8: 取消済, 9: 失効, 10: 出来ず
-                if state == 6:
-                    print(f"✨ 注文 ID: {order_id} 全部約定しました。")
-                    return details
-                elif state == 7:
-                    # H-5: 一部約定を検出。残りの注文を取消して約定分のみを返す。
-                    cum_qty = details.get('CumQty', 0)
-                    leaves_qty = details.get('LeavesQty', 0)
-                    print(f"⚠️ 注文 ID: {order_id} 一部約定 ({cum_qty}株約定, 残{leaves_qty}株)。残りの注文を取消します。")
-                    # 残りの注文をキャンセルする
-                    if not self.cancel_order(order_id):
-                        print(f"⚠️ 残注文の取消に失敗（手動確認要）")
-                    # 一部約定を全部約定たこととしてdetailsを返すが、Phase上位に一部約定であることを通知
-                    details['_partial'] = True
-                    details['State'] = 6  # 上位の約定チェックが State==6 を期待するため
-                    details['Qty'] = cum_qty  # 実際に約定した株数で上書き
-                    return details
-                elif state in [8, 9, 10]:
-                    print(f"❌ 注文 ID: {order_id} は約定しませんでした (State: {state})。")
-                    return details
+                parsed = parse_kabucom_order(details)
+                last_details = dict(details)
+                last_details["__parsed_process_state__"] = parsed.process_state.value
+                last_details["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
+                last_details["__parsed_cumulative_qty__"] = parsed.cumulative_qty
+                last_details["__parsed_order_qty__"] = parsed.order_qty
+                last_details["__parsed_average_fill_price__"] = parsed.average_fill_price
+                last_details["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+                if parsed.process_state == OrderProcessState.TERMINAL:
+                    if parsed.cumulative_qty > 0:
+                        last_details["Qty"] = parsed.cumulative_qty
+                        last_details["Price"] = parsed.average_fill_price if parsed.average_fill_price is not None else details.get("Price")
+                    if parsed.terminal_reason == OrderTerminalReason.FILLED:
+                        print(f"✨ 注文 ID: {order_id} 全部約定しました。")
+                    elif parsed.terminal_reason == OrderTerminalReason.CANCELLED:
+                        print(f"⚠️ 注文 ID: {order_id} は取消完了です。")
+                    elif parsed.terminal_reason == OrderTerminalReason.EXPIRED:
+                        print(f"❌ 注文 ID: {order_id} は失効しました。")
+                    elif parsed.terminal_reason == OrderTerminalReason.REJECTED:
+                        print(f"❌ 注文 ID: {order_id} は発注エラーで終了しました。")
+                    return last_details
+                if parsed.process_state == OrderProcessState.UNKNOWN:
+                    print(f"⚠️ 注文 ID: {order_id} の状態が不明です。")
+                    return last_details
             time.sleep(2)
         print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。ゾンビ処理化を防ぐため取消要求を送信します。")
         if self.cancel_order(order_id):
             print("✅ タイムアウト注文の強制取消要求を送信しました。")
         else:
             print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）")
-            
-        # --- [V2-C2] 取消完了の確認ポーリングを追加 ---
-        print(f"⏳ 注文 ID: {order_id} の取消完了を待機中...")
-        cancel_start = time.time()
-        while time.time() - cancel_start < 5:
-            details = self.get_order_details(order_id)
-            if details and details.get('State') == 8: # 8: 取消済
-                print(f"✅ 注文 ID: {order_id} の取消が完了しました。")
-                return details
-            time.sleep(2)
-        print(f"⚠️ 注文 ID: {order_id} の取消完了が規定時間内に確認できませんでした（State: {details.get('State') if details else 'Unknown'}）。ゾンビポジションに注意してください。")
-        return None
+        terminal_details = self._confirm_terminal_order_state(order_id, timeout_sec=5)
+        if terminal_details:
+            parsed = parse_kabucom_order(terminal_details)
+            if parsed.cumulative_qty > 0:
+                terminal_details["Qty"] = parsed.cumulative_qty
+                terminal_details["Price"] = parsed.average_fill_price if parsed.average_fill_price is not None else terminal_details.get("Price")
+            print(f"✅ 注文 ID: {order_id} の終端状態を確認しました ({parsed.terminal_reason.value if parsed.terminal_reason else 'unknown'})。")
+            return terminal_details
+        print(f"⚠️ 注文 ID: {order_id} の取消完了が規定時間内に確認できませんでした。ゾンビポジションに注意してください。")
+        return last_details
 
     # ---------------------------------------------------------
     # インターフェース互換性のためのファイル保存・ログ機能
@@ -832,11 +1274,22 @@ class KabucomBroker(BaseBroker):
                 print(f" 🔹 {p['code']} {p['name']}\n    数量: {p['shares']}株 | 現在値: {cp:,.1f}円 | 評価額: {val:,.0f}円 | 損益: {profit_pct:+.2f}%")
         else:
             print(" - 保有なし")
-            
-        print("\n【口座ステータス (API取得値)】")
-        print(f" 💰 現金残高:   {summary_record['cash_yen']:>10,.0f}円")
-        print(f" 📈 株式評価額: {summary_record['stock_value_yen']:>10,.0f}円")
-        print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
+
+        if any(key in summary_record for key in ("equity_yen", "margin_buying_power_yen", "stock_buying_power_yen")):
+            print("\n【口座ステータス (Broker Snapshot)】")
+            if summary_record.get("equity_yen") is not None:
+                print(f" 👑 推定純資産: {summary_record['equity_yen']:>10,.0f}円")
+            if summary_record.get("margin_buying_power_yen") is not None:
+                print(f" 💳 信用余力:   {summary_record['margin_buying_power_yen']:>10,.0f}円")
+            if summary_record.get("stock_buying_power_yen") is not None:
+                print(f" 💰 現物余力:   {summary_record['stock_buying_power_yen']:>10,.0f}円")
+            print(f" 📈 保有評価額: {summary_record['stock_value_yen']:>10,.0f}円")
+            print(f" 🧮 合計資産額: {total_assets:>10,.0f}円")
+        else:
+            print("\n【口座ステータス (API取得値)】")
+            print(f" 💰 現金残高:   {summary_record['cash_yen']:>10,.0f}円")
+            print(f" 📈 株式評価額: {summary_record['stock_value_yen']:>10,.0f}円")
+            print(f" 👑 合計資産額: {total_assets:>10,.0f}円")
         print("="*50 + "\n")
         
         actions_str = " | ".join(actions) if actions else "アクションなし"

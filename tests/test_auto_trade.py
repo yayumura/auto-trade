@@ -89,6 +89,74 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["post_entry_low"] == 105.0
     assert record["buy_rs"] == 42.0
     assert record["buy_rsi2"] == 63.0
+    assert record["protective_stop_order_id"] is None
+
+
+def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+    )
+
+    captured = {}
+
+    class _Broker:
+        def get_positions(self):
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                }
+            ]
+
+        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
+            captured.update({
+                "code": code,
+                "shares": shares,
+                "side": side,
+                "trigger_price": trigger_price,
+                "hold_id": hold_id,
+                "exchange": exchange,
+                "margin_trade_type": margin_trade_type,
+            })
+            return "STOP-1"
+
+    stop_order_id = auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    )
+
+    assert stop_order_id == "STOP-1"
+    assert record["hold_id"] == "HOLD-1"
+    assert record["protective_stop_order_id"] == "STOP-1"
+    assert record["protective_stop_trigger_price"] == 99.0
+    assert record["protective_stop_status"] == "armed"
+    assert captured == {
+        "code": "1000",
+        "shares": 300,
+        "side": "1",
+        "trigger_price": 99.0,
+        "hold_id": "HOLD-1",
+        "exchange": 1,
+        "margin_trade_type": 3,
+    }
 
 
 def test_daytrade_primary_failed_runup_exit_uses_live_session_high():
@@ -188,6 +256,90 @@ def test_close_daytrade_positions_by_signal_ignores_pre_entry_session_extremes()
     assert exit_actions == []
     assert len(remaining_portfolio) == 1
     assert remaining_portfolio[0]["code"] == "1000"
+    assert updated_account["cash"] == 1_000_000.0
+
+
+def test_close_daytrade_positions_skips_unmanaged_live_positions():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "ownership": "UNMANAGED",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        99.8,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called for unmanaged live positions")
+
+    remaining_portfolio, sell_actions, updated_account = auto_trade.close_daytrade_positions(
+        portfolio=[position],
+        account={"cash": 1_000_000.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["code"] == "1000"
+    assert sell_actions and sell_actions[0].startswith("SKIP 1000")
+    assert updated_account["cash"] == 1_000_000.0
+
+
+def test_close_daytrade_positions_by_signal_skips_unmanaged_live_positions():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "ownership": "UNMANAGED",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        95.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called for unmanaged live positions")
+
+    remaining_portfolio, exit_actions, updated_account = auto_trade.close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["code"] == "1000"
+    assert exit_actions and exit_actions[0].startswith("SKIP 1000")
     assert updated_account["cash"] == 1_000_000.0
 
 

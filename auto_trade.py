@@ -44,7 +44,7 @@ from core.config import (
     DEBUG_MODE, TRADE_MODE,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
     SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
-    SLIPPAGE_RATE, STOP_LOSS_ATR, load_insider_exclusion_codes,
+    SLIPPAGE_RATE, STOP_LOSS_ATR, INITIAL_CASH, load_insider_exclusion_codes,
     INTRADAY_SNAPSHOT_FILE, DATA_CACHE_ROOT,
 )
 from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
@@ -178,7 +178,165 @@ def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=N
     return updated
 
 
-def build_daytrade_position_record(item, executed_price, shares, buy_time):
+def _portfolio_market_value(portfolio):
+    return sum(
+        float(position.get("current_price", position["buy_price"])) * int(position.get("shares", 0))
+        for position in portfolio or []
+    )
+
+
+def _portfolio_unrealized_pnl(portfolio):
+    return sum(
+        (
+            float(position.get("current_price", position["buy_price"]))
+            - float(position.get("buy_price", 0))
+        )
+        * int(position.get("shares", 0))
+        for position in portfolio or []
+    )
+
+
+def _resolve_account_equity(account, portfolio, is_sim):
+    if is_sim:
+        return float(account.get("cash", 0.0)) + _portfolio_market_value(portfolio)
+    configured_risk_capital = float(account.get("configured_risk_capital", INITIAL_CASH) or INITIAL_CASH)
+    realized_pnl_today = float(account.get("realized_pnl_today", 0.0) or 0.0)
+    return configured_risk_capital + realized_pnl_today + _portfolio_unrealized_pnl(portfolio)
+
+
+def _resolve_live_buying_power(account, key):
+    value = account.get(key)
+    if value is None:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _apply_live_realized_pnl(account, position, fill_price, filled_shares):
+    if filled_shares <= 0:
+        return account
+    realized = (float(fill_price) - float(position["buy_price"])) * int(filled_shares)
+    account["realized_pnl_today"] = round(float(account.get("realized_pnl_today", 0.0)) + realized, 4)
+    return account
+
+
+def _collect_protective_stop_order_ids(portfolio):
+    stop_order_ids = set()
+    for position in portfolio or []:
+        stop_order_id = str(position.get("protective_stop_order_id") or "").strip()
+        if stop_order_id:
+            stop_order_ids.add(stop_order_id)
+    return stop_order_ids
+
+
+def _find_live_managed_position_for_entry(broker, code, execution_id=None, shares=None):
+    if broker is None or not hasattr(broker, "get_positions"):
+        return None
+
+    try:
+        live_positions = broker.get_positions()
+    except Exception as exc:
+        print(f"⚠️ {code} のライブ建玉照合に失敗しました: {exc}")
+        return None
+
+    code_str = str(code)
+    execution_id_str = str(execution_id or "").strip()
+    target_shares = None
+    if shares is not None:
+        try:
+            target_shares = int(shares)
+        except (TypeError, ValueError):
+            target_shares = None
+
+    exact_matches = []
+    share_matches = []
+    managed_matches = []
+
+    for position in live_positions or []:
+        if str(position.get("code")) != code_str:
+            continue
+        ownership = str(position.get("ownership", "")).upper()
+        if ownership != "MANAGED_BY_BOT":
+            continue
+
+        managed_matches.append(position)
+        live_execution_id = str(position.get("execution_id") or "").strip()
+        live_shares = int(position.get("shares", 0) or 0)
+        if execution_id_str and live_execution_id == execution_id_str:
+            exact_matches.append(position)
+        elif target_shares is not None and live_shares == target_shares:
+            share_matches.append(position)
+
+    if exact_matches:
+        return exact_matches[0]
+    if len(share_matches) == 1:
+        return share_matches[0]
+    if len(managed_matches) == 1:
+        return managed_matches[0]
+    return None
+
+
+def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shares=None):
+    if broker is None or not hasattr(broker, "execute_stop_order"):
+        return None
+
+    code = str(position.get("code") or "").strip()
+    if not code:
+        return None
+
+    trigger_price = float(trigger_price or 0.0)
+    if trigger_price <= 0:
+        return None
+
+    execution_id = position.get("execution_id")
+    live_position = _find_live_managed_position_for_entry(
+        broker=broker,
+        code=code,
+        execution_id=execution_id,
+        shares=expected_shares if expected_shares is not None else position.get("shares"),
+    )
+    if live_position is None:
+        print(f"⚠️ {code} の保護逆指値を設定するためのライブ建玉が特定できませんでした。")
+        return None
+
+    hold_id = str(live_position.get("hold_id") or live_position.get("execution_id") or "").strip()
+    if not hold_id:
+        print(f"⚠️ {code} の保護逆指値に必要な HoldID が取得できませんでした。")
+        return None
+
+    shares = int(expected_shares if expected_shares is not None else live_position.get("shares", position.get("shares", 0)) or 0)
+    if shares <= 0:
+        return None
+
+    exchange = live_position.get("exchange")
+    margin_trade_type = live_position.get("margin_trade_type")
+    stop_order_id = broker.execute_stop_order(
+        code,
+        shares,
+        side="1",
+        trigger_price=trigger_price,
+        hold_id=hold_id,
+        exchange=None if exchange is None else int(exchange),
+        margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
+    )
+    if stop_order_id:
+        position["hold_id"] = hold_id
+        if exchange is not None:
+            position["exchange"] = exchange
+        if margin_trade_type is not None:
+            position["margin_trade_type"] = margin_trade_type
+        position["protective_stop_order_id"] = stop_order_id
+        position["protective_stop_trigger_price"] = round(trigger_price, 1)
+        position["protective_stop_status"] = "armed"
+        return stop_order_id
+
+    position["protective_stop_status"] = "failed"
+    return None
+
+
+def build_daytrade_position_record(item, executed_price, shares, buy_time, execution_id=None):
     setup_type = str(item.get("setup_type", ""))
     stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
     target_mult = float(item.get("target_mult", resolve_daytrade_intraday_target_mult()))
@@ -200,6 +358,10 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time):
         "current_price": round(float(executed_price), 1),
         "last_quote_timestamp": buy_time,
         "shares": int(shares),
+        "execution_id": execution_id,
+        "hold_id": None,
+        "exchange": None,
+        "margin_trade_type": None,
         "buy_atr": buy_atr,
         "stop_mult": stop_mult,
         "target_mult": target_mult,
@@ -215,6 +377,9 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time):
         "buy_score": item.get("score"),
         "buy_rs": item.get("rs_alpha"),
         "buy_rsi2": item.get("prev_rsi2"),
+        "protective_stop_order_id": None,
+        "protective_stop_trigger_price": None,
+        "protective_stop_status": None,
     }
 
 
@@ -404,7 +569,7 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
             modeled_exit_price = float(fill_event["modeled_exit_price"])
             exit_reason = fill_event["exit_reason"]
             remaining_shares = int(fill_event["remaining_shares"])
-            account["cash"] = round(float(account["cash"]) + (observed_price * shares), 4)
+            account = _apply_live_realized_pnl(account, position, observed_price, shares)
             broker.log_trade({
                 "time": fill_event["exit_time"],
                 "code": position["code"],
@@ -446,6 +611,11 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
 
     for position in portfolio:
         code = str(position["code"])
+        ownership = str(position.get("ownership", "MANAGED_BY_BOT" if is_sim else "AMBIGUOUS")).upper()
+        if not is_sim and ownership != "MANAGED_BY_BOT":
+            remaining_portfolio.append(position)
+            exit_actions.append(f"SKIP {code} - unmanaged position ({ownership})")
+            continue
         buffer = realtime_buffers.get(code)
         if buffer is None:
             remaining_portfolio.append(position)
@@ -535,14 +705,14 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
         filled_shares = 0
         observed_price = current_price
         if isinstance(details, dict) and details:
-            filled_shares = int(details.get("Qty", 0) or 0)
-            observed_price = float(details.get("Price", current_price) or current_price)
+            filled_shares = int(details.get("filled_qty", details.get("Qty", 0)) or 0)
+            observed_price = float(details.get("average_price", details.get("Price", current_price)) or current_price)
         if filled_shares <= 0:
             remaining_portfolio.append(position)
             continue
 
         remaining_shares = max(0, shares - filled_shares)
-        account["cash"] = round(float(account["cash"]) + (observed_price * filled_shares), 4)
+        account = _apply_live_realized_pnl(account, position, observed_price, filled_shares)
         broker.log_trade({
             "time": exit_time,
             "code": position["code"],
@@ -605,14 +775,16 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
 
     if broker and not is_sim:
         try:
-            active_orders = broker.get_active_orders()
-            if active_orders is None:
+            active_orders_info = broker.get_active_orders()
+            if active_orders_info is None:
                 print("⚠️ [STOP] 未約定注文の照会に失敗しました。キャンセルを見送ります。")
             else:
-                for order in active_orders:
+                for order in active_orders_info.get("orders", []):
                     order_id = order.get("ID")
                     if order_id:
                         broker.cancel_order(order_id)
+                if active_orders_info.get("has_unknown"):
+                    print("⚠️ [STOP] 終端状態が不明な注文がありました。手動確認が必要です。")
         except Exception as exc:
             print(f"⚠️ [STOP] 未約定注文のキャンセル中にエラー: {exc}")
 
@@ -663,8 +835,8 @@ def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
             "high": board.get("high"),
             "low": board.get("low"),
             "prev_close": board.get("prev_close"),
-            "bid": board.get("bid"),
-            "ask": board.get("ask"),
+            "best_sell_price": board.get("best_sell_price"),
+            "best_buy_price": board.get("best_buy_price"),
             "volume": board.get("volume"),
             "session_open": None if buffer is None else buffer.get_session_open(),
             "session_high": None if buffer is None else buffer.get_session_high(),
@@ -799,10 +971,18 @@ def _main_exec():
     current_month_str = datetime.datetime.now(JST).strftime('%Y-%m')
     account_data = safe_read_json(ACCOUNT_FILE, default={}) or {}
     month_start_equity = account_data.get('month_start_equity', 0)
-    
+
     # 初回起動時または月替わり時に月初資産を記録
     account = merge_account_state(broker.get_account_balance(), account_data)
-    initial_total = account['cash'] + sum([p.get('current_price', p['buy_price']) * p['shares'] for p in broker.get_positions()])
+    if float(account.get("configured_risk_capital", 0.0) or 0.0) <= 0:
+        account["configured_risk_capital"] = float(INITIAL_CASH)
+    account.setdefault("realized_pnl_today", float(account.get("realized_pnl_today", 0.0) or 0.0))
+    try:
+        initial_portfolio = broker.get_positions()
+    except Exception:
+        initial_portfolio = []
+    portfolio = list(initial_portfolio)
+    initial_total = _resolve_account_equity(account, initial_portfolio, is_sim)
     if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
         month_start_equity = initial_total
         account['month_start_equity'] = month_start_equity
@@ -878,17 +1058,27 @@ def _main_exec():
 
         if not is_sim:
             try:
-                active_orders = broker.get_active_orders()
-                if active_orders is None:
+                active_orders_info = broker.get_active_orders()
+                if active_orders_info is None:
                     msg = "⚠️ 未約定注文の取得に失敗しました。新規エントリーを保留します。"
                     print(msg)
                     send_discord_notify(msg)
                     time.sleep(MONITOR_INTERVAL_SEC)
                     continue
+                if active_orders_info.get("has_unknown"):
+                    msg = "⚠️ 注文状態が不明な注文があります。reconciliationが必要なため新規エントリーを保留します。"
+                    print(msg)
+                    send_discord_notify(msg)
+                    time.sleep(MONITOR_INTERVAL_SEC)
+                    continue
+                active_orders = active_orders_info.get("orders", [])
+                protected_stop_order_ids = _collect_protective_stop_order_ids(portfolio)
                 if active_orders:
                     has_stuck_order = False
                     for order in active_orders:
                         order_id = order.get('ID')
+                        if order_id and order_id in protected_stop_order_ids:
+                            continue
                         recv_time_str = order.get('RecvTime')
                         if order_id and recv_time_str:
                             try:
@@ -968,7 +1158,7 @@ def _main_exec():
                     # V17.1 Buffer: No yfinance download. Init with cache stats.
                     realtime_buffers[code] = RealtimeBuffer(code, None, interval_mins=15)
                     if prev_close > 0:
-                        realtime_buffers[code].update(prev_close, 0, server_datetime)
+                        realtime_buffers[code].set_previous_close(prev_close)
                 except Exception as e:
                     print(f"⚠️ [Buffer Error] {code} 加盟失敗: {e}")
                     continue
@@ -1003,7 +1193,7 @@ def _main_exec():
             last_scan_time = loop_start_time
 
         # Calculate Monthly Drawdown for Aegis Protocol
-        current_total = account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
+        current_total = _resolve_account_equity(account, portfolio, is_sim)
         account = ensure_daytrade_week_state(account, current_total, server_datetime)
         month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
         monthly_risk_blocked = is_daytrade_monthly_risk_blocked(month_start_equity, current_total)
@@ -1041,6 +1231,8 @@ def _main_exec():
         should_scan = True
         if monthly_risk_blocked and not portfolio: should_scan = False  # Block fresh entries, but still allow liquidation.
         elif not should_scan_override: should_scan = False
+        elif not is_sim and account.get("wallet_snapshot_incomplete"): should_scan = False
+        elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
         
@@ -1191,14 +1383,18 @@ def _main_exec():
 
                     selected_candidates.append(item)
 
-                current_exposure = sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio])
-                day_equity = account['cash'] + current_exposure
+                current_exposure = _portfolio_market_value(portfolio)
+                day_equity = _resolve_account_equity(account, portfolio, is_sim)
                 day_buying_power = resolve_daytrade_buying_power(
                     current_equity=day_equity,
-                    account_cash=account['cash'],
+                    account_cash=float(account.get("cash", 0.0)) if is_sim else 0.0,
                     dynamic_leverage=selected_dynamic_lev,
                     current_exposure=current_exposure,
                 )
+                if not is_sim:
+                    margin_buying_power = _resolve_live_buying_power(account, "margin_buying_power")
+                    if margin_buying_power > 0:
+                        day_buying_power = min(day_buying_power, margin_buying_power)
                 inverse_day_buying_power = 0.0
                 inverse_buying_power_leverage = 1.0
                 if inverse_only:
@@ -1208,10 +1404,14 @@ def _main_exec():
                     )
                     inverse_day_buying_power = resolve_daytrade_inverse_buying_power(
                         current_equity=day_equity,
-                        account_cash=account['cash'],
+                        account_cash=float(account.get("cash", 0.0)) if is_sim else 0.0,
                         current_exposure=current_exposure,
                         leverage=inverse_buying_power_leverage,
                     )
+                    if not is_sim:
+                        margin_buying_power = _resolve_live_buying_power(account, "margin_buying_power")
+                        if margin_buying_power > 0:
+                            inverse_day_buying_power = min(inverse_day_buying_power, margin_buying_power)
                 opened_count = 0
                 for item in selected_candidates:
                     if opened_count >= max_to_buy:
@@ -1259,36 +1459,58 @@ def _main_exec():
                                 executed_price=exec_p,
                                 shares=shares,
                                 buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                execution_id=None,
                             )
                         )
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                         opened_count += 1
                     else:
                         details = broker.execute_chase_order(item['code'], shares, side="2", atr=float(item.get('atr', 0.0)))
-                        if details and details.get('State') in [6, 7]:
-                            actual_qty = int(details.get('Qty', 0))
-                            exec_p = float(details.get('Price', 0)) or buy_price
-                            portfolio.append(
-                                build_daytrade_position_record(
-                                    item=item,
-                                    executed_price=exec_p,
-                                    shares=actual_qty,
-                                    buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                )
+                        if details and int(details.get("filled_qty", details.get("Qty", 0)) or 0) > 0:
+                            actual_qty = int(details.get("filled_qty", details.get("Qty", 0)) or 0)
+                            exec_p = float(details.get("average_price", details.get("Price", 0)) or buy_price)
+                            execution_ids = details.get("execution_ids") or ()
+                            execution_id = details.get("execution_id")
+                            if execution_id is None and execution_ids:
+                                execution_id = execution_ids[0]
+                            position_record = build_daytrade_position_record(
+                                item=item,
+                                executed_price=exec_p,
+                                shares=actual_qty,
+                                buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                execution_id=execution_id,
                             )
+                            portfolio.append(position_record)
+                            broker.save_portfolio(portfolio)
+                            broker.save_account(account)
+                            stop_order_id = _arm_daytrade_protective_stop(
+                                broker=broker,
+                                position=position_record,
+                                trigger_price=position_record["entry_stop_price"],
+                                expected_shares=actual_qty,
+                            )
+                            broker.save_portfolio(portfolio)
                             actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                            if stop_order_id:
+                                actions_taken.append(f"STOP {item['code']} - protective stop armed (ID: {stop_order_id})")
                             opened_count += 1
 
-                    broker.save_portfolio(portfolio)
-                    broker.save_account(account)
+                    if is_sim:
+                        broker.save_portfolio(portfolio)
+                        broker.save_account(account)
 
+        summary_equity = _resolve_account_equity(account, portfolio, is_sim)
         summary_record = {
             "time": datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
             "actions": actions_taken,
             "portfolio": portfolio,
-            "stock_value_yen": sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
-            "cash_yen": account['cash'],
-            "total_assets_yen": account['cash'] + sum([float(p.get('current_price', p['buy_price'])) * int(p['shares']) for p in portfolio]),
+            "stock_value_yen": _portfolio_market_value(portfolio),
+            "cash_yen": float(account.get("cash", 0.0)) if is_sim else float(account.get("cash", 0.0) or 0.0),
+            "equity_yen": summary_equity,
+            "total_assets_yen": summary_equity,
+            "margin_buying_power_yen": _resolve_live_buying_power(account, "margin_buying_power") if not is_sim else None,
+            "stock_buying_power_yen": _resolve_live_buying_power(account, "stock_buying_power") if not is_sim else None,
+            "realized_pnl_today": float(account.get("realized_pnl_today", 0.0) or 0.0),
             "regime": regime
         }
         if hasattr(broker, 'log_execution_summary'):

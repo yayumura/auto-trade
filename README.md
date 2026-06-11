@@ -156,7 +156,7 @@ auto-trade/
   本番の自動売買実行エントリです。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
-  live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
+  live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
 
 - `backtest.py`
   共有戦略ロジックを使って仮想約定を行うバックテスト実行レイヤーです。
@@ -431,6 +431,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - setup ごとの境界条件
   - live daytrade の stop / target 解決 helper と intraday exit 判定
   - `primary` の intraday failed-runup break-even exit 判定と highest_price 更新
+  - `RealtimeBuffer` の前日終値と当日 session 値の分離
   - live exit の未約定 / 部分約定を flat 扱いしない安全側フォールバック
   - 火曜・水曜・木曜・金曜の `primary` 防御フィルタ
   - 火曜 mid breadth / 指数ギャップアップ時の `primary` 防御
@@ -584,17 +585,27 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - scan 候補と live entry 判断ログの行生成
   - server time ベースの月次 state / 月初資産ロールオーバー
   - 保有中ポジションの intraday snapshot 行生成と entry context 付与
+  - live entry 後の protective stop arming と portfolio 反映
   - daytrade exit decision 行の modeled exit / fade 指標と、live 約定時の二重スリッページ防止
   - live での intraday failed-runup break-even exit と post-entry high/low 追跡
   - shared intraday stop / target と `14:30` force flatten の live exit フロー
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
+  - live での unmanaged position を signal flatten / force flatten から除外すること
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
   - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
   - SIGINT/SIGTERM が安全停止フラグに変換されること
 - `tests/test_kabucom_broker.py`
   - `core/kabucom_broker.py` の POST 再送抑止
+  - `OrdersSuccess` 系の注文状態パーサーと `State=1..10` の解釈
+  - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject
+  - `SubmissionResult` の accepted / rejected / unknown 分岐
+  - live 口座余力の `wallet/cash` / `wallet/margin` 分離
+  - 新規注文の `Exchange` 設定参照と返済ルート由来の `Exchange` / `MarginTradeType`
+  - broker position の `ownership` 判定と live での unmanaged スキップ
   - 注文 payload の tick 正規化と float 送信
   - 逆指値 payload の trigger price 正規化
+  - cancel 完了確認と unknown order 監視
+  - 複数 HoldID を使う売り返済の close position 割り当て
   - 注文一覧取得失敗時の fail closed
   - API health が 401 を成功扱いしないこと
   - trade history の append-only 化
