@@ -163,6 +163,18 @@ class TestLogic(unittest.TestCase):
         self.assertEqual(buffer.get_session_high(), 101.0)
         self.assertEqual(buffer.get_session_low(), 99.2)
 
+    def test_realtime_buffer_previous_close_is_separate_from_session_open(self):
+        buffer = RealtimeBuffer("1000")
+        buffer.set_previous_close(98.0)
+        self.assertEqual(buffer.get_previous_close(), 98.0)
+
+        ts = pd.Timestamp("2026-04-21 09:05:00")
+        buffer.update(100.0, 1_000, ts)
+
+        self.assertEqual(buffer.get_session_open(), 100.0)
+        self.assertEqual(buffer.get_previous_close(), 98.0)
+        self.assertNotEqual(buffer.get_session_open(), buffer.get_previous_close())
+
     def test_rebound_trigger_helper(self):
         trigger = compute_daytrade_rebound_trigger(100.0, 5.0, confirm_atr=0.2)
         self.assertAlmostEqual(trigger, 101.0)
