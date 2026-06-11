@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 from core.broker import BaseBroker
 from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE, INITIAL_CASH
-from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv
+from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv, append_csv_rows
 
 class SimulationBroker(BaseBroker):
     """
@@ -42,7 +42,7 @@ class SimulationBroker(BaseBroker):
         from core.config import SLIPPAGE_RATE
         exec_price = price
         if price > 0:
-            if side == "1": # Buy
+            if side == "2": # Buy
                 exec_price = price * (1.0 + SLIPPAGE_RATE)
             else: # Sell
                 exec_price = price * (1.0 - SLIPPAGE_RATE)
@@ -51,7 +51,7 @@ class SimulationBroker(BaseBroker):
                 print(f"[SIM_EXEC] {code} {side} @ {exec_price:,.1f} (Slipped from {price:,.1f})")
 
         import time
-        return f"SIM-{int(time.time())}"
+        return f"SIM-{time.time_ns()}"
 
     def execute_day_trade(self, code: str, shares: int, entry_open: float, exit_close: float, name: str = "") -> dict:
         """
@@ -121,7 +121,7 @@ class SimulationBroker(BaseBroker):
             
         import time
         return {
-            "ID": f"SIM-STOP-{int(time.time())}",
+            "ID": f"SIM-STOP-{time.time_ns()}",
             "State": 7, # Simulated Execution
             "Price": final_price,
             "Qty": shares
@@ -132,8 +132,7 @@ class SimulationBroker(BaseBroker):
         return True
 
     def log_trade(self, trade_record: dict):
-        df = pd.DataFrame([trade_record])
-        atomic_write_csv(HISTORY_FILE, df)
+        append_csv_rows(HISTORY_FILE, [trade_record])
 
     def log_execution_summary(self, summary_record: dict):
         # UI表示用のコンソール出力

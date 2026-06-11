@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 from unittest.mock import patch
 
-from auto_trade import build_daytrade_position_record, compute_daytrade_snapshot, is_inverse_only_candidate_set
+import auto_trade
+from auto_trade import (
+    build_daytrade_position_record,
+    build_daytrade_watch_plan,
+    close_daytrade_positions_by_signal,
+    compute_daytrade_snapshot,
+    is_inverse_only_candidate_set,
+)
 from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
 
 
@@ -78,6 +85,8 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["entry_stop_price"] == 103.0
     assert record["entry_target_price"] == 108.0
     assert record["entry_candidate_rank"] == 3
+    assert record["post_entry_high"] == 105.0
+    assert record["post_entry_low"] == 105.0
     assert record["buy_rs"] == 42.0
     assert record["buy_rsi2"] == 63.0
 
@@ -121,3 +130,78 @@ def test_daytrade_primary_failed_runup_exit_uses_live_session_high():
 
     assert exit_reason == "intraday_failed_runup"
     assert exit_price == record["buy_price"]
+
+
+def test_build_daytrade_watch_plan_prioritizes_open_positions_and_index():
+    watchlist = [f"{1000 + idx}" for idx in range(60)]
+    portfolio = [{"code": "9000"}]
+
+    plan = build_daytrade_watch_plan(watchlist=watchlist, portfolio=portfolio, market_index_code="1321")
+
+    assert len(plan["registration_targets"]) == 50
+    assert plan["registration_targets"][0] == "9000"
+    assert plan["registration_targets"][1] == "1321"
+    assert "9000" in plan["current_targets"]
+    assert "1321" in plan["current_targets"]
+
+
+def test_close_daytrade_positions_by_signal_ignores_pre_entry_session_extremes():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        99.8,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called when only pre-entry extremes are present")
+
+    remaining_portfolio, exit_actions, updated_account = close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=True,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert exit_actions == []
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["code"] == "1000"
+    assert updated_account["cash"] == 1_000_000.0
+
+
+def test_handle_shutdown_marks_shutdown_requested_without_exiting():
+    prev_requested = auto_trade.SHUTDOWN_REQUESTED
+    prev_reason = auto_trade.SHUTDOWN_REASON
+    try:
+        auto_trade.SHUTDOWN_REQUESTED = False
+        auto_trade.SHUTDOWN_REASON = ""
+        with patch("auto_trade.send_discord_notify") as mocked_notify:
+            auto_trade.handle_shutdown(15, None)
+        assert auto_trade.SHUTDOWN_REQUESTED is True
+        assert auto_trade.SHUTDOWN_REASON == "signal:15"
+        mocked_notify.assert_called_once()
+    finally:
+        auto_trade.SHUTDOWN_REQUESTED = prev_requested
+        auto_trade.SHUTDOWN_REASON = prev_reason

@@ -3,9 +3,10 @@ import pickle
 from pathlib import Path
 
 import pandas as pd
+from core.config import DATA_CACHE_ROOT
 
 
-DEFAULT_MARGIN_CACHE_PATH = Path("data_cache") / "jp_broad" / "jquants_margin_cache.pkl"
+DEFAULT_MARGIN_CACHE_PATH = DATA_CACHE_ROOT / "jp_broad" / "jquants_margin_cache.pkl"
 
 
 def load_margin_cache(path: str | os.PathLike = DEFAULT_MARGIN_CACHE_PATH) -> dict:

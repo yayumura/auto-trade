@@ -38,6 +38,7 @@ from core.logic import (
     resolve_daytrade_intraday_stop_mult,
     resolve_daytrade_intraday_target_mult,
     is_daytrade_primary_failed_runup_exit,
+    normalize_tick_size,
     resolve_daytrade_live_exit_decision,
     resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_buying_power,
@@ -3652,6 +3653,13 @@ class TestLogic(unittest.TestCase):
             )[0]["code"],
             "3000",
         )
+
+    def test_tick_normalization_rounds_buy_up_and_sell_down_to_jpx_ticks(self):
+        self.assertEqual(normalize_tick_size(1234.2, is_buy=True), 1235.0)
+        self.assertEqual(normalize_tick_size(1234.2, is_buy=False), 1234.0)
+        self.assertEqual(normalize_tick_size(3001.0, is_buy=True), 3005.0)
+        self.assertEqual(normalize_tick_size(3001.0, is_buy=False), 3000.0)
+        self.assertEqual(normalize_tick_size(0, is_buy=True), 0.0)
 
 if __name__ == '__main__':
     unittest.main()

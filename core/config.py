@@ -24,8 +24,8 @@ TARGET_MARKETS = [
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # --- API Settings ---
-KABUCOM_API_PASSWORD = os.getenv("KABUCOM_API_PASSWORD", "your_password")
-KABUCOM_LOGIN_PASSWORD = os.getenv("KABUCOM_LOGIN_PASSWORD", "your_login_password")
+KABUCOM_API_PASSWORD = os.getenv("KABUCOM_API_PASSWORD", "").strip()
+KABUCOM_LOGIN_PASSWORD = os.getenv("KABUCOM_LOGIN_PASSWORD", "").strip()
 KABUCOM_API_TOKEN_FILE = ".kabu_token"
 KABUCOM_PORT_LIVE = 18080
 KABUCOM_PORT_TEST = 18081
@@ -35,19 +35,44 @@ GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 # --- Bot Execution Mode ---
-TRADE_MODE = os.getenv("TRADE_MODE", "SIM")
+VALID_TRADE_MODES = {"SIM", "KABUCOM_TEST", "KABUCOM_LIVE"}
+TRADE_MODE = os.getenv("TRADE_MODE", "SIM").strip().upper()
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """Return True when the value still looks like a template secret."""
+    if value is None:
+        return True
+    normalized = str(value).strip()
+    if not normalized:
+        return True
+    return normalized.lower() in {
+        "your_password",
+        "your_login_password",
+        "your_app_password",
+        "changeme",
+        "change_me",
+    }
 
 # --- [Imperial Proclamation] 黄金の絶対座標 (Project Root Discovery) ---
 # コンフィグファイルの場所(coreフォルダ)から、プロジェクトルートを絶対パスで特定
 CONFIG_DIR = Path(os.path.abspath(os.path.dirname(__file__)))
 PROJECT_ROOT = CONFIG_DIR.parent
+DATA_CACHE_ROOT = PROJECT_ROOT / "data_cache"
+
+if TRADE_MODE not in VALID_TRADE_MODES:
+    raise ValueError(
+        f"Unsupported TRADE_MODE={TRADE_MODE!r}. Expected one of {sorted(VALID_TRADE_MODES)}."
+    )
 
 # データ保存聖域の決定
 if TRADE_MODE == "SIM":
     DATA_ROOT = PROJECT_ROOT / "data" / "simulation"
-else:
+elif TRADE_MODE == "KABUCOM_TEST":
     DATA_ROOT = PROJECT_ROOT / "data" / "kabucom_test"
+else:
+    DATA_ROOT = PROJECT_ROOT / "data" / "kabucom_live"
 
 # [Imperial Safeguard] 実行時に保存先を絶対的に宣言する
 if DEBUG_MODE:
@@ -67,6 +92,7 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 INTRADAY_SNAPSHOT_FILE = str(DATA_ROOT / "intraday_snapshots.csv")
 DAYTRADE_DECISION_LOG_FILE = str(DATA_ROOT / "daytrade_decisions.csv")
 DAYTRADE_EXIT_LOG_FILE = str(DATA_ROOT / "daytrade_exit_log.csv")
+ORDER_JOURNAL_FILE = str(DATA_ROOT / "order_journal.jsonl")
 
 # --- Day-trade production profile ---
 USE_COMPOUNDING       = True   # ★GOLDEN: Compounding on

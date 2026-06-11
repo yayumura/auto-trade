@@ -1,15 +1,20 @@
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import jquantsapi
 import pandas as pd
 from dotenv import load_dotenv
 
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from core.jquants_margin_cache import normalize_margin_date, save_margin_cache
 
 
-def fetch_margin_cache(output_path="data_cache/jp_broad/jquants_margin_cache.pkl", start_date="2022-01-31"):
+def fetch_margin_cache(output_path=str(REPO_ROOT / "data_cache" / "jp_broad" / "jquants_margin_cache.pkl"), start_date="2022-01-31"):
     load_dotenv()
 
     api_key = os.getenv("JQUANTS_REFRESH_TOKEN") or os.getenv("JQUANTS_API_KEY")

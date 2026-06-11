@@ -3,16 +3,19 @@ import concurrent.futures
 import os
 import pickle
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-# Append current directory to sys.path
-sys.path.append(os.getcwd())
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from backtest import run_backtest_v16_production
 from core.config import (
     BEAR_GAP_LIMIT,
+    DATA_CACHE_ROOT,
     EXIT_ON_SMA20_BREACH,
     INITIAL_CASH,
     LIQUIDITY_LIMIT_RATE,
@@ -41,7 +44,7 @@ def parse_args():
     )
     parser.add_argument(
         "--cache-path",
-        default="data_cache/jp_broad/jp_mega_cache.pkl",
+        default=str(DATA_CACHE_ROOT / "jp_broad" / "jp_mega_cache.pkl"),
         help="Path to the cached JP market data pickle.",
     )
     parser.add_argument(
@@ -61,7 +64,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-csv",
-        default="opt_results.csv",
+        default=str(REPO_ROOT / "opt_results.csv"),
         help="CSV path for train-ranked results and any attached holdout review columns.",
     )
     parser.add_argument(
@@ -859,7 +862,7 @@ def optimize_jp_imperial(
     cache_path,
     holdout_months=1,
     top_k_holdout=10,
-    output_csv="opt_results.csv",
+    output_csv=str(REPO_ROOT / "opt_results.csv"),
     refresh_cache=False,
     refresh_start_date="",
     refresh_overlap_days=7,
@@ -981,7 +984,7 @@ def optimize_jp_imperial(
 
 if __name__ == "__main__":
     args = parse_args()
-    if not os.path.exists("data_cache"):
+    if not DATA_CACHE_ROOT.exists():
         print("Error: Please run from the project root directory.")
         sys.exit(1)
 

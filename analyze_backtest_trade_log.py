@@ -2,15 +2,19 @@ import argparse
 import os
 import pickle
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-sys.path.append(os.getcwd())
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from backtest import run_backtest_v16_production, _resolve_intraday_exit
 from core.config import (
     DAYTRADE_API_EXPLICIT_TRADE_COST,
+    DATA_CACHE_ROOT,
     INITIAL_CASH,
     SLIPPAGE_RATE,
     TAX_RATE,
@@ -35,7 +39,7 @@ def build_parser():
     )
     parser.add_argument(
         "--cache-path",
-        default="data_cache/jp_broad/jp_mega_cache.pkl",
+        default=str(DATA_CACHE_ROOT / "jp_broad" / "jp_mega_cache.pkl"),
         help="Path to the cached JP market data pickle.",
     )
     parser.add_argument(

@@ -7,7 +7,8 @@ import threading
 from core.broker import BaseBroker
 from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE
 from core.log_setup import send_discord_notify
-from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv
+from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv, append_csv_rows
+from core.order_journal import append_order_journal
 
 class KabucomBroker(BaseBroker):
     """
@@ -68,6 +69,8 @@ class KabucomBroker(BaseBroker):
         認証切れ(401)時の自動リトライ機能を備え、DRY原則に基づき通信処理を一元化する。
         """
         url = f"{self.base_url}/{endpoint}" if not endpoint.startswith("http") else endpoint
+        method = method.upper()
+        allow_transient_retry = method == "GET"
         # [Professional Audit] API予算管理と自動スロットリング
         now = time.time()
         if now - self.last_reset_time > 3600:
@@ -80,8 +83,9 @@ class KabucomBroker(BaseBroker):
 
         for retry in [False, True]:
             headers = self._get_headers(force_refresh=retry)
-            # [Professional Audit] 指数バックオフによるサーバー側エラー(5xx)への耐性強化
-            for delay in [0, 1, 2, 4]:
+            # [Professional Audit] GET のみ指数バックオフを許可する。POST/PUT の無条件再送は重複注文を招くため禁止。
+            delays = [0, 1, 2, 4] if allow_transient_retry else [0]
+            for delay in delays:
                 if delay > 0: time.sleep(delay)
                 try:
                     res = self.session.request(method, url, headers=headers, **kwargs)
@@ -90,12 +94,17 @@ class KabucomBroker(BaseBroker):
                     elif res.status_code == 401 and not retry:
                         break # 内側のループを抜けて、認証をリフレッシュしてリトライ
                     elif res.status_code in [500, 502, 503, 504]:
-                        print(f"⚠️ API Server Error ({res.status_code}). Retrying in {delay*2 if delay>0 else 1}s...")
-                        continue
+                        if allow_transient_retry:
+                            print(f"⚠️ API Server Error ({res.status_code}). Retrying in {delay*2 if delay>0 else 1}s...")
+                            continue
+                        return res
                     else:
                         return res
                 except Exception as e:
-                    if delay == 4:
+                    if not allow_transient_retry:
+                        print(f"❌ API Request Fatal Error: {method} {url} | Error: {e}")
+                        return None
+                    if delay == delays[-1]:
                         # [Professional Audit] ログ出力時に機密情報をマスクする
                         masked_headers = {k: ('********' if k.upper() == 'X-API-KEY' else v) for k, v in headers.items()}
                         print(f"❌ API Request Fatal Error: {method} {url} | Headers: {masked_headers} | Error: {e}")
@@ -126,20 +135,23 @@ class KabucomBroker(BaseBroker):
         except Exception:
             return fallback
 
-    def get_active_orders(self) -> list:
+    def get_active_orders(self) -> list | None:
         """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
-        if not self.token: return []
+        if not self.token: return None
         try:
             # [Professional Audit] 共通ラッパーを使用して認証・リトライの恩恵を受ける
             res = self._api_request("GET", "orders", timeout=10)
-            if res and res.status_code == 200:
+            if res is None:
+                return None
+            if res.status_code == 200:
                 orders = res.json()
                 # State 3:受付, 4:受付済, 5:執行中 のものを抽出
                 active = [o for o in orders if o.get('State') in [3, 4, 5]]
                 return active
-            return []
-        except:
-            return []
+            return None
+        except Exception as e:
+            print(f"⚠️ 注文一覧取得エラー: {e}")
+            return None
 
     def get_account_balance(self) -> dict:
         """ 
@@ -154,9 +166,13 @@ class KabucomBroker(BaseBroker):
             from core.config import ACCOUNT_FILE, INITIAL_CASH
             from core.file_io import safe_read_json, atomic_write_json
             account = safe_read_json(ACCOUNT_FILE)
-            # 残高が0円、または情報がない場合はINITIAL_CASHで初期化
-            if not account or account.get('cash', 0) <= 0:
+            # state 不在時のみ INITIAL_CASH で初期化する。0以下は異常値として保持する。
+            if not account:
                 print(f"💰 [Account] 仮想資金を初期化します: {INITIAL_CASH:,.0f}円")
+                account = {"cash": float(INITIAL_CASH)}
+                atomic_write_json(ACCOUNT_FILE, account)
+            elif account.get('cash') is None:
+                print(f"💰 [Account] cash 欄が欠落しているため初期化します: {INITIAL_CASH:,.0f}円")
                 account = {"cash": float(INITIAL_CASH)}
                 atomic_write_json(ACCOUNT_FILE, account)
             return account
@@ -238,12 +254,31 @@ class KabucomBroker(BaseBroker):
         """
         if not self.token: return None
         import os
+        intent_id = f"market-{time.time_ns()}"
         
         cash_margin = 2 if side == "2" else 3
         # 買付余力(2) または 信用売(3)
+        margin_trade_type = 3
         
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
-        
+        normalized_price = 0.0
+        if price > 0:
+            from core.logic import normalize_tick_size
+            normalized_price = normalize_tick_size(price, is_buy=(side == "2"))
+
+        append_order_journal({
+            "event": "PLANNED",
+            "intent_id": intent_id,
+            "kind": "market",
+            "symbol": str(code),
+            "side": side,
+            "qty": int(shares),
+            "price": float(normalized_price) if front_order_type == 20 else 0.0,
+            "cash_margin": cash_margin,
+            "front_order_type": front_order_type,
+            "is_production": bool(self.is_production),
+        })
+
         data = {
             "Password": self.password,
             "Symbol": code,
@@ -251,18 +286,21 @@ class KabucomBroker(BaseBroker):
             "SecurityType": 1,  # 1: 株式
             "Side": side,       # 1: 売, 2: 買
             "CashMargin": cash_margin,
-            "MarginTradeType": 1,
-            "DelivType": 0,
+            "MarginTradeType": margin_trade_type,
+            "DelivType": 0 if cash_margin == 2 else 2,
             "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),
             "Qty": shares,
             "FrontOrderType": front_order_type,
-            "Price": int(price),
+            "Price": float(normalized_price) if front_order_type == 20 else 0,
             "ExpireDay": 0
         }
 
         # 信用返済(CashMargin=3)の場合は ClosePositions を付与
         if cash_margin == 3 and close_positions:
             data["ClosePositions"] = close_positions
+        elif cash_margin == 3:
+            print(f"⚠️ 信用返済の返済建玉IDが取得できないため、発注を中止します: {code}")
+            return None
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         if res and res.status_code == 200:
@@ -272,10 +310,48 @@ class KabucomBroker(BaseBroker):
                 env = "【本番】" if self.is_production else "【検証API】"
                 act = "買い" if side == "2" else "売り"
                 otype = "指値" if price > 0 else "成行"
+                append_order_journal({
+                    "event": "ACCEPTED",
+                    "intent_id": intent_id,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "price": float(normalized_price) if front_order_type == 20 else 0.0,
+                    "order_id": order_id,
+                    "http_status": res.status_code,
+                    "result": order_res,
+                    "is_production": bool(self.is_production),
+                })
                 print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
                 return order_id
             else:
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "price": float(normalized_price) if front_order_type == 20 else 0.0,
+                    "http_status": res.status_code,
+                    "result": order_res,
+                    "is_production": bool(self.is_production),
+                })
                 print(f"⚠️ 注文拒否: {order_res}")
+        else:
+            append_order_journal({
+                "event": "UNKNOWN",
+                "intent_id": intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "price": float(normalized_price) if front_order_type == 20 else 0.0,
+                "http_status": None if res is None else res.status_code,
+                "response_text": None if res is None else res.text,
+                "is_production": bool(self.is_production),
+            })
         return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -283,11 +359,31 @@ class KabucomBroker(BaseBroker):
         if not self.token: return False
         cancel_url = f"{self.base_url}/cancelorder"
         cancel_data = {"OrderId": order_id, "Password": self.password}
+        append_order_journal({
+            "event": "CANCEL_REQUESTED",
+            "order_id": order_id,
+            "is_production": bool(self.is_production),
+        })
         
         res = self._api_request("PUT", "cancelorder", json=cancel_data, timeout=10)
         if res and res.status_code == 200:
             order_res = res.json()
-            return order_res.get('Result') == 0
+            cancelled = order_res.get('Result') == 0
+            append_order_journal({
+                "event": "CANCELLED" if cancelled else "REJECTED",
+                "order_id": order_id,
+                "http_status": res.status_code,
+                "result": order_res,
+                "is_production": bool(self.is_production),
+            })
+            return cancelled
+        append_order_journal({
+            "event": "UNKNOWN",
+            "order_id": order_id,
+            "http_status": None if res is None else res.status_code,
+            "response_text": None if res is None else res.text,
+            "is_production": bool(self.is_production),
+        })
         return False
 
     def get_order_details(self, order_id: str) -> dict:
@@ -498,8 +594,15 @@ class KabucomBroker(BaseBroker):
                 force_price = normalize_tick_size(current_price + (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=True)
             else:
                 force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
-                
-            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price)
+
+            close_pos_list = None
+            if side == "1":
+                all_p = self.get_positions()
+                match_p = [p for p in all_p if p['code'] == str(code) and p.get('hold_id')]
+                if match_p:
+                    close_pos_list = [{"HoldID": match_p[0]['hold_id'], "Qty": remaining_shares}]
+
+            order_id = self.execute_market_order(code, remaining_shares, side, price=force_price, close_positions=close_pos_list)
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:
@@ -525,14 +628,31 @@ class KabucomBroker(BaseBroker):
         """
         if not self.token: return None
         import os
+        intent_id = f"stop-{time.time_ns()}"
 
         # ストップロス売り(1) または ストップロス買い(2)
         cash_margin = 2 if side == "2" else 3
+        margin_trade_type = 3
         
         # 逆指値の設定
-        # TriggerCondition: 1 (>=), 2 (<=)
+        # 公式仕様の UnderOver に合わせる。
+        # 1: 以下, 2: 以上
         # 売り（損切り）の場合は現在値が trigger_price 以下になったら成行
-        condition = 2 if side == "1" else 1 
+        under_over = 1 if side == "1" else 2
+        from core.logic import normalize_tick_size
+        normalized_trigger_price = normalize_tick_size(trigger_price, is_buy=(side == "2"))
+
+        append_order_journal({
+            "event": "PLANNED",
+            "intent_id": intent_id,
+            "kind": "stop",
+            "symbol": str(code),
+            "side": side,
+            "qty": int(shares),
+            "trigger_price": float(normalized_trigger_price),
+            "hold_id": hold_id,
+            "is_production": bool(self.is_production),
+        })
 
         data = {
             "Password": self.password,
@@ -541,35 +661,78 @@ class KabucomBroker(BaseBroker):
             "SecurityType": 1,
             "Side": side,
             "CashMargin": cash_margin,
-            "MarginTradeType": 1,
-            "DelivType": 0,
+            "MarginTradeType": margin_trade_type,
+            "DelivType": 0 if cash_margin == 2 else 2,
             "AccountType": int(os.environ.get("KABUCOM_ACCOUNT_TYPE", 4)),
             "Qty": shares,
-            "FrontOrderType": 10,  # 成行
+            "FrontOrderType": 30,  # 逆指値
             "Price": 0,
             "ExpireDay": 0,
             "ReverseLimitOrder": {
-                "TriggerSeq": 1,
-                "TriggerTarget": 1, # 1: 現値
-                "TriggerPrice": int(trigger_price),
-                "TriggerCondition": condition,
-                "AfterOrderType": 10, # 10: 成行
-                "AfterOrderPrice": 0
+                "TriggerSec": 1,
+                "TriggerPrice": float(normalized_trigger_price),
+                "UnderOver": under_over,
+                "AfterHitOrderType": 1, # 1: 成行
+                "AfterHitPrice": 0
             }
         }
 
         if cash_margin == 3 and hold_id:
             data["ClosePositions"] = [{"HoldID": hold_id, "Qty": shares}]
+        elif cash_margin == 3:
+            print(f"⚠️ 逆指値の返済建玉IDが取得できないため、発注を中止します: {code}")
+            return None
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         if res and res.status_code == 200:
             order_res = res.json()
             if order_res.get('Result') == 0:
                 order_id = order_res.get('OrderId')
+                append_order_journal({
+                    "event": "ACCEPTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "hold_id": hold_id,
+                    "order_id": order_id,
+                    "http_status": res.status_code,
+                    "result": order_res,
+                    "is_production": bool(self.is_production),
+                })
                 print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
                 return order_id
             else:
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "hold_id": hold_id,
+                    "http_status": res.status_code,
+                    "result": order_res,
+                    "is_production": bool(self.is_production),
+                })
                 print(f"⚠️ 逆指値注文エラー: {order_res}")
+        else:
+            append_order_journal({
+                "event": "UNKNOWN",
+                "intent_id": intent_id,
+                "kind": "stop",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "trigger_price": float(normalized_trigger_price),
+                "hold_id": hold_id,
+                "http_status": None if res is None else res.status_code,
+                "response_text": None if res is None else res.text,
+                "is_production": bool(self.is_production),
+            })
         return None
 
     def wait_for_execution(self, order_id: str, timeout_sec: int = 30) -> dict:
@@ -640,8 +803,7 @@ class KabucomBroker(BaseBroker):
         atomic_write_json(ACCOUNT_FILE, account)
 
     def log_trade(self, trade_record: dict):
-        df = pd.DataFrame([trade_record])
-        atomic_write_csv(HISTORY_FILE, df)
+        append_csv_rows(HISTORY_FILE, [trade_record])
 
     def log_execution_summary(self, summary_record: dict):
         import os
