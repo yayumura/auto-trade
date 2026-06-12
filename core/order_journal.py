@@ -14,4 +14,12 @@ def append_order_journal(event: dict, path: str = ORDER_JOURNAL_FILE) -> dict:
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     with journal_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        f.flush()
+        try:
+            import os
+
+            os.fsync(f.fileno())
+        except OSError:
+            # Windows/ファイルシステム都合で fsync が失敗しても、append 自体は維持する。
+            pass
     return payload
