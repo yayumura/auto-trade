@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 import threading
 from core.broker import BaseBroker
-from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE
+from core.config import KABUCOM_API_PASSWORD, HISTORY_FILE, EXECUTION_LOG_FILE, TRADE_MODE
 from core.log_setup import send_discord_notify
 from core.file_io import atomic_write_json, atomic_write_csv, safe_read_csv, append_csv_rows
 from core.order_journal import append_order_journal
@@ -17,6 +17,7 @@ from core.kabucom_order_state import (
     classify_submission_response,
     parse_kabucom_order,
 )
+from core.live_order_gate import get_live_order_gate_status
 from core.kabucom_quote import parse_board_quote
 
 class KabucomBroker(BaseBroker):
@@ -496,9 +497,45 @@ class KabucomBroker(BaseBroker):
                 "is_production": bool(self.is_production),
             })
             return submission
+        if self.is_production and TRADE_MODE == "KABUCOM_LIVE" and side == "2":
+            gate_status = get_live_order_gate_status()
+            if not gate_status.allowed:
+                rejection_reason = f"live_new_order_disabled:{gate_status.reason}"
+                print(
+                    "🛑 KABUCOM_LIVE の新規注文をコード側で停止しました。"
+                    f" reason={gate_status.reason}"
+                )
+                submission = SubmissionResult(
+                    status=SubmissionStatus.REJECTED,
+                    intent_id=intent_id,
+                    broker_order_id=None,
+                    symbol=str(code),
+                    side=side,
+                    qty=int(shares),
+                    price=float(price) if price is not None else None,
+                    http_status=None,
+                    rejection_reason=rejection_reason,
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "price": float(price) if price > 0 else 0.0,
+                    "http_status": None,
+                    "result": None,
+                    "rejection_reason": rejection_reason,
+                    "live_gate_reason": gate_status.reason,
+                    "runtime_config_hash": gate_status.runtime_config_hash,
+                    "approved_config_hash": gate_status.approved_config_hash,
+                    "is_production": bool(self.is_production),
+                })
+                return submission
         if margin_trade_type is None:
             margin_trade_type = 3
-        
+
         front_order_type = 20 if price > 0 else 10  # 20:指値 10:成行
         normalized_price = 0.0
         if price > 0:
@@ -718,6 +755,25 @@ class KabucomBroker(BaseBroker):
             enriched["__parsed_has_partial_fill__"] = parsed.has_partial_fill
             return enriched
         return None
+
+    def _enrich_order_details_with_parse(self, details: dict | None, *, unresolved: bool = False, unresolved_reason: str | None = None) -> dict:
+        """注文詳細にパース結果を付与し、未解決フラグを安全に引き回せるようにする。"""
+        enriched = dict(details or {})
+        parsed = parse_kabucom_order(enriched)
+        enriched["__parsed_process_state__"] = parsed.process_state.value
+        enriched["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
+        enriched["__parsed_cumulative_qty__"] = parsed.cumulative_qty
+        enriched["__parsed_order_qty__"] = parsed.order_qty
+        enriched["__parsed_average_fill_price__"] = parsed.average_fill_price
+        enriched["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+        enriched["unresolved"] = bool(unresolved)
+        if unresolved_reason:
+            enriched["unresolved_reason"] = str(unresolved_reason)
+        if parsed.cumulative_qty > 0:
+            enriched["Qty"] = parsed.cumulative_qty
+            if parsed.average_fill_price is not None:
+                enriched["Price"] = parsed.average_fill_price
+        return enriched
 
     def get_order_details(self, order_id: str) -> dict:
         """ 注文詳細（ステータス・約定単価等）を取得する """
@@ -1069,9 +1125,69 @@ class KabucomBroker(BaseBroker):
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:
+                    if f_details.get("unresolved"):
+                        parsed = parse_kabucom_order(f_details)
+                        last_terminal_reason = parsed.terminal_reason or last_terminal_reason
+                        if parsed.cumulative_qty > 0:
+                            for execution_id in parsed.execution_ids:
+                                if execution_id not in total_execution_ids:
+                                    total_execution_ids.append(execution_id)
+                            fill_qty = parsed.cumulative_qty
+                            fill_price = parsed.average_fill_price
+                            if fill_price is None:
+                                raw_price = f_details.get("Price", force_price)
+                                fill_price = float(raw_price if raw_price not in (None, 0) else force_price)
+                            total_filled_qty += fill_qty
+                            total_filled_value += float(fill_price) * fill_qty
+                            remaining_shares = max(0, shares - total_filled_qty)
+                        avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
+                        return {
+                            "order_id": last_order_id,
+                            "submission_status": None if last_submission is None else last_submission.status.value,
+                            "process_state": OrderProcessState.UNKNOWN.value,
+                            "terminal_reason": None,
+                            "Qty": total_filled_qty,
+                            "filled_qty": total_filled_qty,
+                            "Price": avg_price,
+                            "average_price": avg_price if total_filled_qty > 0 else None,
+                            "remaining_qty": max(0, shares - total_filled_qty),
+                            "Symbol": code,
+                            "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                            "unresolved": True,
+                            "execution_ids": tuple(total_execution_ids),
+                            "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                        }
                     parsed = parse_kabucom_order(f_details)
                     if parsed.process_state == OrderProcessState.UNKNOWN:
-                        unresolved = True
+                        if parsed.cumulative_qty > 0:
+                            for execution_id in parsed.execution_ids:
+                                if execution_id not in total_execution_ids:
+                                    total_execution_ids.append(execution_id)
+                            fill_qty = parsed.cumulative_qty
+                            fill_price = parsed.average_fill_price
+                            if fill_price is None:
+                                raw_price = f_details.get("Price", force_price)
+                                fill_price = float(raw_price if raw_price not in (None, 0) else force_price)
+                            total_filled_qty += fill_qty
+                            total_filled_value += float(fill_price) * fill_qty
+                            remaining_shares = max(0, shares - total_filled_qty)
+                        avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
+                        return {
+                            "order_id": last_order_id,
+                            "submission_status": None if last_submission is None else last_submission.status.value,
+                            "process_state": OrderProcessState.UNKNOWN.value,
+                            "terminal_reason": None,
+                            "Qty": total_filled_qty,
+                            "filled_qty": total_filled_qty,
+                            "Price": avg_price,
+                            "average_price": avg_price if total_filled_qty > 0 else None,
+                            "remaining_qty": max(0, shares - total_filled_qty),
+                            "Symbol": code,
+                            "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                            "unresolved": True,
+                            "execution_ids": tuple(total_execution_ids),
+                            "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                        }
                     elif parsed.cumulative_qty > 0:
                         last_terminal_reason = parsed.terminal_reason or last_terminal_reason
                         for execution_id in parsed.execution_ids:
@@ -1133,19 +1249,47 @@ class KabucomBroker(BaseBroker):
                 if route:
                     exchange = route["exchange"]
                     margin_trade_type = route["margin_trade_type"]
+        from core.logic import normalize_tick_size
+        normalized_trigger_price = normalize_tick_size(trigger_price, is_buy=(side == "2"))
         if side == "1" and (exchange is None or margin_trade_type is None):
             print(f"⚠️ 逆指値の返済建玉ルートが不明なため、発注を中止します: {code}")
             return None
+        if self.is_production and TRADE_MODE == "KABUCOM_LIVE" and side == "2":
+            gate_status = get_live_order_gate_status()
+            if not gate_status.allowed:
+                rejection_reason = f"live_new_order_disabled:{gate_status.reason}"
+                print(
+                    "🛑 KABUCOM_LIVE の新規逆指値をコード側で停止しました。"
+                    f" reason={gate_status.reason}"
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "hold_id": hold_id,
+                    "http_status": None,
+                    "result": None,
+                    "rejection_reason": rejection_reason,
+                    "live_gate_reason": gate_status.reason,
+                    "runtime_config_hash": gate_status.runtime_config_hash,
+                    "approved_config_hash": gate_status.approved_config_hash,
+                    "exchange": None if exchange is None else int(exchange),
+                    "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                    "is_production": bool(self.is_production),
+                })
+                return None
         if margin_trade_type is None:
             margin_trade_type = 3
-        
+
         # 逆指値の設定
         # 公式仕様の UnderOver に合わせる。
         # 1: 以下, 2: 以上
         # 売り（損切り）の場合は現在値が trigger_price 以下になったら成行
         under_over = 1 if side == "1" else 2
-        from core.logic import normalize_tick_size
-        normalized_trigger_price = normalize_tick_size(trigger_price, is_buy=(side == "2"))
 
         append_order_journal({
             "event": "PLANNED",
@@ -1264,14 +1408,8 @@ class KabucomBroker(BaseBroker):
         while time.time() - start_time < timeout_sec:
             details = self.get_order_details(order_id)
             if details:
-                parsed = parse_kabucom_order(details)
-                last_details = dict(details)
-                last_details["__parsed_process_state__"] = parsed.process_state.value
-                last_details["__parsed_terminal_reason__"] = None if parsed.terminal_reason is None else parsed.terminal_reason.value
-                last_details["__parsed_cumulative_qty__"] = parsed.cumulative_qty
-                last_details["__parsed_order_qty__"] = parsed.order_qty
-                last_details["__parsed_average_fill_price__"] = parsed.average_fill_price
-                last_details["__parsed_has_partial_fill__"] = parsed.has_partial_fill
+                last_details = self._enrich_order_details_with_parse(details)
+                parsed = parse_kabucom_order(last_details)
                 if parsed.process_state == OrderProcessState.TERMINAL:
                     if parsed.cumulative_qty > 0:
                         last_details["Qty"] = parsed.cumulative_qty
@@ -1287,7 +1425,11 @@ class KabucomBroker(BaseBroker):
                     return last_details
                 if parsed.process_state == OrderProcessState.UNKNOWN:
                     print(f"⚠️ 注文 ID: {order_id} の状態が不明です。")
-                    return last_details
+                    return self._enrich_order_details_with_parse(
+                        last_details,
+                        unresolved=True,
+                        unresolved_reason="unknown_state",
+                    )
             time.sleep(2)
         print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。ゾンビ処理化を防ぐため取消要求を送信します。")
         if self.cancel_order(order_id):
@@ -1296,14 +1438,12 @@ class KabucomBroker(BaseBroker):
             print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）")
         terminal_details = self._confirm_terminal_order_state(order_id, timeout_sec=5)
         if terminal_details:
+            terminal_details = self._enrich_order_details_with_parse(terminal_details)
             parsed = parse_kabucom_order(terminal_details)
-            if parsed.cumulative_qty > 0:
-                terminal_details["Qty"] = parsed.cumulative_qty
-                terminal_details["Price"] = parsed.average_fill_price if parsed.average_fill_price is not None else terminal_details.get("Price")
             print(f"✅ 注文 ID: {order_id} の終端状態を確認しました ({parsed.terminal_reason.value if parsed.terminal_reason else 'unknown'})。")
             return terminal_details
         print(f"⚠️ 注文 ID: {order_id} の取消完了が規定時間内に確認できませんでした。ゾンビポジションに注意してください。")
-        return last_details
+        return self._enrich_order_details_with_parse(last_details, unresolved=True, unresolved_reason="timeout_unconfirmed")
 
     # ---------------------------------------------------------
     # インターフェース互換性のためのファイル保存・ログ機能

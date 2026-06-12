@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 from pathlib import Path
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
@@ -38,6 +39,8 @@ GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 VALID_TRADE_MODES = {"SIM", "KABUCOM_TEST", "KABUCOM_LIVE"}
 TRADE_MODE = os.getenv("TRADE_MODE", "SIM").strip().upper()
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+ENABLE_LIVE_ORDER = os.getenv("ENABLE_LIVE_ORDER", "false").lower() == "true"
+APPROVED_CONFIG_HASH = os.getenv("APPROVED_CONFIG_HASH", "").strip()
 
 
 def is_placeholder_secret(value: str) -> bool:
@@ -137,3 +140,48 @@ def load_insider_exclusion_codes():
             return json.load(f).get("codes", [])
     except Exception:
         return []
+
+
+def build_runtime_live_order_config_snapshot() -> dict:
+    """ライブ新規注文の承認対象になる実行設定のスナップショットを作る。"""
+    return {
+        "TRADE_MODE": TRADE_MODE,
+        "DEBUG_MODE": DEBUG_MODE,
+        "USE_COMPOUNDING": USE_COMPOUNDING,
+        "INITIAL_CASH": INITIAL_CASH,
+        "MAX_POSITIONS": MAX_POSITIONS,
+        "LEVERAGE_RATE": LEVERAGE_RATE,
+        "BREADTH_THRESHOLD": BREADTH_THRESHOLD,
+        "SMA20_EXIT_BUFFER": SMA20_EXIT_BUFFER,
+        "STOP_LOSS_ATR": STOP_LOSS_ATR,
+        "TAKE_PROFIT_ATR": TAKE_PROFIT_ATR,
+        "BULL_GAP_LIMIT": BULL_GAP_LIMIT,
+        "RS_THRESHOLD": RS_THRESHOLD,
+        "MAX_ALLOCATION_PCT": MAX_ALLOCATION_PCT,
+        "MAX_ALLOCATION_AMOUNT": MAX_ALLOCATION_AMOUNT,
+        "LIQUIDITY_LIMIT_RATE": LIQUIDITY_LIMIT_RATE,
+        "MIN_ALLOCATION_AMOUNT": MIN_ALLOCATION_AMOUNT,
+        "MIN_PRICE": MIN_PRICE,
+        "MAX_PRICE": MAX_PRICE,
+        "EXIT_ON_SMA20_BREACH": EXIT_ON_SMA20_BREACH,
+        "SMA_SHORT_PERIOD": SMA_SHORT_PERIOD,
+        "SMA_MEDIUM_PERIOD": SMA_MEDIUM_PERIOD,
+        "SMA_LONG_PERIOD": SMA_LONG_PERIOD,
+        "SMA_BREADTH_PERIOD": SMA_BREADTH_PERIOD,
+        "SMA_TREND_PERIOD": SMA_TREND_PERIOD,
+        "COOLING_DAYS": COOLING_DAYS,
+        "SLIPPAGE": SLIPPAGE,
+        "SLIPPAGE_RATE": SLIPPAGE_RATE,
+        "DAYTRADE_API_EXPLICIT_TRADE_COST": DAYTRADE_API_EXPLICIT_TRADE_COST,
+        "MAX_HOLD_DAYS": MAX_HOLD_DAYS,
+    }
+
+
+def compute_runtime_live_order_config_hash(snapshot: dict | None = None) -> str:
+    """実行設定スナップショットの SHA256 ハッシュを返す。"""
+    payload = snapshot if snapshot is not None else build_runtime_live_order_config_snapshot()
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+RUNTIME_LIVE_ORDER_CONFIG_HASH = compute_runtime_live_order_config_hash()

@@ -114,6 +114,8 @@
 - 上の holdout と standalone は、すでに改善判断で参照した汚染済み期間です
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
 - 次の `clean holdout` は、現在の使用データ最新日 `2026-06-05` の翌営業日以降、つまり `2026-06-08` 以降の未観測データです
+- `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
+- 不一致または未設定の場合でも、監視・保護逆指値・決済は継続します
 
 ## リポジトリ構成
 
@@ -154,6 +156,7 @@ auto-trade/
 
 - `auto_trade.py`
   本番の自動売買実行エントリです。
+  `KABUCOM_LIVE` では新規エントリーはデフォルト無効で、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` の一致がそろうまで監視と決済のみを行います。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
@@ -408,6 +411,8 @@ python jp_optimizer.py --refresh-cache --holdout-months 6 --top-k-holdout 10
 python auto_trade.py
 ```
 
+`KABUCOM_LIVE` で新規エントリーを許可する場合は、事前に `ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` を設定し、起動ログに出る `runtime_hash` と一致させてください。
+
 backtest trade log 分析:
 
 ```bash
@@ -596,6 +601,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - SIGINT/SIGTERM が安全停止フラグに変換されること
 - `tests/test_kabucom_broker.py`
   - `core/kabucom_broker.py` の POST 再送抑止
+  - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
   - `OrdersSuccess` 系の注文状態パーサーと `State=1..10` の解釈
   - `SeqNum` 順の detail 並べ替え、`RecType=8` のみを fill / ExecutionID に使うこと、`State=4` detail を reject 扱いにすること
   - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject

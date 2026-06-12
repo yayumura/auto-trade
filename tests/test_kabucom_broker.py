@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 import os
 import pandas as pd
+from types import SimpleNamespace
 
 from core.kabucom_broker import KabucomBroker
 from core.kabu_launcher import _wait_for_api_server
@@ -14,6 +15,7 @@ from core.kabucom_order_state import (
     parse_kabucom_order,
 )
 from core.kabucom_quote import parse_board_quote
+from core.live_order_gate import get_live_order_gate_status
 from core.sim_broker import SimulationBroker
 
 
@@ -280,6 +282,37 @@ class TestKabucomBroker(unittest.TestCase):
         )
         self.assertEqual(transient.status, SubmissionStatus.UNKNOWN)
 
+    def test_live_order_gate_requires_explicit_enable_and_hash_match(self):
+        blocked = get_live_order_gate_status(
+            trade_mode="KABUCOM_LIVE",
+            debug_mode=False,
+            enable_live_order=True,
+            approved_config_hash="sha256:abc",
+            runtime_config_hash="sha256:def",
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(blocked.reason, "config_hash_mismatch")
+
+        ready = get_live_order_gate_status(
+            trade_mode="KABUCOM_LIVE",
+            debug_mode=False,
+            enable_live_order=True,
+            approved_config_hash="sha256:abc",
+            runtime_config_hash="sha256:abc",
+        )
+        self.assertTrue(ready.allowed)
+        self.assertEqual(ready.reason, "ready")
+
+        non_live = get_live_order_gate_status(
+            trade_mode="SIM",
+            debug_mode=False,
+            enable_live_order=False,
+            approved_config_hash="",
+            runtime_config_hash="sha256:abc",
+        )
+        self.assertTrue(non_live.allowed)
+        self.assertEqual(non_live.reason, "non_live_mode")
+
     def test_api_request_does_not_retry_post_on_server_error(self):
         session = _FakeSession([_FakeResponse(500, text="server error")])
         broker = _make_broker(session)
@@ -387,6 +420,73 @@ class TestKabucomBroker(unittest.TestCase):
         broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-FAIL"})
 
         self.assertIsNone(broker.execute_market_order("1234", 100, side="1", price=1234.2))
+
+    def test_submit_market_order_rejects_live_new_buy_when_live_gate_blocks(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.is_production = True
+
+        with patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+            patch(
+                "core.kabucom_broker.get_live_order_gate_status",
+                return_value=SimpleNamespace(
+                    allowed=False,
+                    reason="approval_missing",
+                    runtime_config_hash="sha256:runtime",
+                    approved_config_hash="",
+                ),
+            ), \
+            patch("core.kabucom_broker.append_order_journal") as mock_journal, \
+            patch.object(broker, "_api_request", side_effect=AssertionError("API should not be called")):
+            submission = broker._submit_market_order("1234", 100, side="2", price=1234.2)
+
+        self.assertEqual(submission.status, SubmissionStatus.REJECTED)
+        self.assertEqual(submission.rejection_reason, "live_new_order_disabled:approval_missing")
+        self.assertEqual(mock_journal.call_count, 1)
+        self.assertEqual(mock_journal.call_args.args[0]["event"], "REJECTED")
+
+    def test_execute_stop_order_allows_protective_exit_when_live_gate_blocks_entries(self):
+        captured = {}
+        journal_events = []
+
+        def fake_api_request(method, endpoint, **kwargs):
+            captured["method"] = method
+            captured["endpoint"] = endpoint
+            captured["json"] = kwargs["json"]
+            return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
+
+        broker = _make_broker(_FakeSession([]))
+        broker.is_production = True
+        broker._api_request = fake_api_request
+        broker.get_positions = lambda: [
+            {
+                "hold_id": "HOLD-1",
+                "exchange": 1,
+                "margin_trade_type": 3,
+                "available_qty": 100,
+                "code": "1234",
+            }
+        ]
+
+        with patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+            patch(
+                "core.kabucom_broker.get_live_order_gate_status",
+                return_value=SimpleNamespace(
+                    allowed=False,
+                    reason="approval_missing",
+                    runtime_config_hash="sha256:runtime",
+                    approved_config_hash="",
+                ),
+            ), \
+            patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+            order_id = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2, hold_id="HOLD-1")
+
+        self.assertEqual(order_id, "STOP-1")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["endpoint"], "sendorder")
+        self.assertEqual(captured["json"]["FrontOrderType"], 30)
+        self.assertEqual(captured["json"]["CashMargin"], 3)
+        self.assertEqual(captured["json"]["ReverseLimitOrder"]["UnderOver"], 1)
+        self.assertGreaterEqual(len(journal_events), 2)
 
     def test_execute_market_order_writes_order_journal(self):
         journal_events = []
@@ -526,6 +626,62 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(result["unresolved"])
         self.assertEqual(result["process_state"], OrderProcessState.UNKNOWN.value)
         self.assertIsNone(result["terminal_reason"])
+
+    def test_wait_for_execution_returns_unresolved_partial_fill_after_timeout(self):
+        details_iter = iter([
+            {
+                "OrderId": "ORDER-1",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 40,
+                "Details": [
+                    {"RecType": 8, "State": 3, "Qty": 25, "Price": 1000.0, "ExecutionID": "EX-1"},
+                    {"RecType": 8, "State": 3, "Qty": 15, "Price": 1010.0, "ExecutionID": "EX-2"},
+                ],
+            },
+        ])
+
+        broker = _make_broker(_FakeSession([]))
+        broker.get_order_details = lambda order_id: next(details_iter, None)
+        broker.cancel_order = lambda order_id: False
+        broker._confirm_terminal_order_state = lambda order_id, timeout_sec=5: None
+
+        with patch("core.kabucom_broker.time.time", side_effect=[0.0, 0.1, 1.0]), \
+            patch("core.kabucom_broker.time.sleep", return_value=None):
+            result = broker.wait_for_execution("ORDER-1", timeout_sec=0.5)
+
+        self.assertTrue(result["unresolved"])
+        self.assertEqual(result["__parsed_process_state__"], OrderProcessState.ACTIVE.value)
+        self.assertEqual(result["__parsed_cumulative_qty__"], 40)
+        self.assertEqual(result["Qty"], 40)
+        self.assertAlmostEqual(result["Price"], (25 * 1000.0 + 15 * 1010.0) / 40)
+
+    def test_wait_for_execution_marks_unknown_state_as_unresolved(self):
+        details_iter = iter([
+            {
+                "OrderId": "ORDER-2",
+                "State": 4,
+                "OrderQty": 100,
+                "CumQty": 40,
+                "Details": [
+                    {"RecType": 8, "SeqNum": 1, "State": 3, "Qty": 25, "Price": 1000.0, "ExecutionID": "EX-1"},
+                    {"RecType": 8, "SeqNum": 2, "State": 3, "Qty": 5, "Price": 1010.0, "ExecutionID": "EX-2"},
+                ],
+            },
+        ])
+
+        broker = _make_broker(_FakeSession([]))
+        broker.get_order_details = lambda order_id: next(details_iter, None)
+        broker.cancel_order = lambda order_id: False
+        broker._confirm_terminal_order_state = lambda order_id, timeout_sec=5: None
+
+        result = broker.wait_for_execution("ORDER-2", timeout_sec=30)
+
+        self.assertTrue(result["unresolved"])
+        self.assertEqual(result["unresolved_reason"], "unknown_state")
+        self.assertEqual(result["__parsed_process_state__"], OrderProcessState.UNKNOWN.value)
+        self.assertEqual(result["__parsed_cumulative_qty__"], 40)
+        self.assertEqual(result["Qty"], 40)
 
     def test_get_account_balance_live_separates_wallet_cash_and_margin(self):
         responses = iter([
