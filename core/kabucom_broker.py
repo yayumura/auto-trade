@@ -12,6 +12,7 @@ from core.order_journal import append_order_journal
 from core.kabucom_order_state import (
     OrderProcessState,
     OrderTerminalReason,
+    SubmissionResult,
     SubmissionStatus,
     classify_submission_response,
     parse_kabucom_order,
@@ -89,7 +90,8 @@ class KabucomBroker(BaseBroker):
             print(f"⚠️ API Request Budget Alert: {self.request_count} requests/hr. Throttling...")
             time.sleep(0.5)
 
-        for retry in [False, True]:
+        retry_attempts = [False, True] if allow_transient_retry else [False]
+        for retry in retry_attempts:
             headers = self._get_headers(force_refresh=retry)
             # [Professional Audit] GET のみ指数バックオフを許可する。POST/PUT の無条件再送は重複注文を招くため禁止。
             delays = [0, 1, 2, 4] if allow_transient_retry else [0]
@@ -100,7 +102,9 @@ class KabucomBroker(BaseBroker):
                     if res.status_code == 200:
                         return res
                     elif res.status_code == 401 and not retry:
-                        break # 内側のループを抜けて、認証をリフレッシュしてリトライ
+                        if allow_transient_retry:
+                            break # 内側のループを抜けて、認証をリフレッシュしてリトライ
+                        return res
                     elif res.status_code in [500, 502, 503, 504]:
                         if allow_transient_retry:
                             print(f"⚠️ API Server Error ({res.status_code}). Retrying in {delay*2 if delay>0 else 1}s...")
@@ -430,13 +434,24 @@ class KabucomBroker(BaseBroker):
             "margin_trade_type": int(margin_trade_type),
         }
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None, exchange: int | None = None, margin_trade_type: int | None = None) -> str:
+    def _submit_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None, exchange: int | None = None, margin_trade_type: int | None = None) -> SubmissionResult:
         """
-        現物・信用の成行・指値注文を発注する。
+        現物・信用の成行・指値注文を発注し、SubmissionResult を返す。
         side: "1" (売), "2" (買)
         close_positions: [{"HoldID": "...", "Qty": 100}, ...] (信用返済時)
         """
-        if not self.token: return None
+        if not self.token:
+            return SubmissionResult(
+                status=SubmissionStatus.UNKNOWN,
+                intent_id=f"market-{time.time_ns()}",
+                broker_order_id=None,
+                symbol=str(code),
+                side=side,
+                qty=int(shares),
+                price=float(price) if price is not None else None,
+                http_status=None,
+                rejection_reason="no_token",
+            )
         import os
         intent_id = f"market-{time.time_ns()}"
         
@@ -454,7 +469,33 @@ class KabucomBroker(BaseBroker):
                 exchange = None
         if side == "1" and (exchange is None or margin_trade_type is None):
             print(f"⚠️ 返済注文のExchange/MarginTradeTypeが未確定のため発注を中止します: {code}")
-            return None
+            submission = SubmissionResult(
+                status=SubmissionStatus.REJECTED,
+                intent_id=intent_id,
+                broker_order_id=None,
+                symbol=str(code),
+                side=side,
+                qty=int(shares),
+                price=float(price) if price is not None else None,
+                http_status=None,
+                rejection_reason="missing_close_route",
+            )
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "price": float(price) if price > 0 else 0.0,
+                "http_status": None,
+                "result": None,
+                "rejection_reason": submission.rejection_reason,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
+            return submission
         if margin_trade_type is None:
             margin_trade_type = 3
         
@@ -500,7 +541,33 @@ class KabucomBroker(BaseBroker):
             data["ClosePositions"] = close_positions
         elif cash_margin == 3:
             print(f"⚠️ 信用返済の返済建玉IDが取得できないため、発注を中止します: {code}")
-            return None
+            submission = SubmissionResult(
+                status=SubmissionStatus.REJECTED,
+                intent_id=intent_id,
+                broker_order_id=None,
+                symbol=str(code),
+                side=side,
+                qty=int(shares),
+                price=float(normalized_price) if front_order_type == 20 else 0.0,
+                http_status=None,
+                rejection_reason="close_positions_unavailable",
+            )
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "price": float(normalized_price) if front_order_type == 20 else 0.0,
+                "http_status": None,
+                "result": None,
+                "rejection_reason": submission.rejection_reason,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
+            return submission
 
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         submission = classify_submission_response(
@@ -511,7 +578,6 @@ class KabucomBroker(BaseBroker):
             price=float(normalized_price) if front_order_type == 20 else 0.0,
             response=res,
         )
-        self._last_submission_result = submission
         if submission.status == SubmissionStatus.ACCEPTED:
             order_id = submission.broker_order_id
             env = "【本番】" if self.is_production else "【検証API】"
@@ -533,7 +599,7 @@ class KabucomBroker(BaseBroker):
                 "is_production": bool(self.is_production),
             })
             print(f"✅ {env} 注文受付完了 (ID: {order_id}) - {code} {shares}株 {act} ({otype})")
-            return order_id
+            return submission
         if submission.status == SubmissionStatus.REJECTED:
             append_order_journal({
                 "event": "REJECTED",
@@ -551,7 +617,7 @@ class KabucomBroker(BaseBroker):
                 "is_production": bool(self.is_production),
             })
             print(f"⚠️ 注文拒否: {submission.rejection_reason}")
-            return None
+            return submission
         append_order_journal({
             "event": "UNKNOWN",
             "intent_id": intent_id,
@@ -567,12 +633,24 @@ class KabucomBroker(BaseBroker):
             "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
             "is_production": bool(self.is_production),
         })
-        return None
+        return submission
+
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0, close_positions: list = None, exchange: int | None = None, margin_trade_type: int | None = None) -> str:
+        submission = self._submit_market_order(
+            code,
+            shares,
+            side,
+            price=price,
+            close_positions=close_positions,
+            exchange=exchange,
+            margin_trade_type=margin_trade_type,
+        )
+        return submission.broker_order_id
 
     def cancel_order(self, order_id: str) -> bool:
         """ API経由で注文を取り消す (オートキャンセル機構用) """
         if not self.token: return False
-        cancel_data = {"OrderId": order_id, "Password": self.password}
+        cancel_data = {"OrderID": order_id, "Password": self.password}
         append_order_journal({
             "event": "CANCEL_REQUESTED",
             "order_id": order_id,
@@ -803,7 +881,7 @@ class KabucomBroker(BaseBroker):
                     break
                 close_pos_list = close_route["close_positions"]
 
-            order_id = self.execute_market_order(
+            submission = self._submit_market_order(
                 code,
                 remaining_shares,
                 side,
@@ -812,7 +890,8 @@ class KabucomBroker(BaseBroker):
                 exchange=None if close_route is None else close_route.get("exchange"),
                 margin_trade_type=None if close_route is None else close_route.get("margin_trade_type"),
             )
-            last_submission = getattr(self, "_last_submission_result", None)
+            order_id = submission.broker_order_id
+            last_submission = submission
             last_order_id = order_id
             if not order_id:
                 if last_submission and last_submission.status == SubmissionStatus.REJECTED:
@@ -938,6 +1017,7 @@ class KabucomBroker(BaseBroker):
                 "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                 "execution_ids": tuple(total_execution_ids),
                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                "unresolved": True,
             }
 
         if remaining_shares > 0:
@@ -974,7 +1054,7 @@ class KabucomBroker(BaseBroker):
                     }
                 close_pos_list = close_route["close_positions"]
 
-            order_id = self.execute_market_order(
+            submission = self._submit_market_order(
                 code,
                 remaining_shares,
                 side,
@@ -983,8 +1063,9 @@ class KabucomBroker(BaseBroker):
                 exchange=None if close_route is None else close_route.get("exchange"),
                 margin_trade_type=None if close_route is None else close_route.get("margin_trade_type"),
             )
+            order_id = submission.broker_order_id
             last_order_id = order_id or last_order_id
-            last_submission = getattr(self, "_last_submission_result", last_submission)
+            last_submission = submission
             if order_id:
                 f_details = self.wait_for_execution(order_id, timeout_sec=20)
                 if f_details:
@@ -1118,7 +1199,6 @@ class KabucomBroker(BaseBroker):
             price=float(normalized_trigger_price),
             response=res,
         )
-        self._last_submission_result = submission
         if submission.status == SubmissionStatus.ACCEPTED:
             order_id = submission.broker_order_id
             append_order_journal({

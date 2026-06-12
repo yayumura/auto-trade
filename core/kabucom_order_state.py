@@ -103,11 +103,22 @@ def _extract_details(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _sort_details_by_seqnum(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """SeqNum がある場合はそれを優先し、配列順への依存を減らす。"""
+    indexed_details: list[tuple[bool, int, int, dict[str, Any]]] = []
+    for index, detail in enumerate(details):
+        seq_num = _coerce_int(detail.get("SeqNum"))
+        indexed_details.append((seq_num is None, seq_num if seq_num is not None else index, index, detail))
+    indexed_details.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in indexed_details]
+
+
 def parse_kabucom_order(raw: Mapping[str, Any] | None) -> ParsedOrder:
     payload = dict(raw or {})
-    details = _extract_details(payload)
+    details = _sort_details_by_seqnum(_extract_details(payload))
     raw_state = _coerce_int(payload.get("State"))
     raw_order_state = _coerce_int(payload.get("OrderState"))
+    state_for_classification = raw_state if raw_state is not None else raw_order_state
     order_qty = _coerce_int(payload.get("OrderQty"), default=None)
     if order_qty is None:
         order_qty = _coerce_int(payload.get("Qty"), default=0) or 0
@@ -118,29 +129,41 @@ def parse_kabucom_order(raw: Mapping[str, Any] | None) -> ParsedOrder:
     fill_qty_sum = 0
     fill_value_sum = 0.0
     execution_ids: list[str] = []
-    detail_rec_types: list[int] = []
+    seen_execution_ids: set[str] = set()
+    seen_seq_nums: set[int] = set()
+    is_consistent = True
     cancel_like_detail = False
     expire_like_detail = False
     reject_like_detail = False
+    detail_error_like = False
     latest_detail_rec_type = None
-    last_detail_state = None
 
     for detail in details:
         rec_type = _coerce_int(detail.get("RecType"))
+        seq_num = _coerce_int(detail.get("SeqNum"))
+        if seq_num is not None:
+            if seq_num in seen_seq_nums:
+                is_consistent = False
+            else:
+                seen_seq_nums.add(seq_num)
         if rec_type is not None:
-            detail_rec_types.append(rec_type)
             latest_detail_rec_type = rec_type
         state = _coerce_int(detail.get("State"))
         if state is not None:
-            last_detail_state = state
+            if state == 4:
+                detail_error_like = True
         qty = _coerce_int(detail.get("Qty"))
         if qty is None:
             qty = _coerce_int(detail.get("CumQty"), default=0) or 0
         price = _coerce_float(detail.get("Price"))
         execution_id = detail.get("ExecutionID")
-        if execution_id is not None:
+        if execution_id is not None and rec_type == 8:
             execution_text = str(execution_id).strip()
             if execution_text:
+                if execution_text in seen_execution_ids:
+                    is_consistent = False
+                else:
+                    seen_execution_ids.add(execution_text)
                 execution_ids.append(execution_text)
 
         if rec_type == 8:
@@ -163,22 +186,23 @@ def parse_kabucom_order(raw: Mapping[str, Any] | None) -> ParsedOrder:
     if fill_qty_sum > 0:
         average_fill_price = fill_value_sum / fill_qty_sum
 
-    is_consistent = True
     if order_qty > 0 and cumulative_qty > order_qty:
         is_consistent = False
     if fill_qty_sum > 0 and cumulative_qty > 0 and fill_qty_sum != cumulative_qty:
         is_consistent = False
     if has_partial_fill and not details and raw_state == 5:
         is_consistent = False
+    if raw_state is not None and raw_order_state is not None and raw_state != raw_order_state:
+        is_consistent = False
 
     process_state = OrderProcessState.UNKNOWN
     terminal_reason: OrderTerminalReason | None = None
 
-    if raw_state in _ACTIVE_RAW_STATES:
+    if state_for_classification in _ACTIVE_RAW_STATES:
         process_state = OrderProcessState.ACTIVE
-        if not is_consistent:
+        if not is_consistent or detail_error_like:
             process_state = OrderProcessState.UNKNOWN
-    elif raw_state == 5:
+    elif state_for_classification == 5:
         if order_qty > 0 and cumulative_qty >= order_qty and (fill_qty_sum in {0, cumulative_qty}):
             process_state = OrderProcessState.TERMINAL
             terminal_reason = OrderTerminalReason.FILLED
@@ -189,7 +213,7 @@ def parse_kabucom_order(raw: Mapping[str, Any] | None) -> ParsedOrder:
             elif expire_like_detail:
                 process_state = OrderProcessState.TERMINAL
                 terminal_reason = OrderTerminalReason.EXPIRED
-            elif reject_like_detail and cumulative_qty == 0:
+            elif (detail_error_like or reject_like_detail) and cumulative_qty == 0:
                 process_state = OrderProcessState.TERMINAL
                 terminal_reason = OrderTerminalReason.REJECTED
             elif cumulative_qty > 0:
@@ -200,6 +224,10 @@ def parse_kabucom_order(raw: Mapping[str, Any] | None) -> ParsedOrder:
             process_state = OrderProcessState.UNKNOWN
     else:
         process_state = OrderProcessState.UNKNOWN
+
+    if not is_consistent:
+        process_state = OrderProcessState.UNKNOWN
+        terminal_reason = None
 
     working_qty = unfilled_qty if process_state == OrderProcessState.ACTIVE else 0
     if process_state == OrderProcessState.TERMINAL and terminal_reason is None:

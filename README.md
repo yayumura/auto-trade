@@ -597,6 +597,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_kabucom_broker.py`
   - `core/kabucom_broker.py` の POST 再送抑止
   - `OrdersSuccess` 系の注文状態パーサーと `State=1..10` の解釈
+  - `SeqNum` 順の detail 並べ替え、`RecType=8` のみを fill / ExecutionID に使うこと、`State=4` detail を reject 扱いにすること
   - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject
   - `SubmissionResult` の accepted / rejected / unknown 分岐
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離
@@ -604,7 +605,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - broker position の `ownership` 判定と live での unmanaged スキップ
   - 注文 payload の tick 正規化と float 送信
   - 逆指値 payload の trigger price 正規化
-  - cancel 完了確認と unknown order 監視
+  - `cancelorder` の `OrderID` 送信と cancel 完了確認、unknown order 監視
+  - `POST 401` の再送抑止と `GET 401` の再試行
   - 複数 HoldID を使う売り返済の close position 割り当て
   - 注文一覧取得失敗時の fail closed
   - API health が 401 を成功扱いしないこと
@@ -645,4 +647,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12

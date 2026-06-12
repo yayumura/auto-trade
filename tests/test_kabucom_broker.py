@@ -8,6 +8,7 @@ from core.kabu_launcher import _wait_for_api_server
 from core.kabucom_order_state import (
     OrderProcessState,
     OrderTerminalReason,
+    SubmissionResult,
     SubmissionStatus,
     classify_submission_response,
     parse_kabucom_order,
@@ -136,6 +137,52 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(unknown.process_state, OrderProcessState.UNKNOWN)
         self.assertIsNone(unknown.terminal_reason)
 
+    def test_parse_kabucom_order_sorts_details_by_seqnum_and_ignores_non_fill_execution_ids(self):
+        parsed = parse_kabucom_order({
+            "OrderId": "ORDER-S",
+            "State": 3,
+            "OrderQty": 40,
+            "CumQty": 40,
+            "Details": [
+                {"SeqNum": 2, "RecType": 8, "State": 3, "Qty": 15, "Price": 1010, "ExecutionID": "EX-2"},
+                {"SeqNum": 1, "RecType": 8, "State": 3, "Qty": 25, "Price": 1000, "ExecutionID": "EX-1"},
+                {"SeqNum": 3, "RecType": 4, "State": 4, "Qty": 40, "Price": 1000, "ExecutionID": "IGNORE"},
+            ],
+        })
+
+        self.assertEqual(parsed.execution_ids, ("EX-1", "EX-2"))
+        self.assertEqual(parsed.latest_detail_rec_type, 4)
+        self.assertEqual(parsed.process_state, OrderProcessState.UNKNOWN)
+
+    def test_parse_kabucom_order_marks_state_4_terminal_detail_as_rejected(self):
+        parsed = parse_kabucom_order({
+            "OrderId": "ORDER-R",
+            "State": 5,
+            "OrderQty": 100,
+            "CumQty": 0,
+            "Details": [
+                {"SeqNum": 1, "RecType": 4, "State": 4, "Qty": 100, "Price": 1000, "ExecutionID": "EX-1"},
+            ],
+        })
+
+        self.assertEqual(parsed.process_state, OrderProcessState.TERMINAL)
+        self.assertEqual(parsed.terminal_reason, OrderTerminalReason.REJECTED)
+        self.assertFalse(parsed.has_partial_fill)
+
+    def test_parse_kabucom_order_marks_duplicate_seqnum_as_unknown(self):
+        parsed = parse_kabucom_order({
+            "OrderId": "ORDER-D",
+            "State": 3,
+            "OrderQty": 40,
+            "CumQty": 40,
+            "Details": [
+                {"SeqNum": 1, "RecType": 8, "State": 3, "Qty": 20, "Price": 1000, "ExecutionID": "EX-1"},
+                {"SeqNum": 1, "RecType": 8, "State": 3, "Qty": 20, "Price": 1010, "ExecutionID": "EX-2"},
+            ],
+        })
+
+        self.assertEqual(parsed.process_state, OrderProcessState.UNKNOWN)
+
     def test_parse_board_quote_maps_buy_sell_and_rejects_inverted_and_special_quotes(self):
         quote = parse_board_quote(
             "1234",
@@ -242,6 +289,31 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
         self.assertIsNotNone(response)
         self.assertEqual(response.status_code, 500)
+
+    def test_api_request_does_not_retry_post_on_unauthorized(self):
+        session = _FakeSession([_FakeResponse(401, text="unauthorized")])
+        broker = _make_broker(session)
+        broker._authenticate = lambda: None
+
+        response = broker._api_request("POST", "sendorder", json={"foo": "bar"})
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 401)
+
+    def test_api_request_retries_get_on_unauthorized(self):
+        session = _FakeSession([
+            _FakeResponse(401, text="unauthorized"),
+            _FakeResponse(200, {"ok": True}),
+        ])
+        broker = _make_broker(session)
+        broker._authenticate = lambda: None
+
+        response = broker._api_request("GET", "orders")
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 200)
 
     def test_execute_market_order_uses_tick_normalization_and_float_price(self):
         captured = {}
@@ -396,7 +468,7 @@ class TestKabucomBroker(unittest.TestCase):
 
         self.assertIsNone(broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2))
 
-    def test_execute_chase_order_force_branch_passes_close_positions_for_sell_side(self):
+    def test_execute_chase_order_stops_after_unknown_submission_without_forcing_second_order(self):
         call_args = []
 
         broker = _make_broker(_FakeSession([]))
@@ -415,7 +487,7 @@ class TestKabucomBroker(unittest.TestCase):
         ]
         broker.cancel_order = lambda order_id: True
 
-        def fake_execute_market_order(code, shares, side, price=0, close_positions=None, exchange=None, margin_trade_type=None):
+        def fake_submit_market_order(code, shares, side, price=0, close_positions=None, exchange=None, margin_trade_type=None):
             call_args.append({
                 "code": code,
                 "shares": shares,
@@ -425,21 +497,23 @@ class TestKabucomBroker(unittest.TestCase):
                 "exchange": exchange,
                 "margin_trade_type": margin_trade_type,
             })
-            return None if len(call_args) == 1 else "ORDER-FORCE"
+            return SubmissionResult(
+                status=SubmissionStatus.UNKNOWN,
+                intent_id="market-1",
+                broker_order_id=None,
+                symbol=code,
+                side=side,
+                qty=shares,
+                price=price,
+                http_status=None,
+                rejection_reason="no_response",
+            )
 
-        broker.execute_market_order = fake_execute_market_order
-        broker.wait_for_execution = lambda *args, **kwargs: {
-            "State": 5,
-            "OrderQty": 100,
-            "CumQty": 100,
-            "Details": [
-                {"RecType": 8, "State": 5, "Qty": 100, "Price": 1000.0, "ExecutionID": "EX-100"},
-            ],
-        }
+        broker._submit_market_order = fake_submit_market_order
 
         result = broker.execute_chase_order("1234", 100, side="1", atr=10.0)
 
-        self.assertEqual(len(call_args), 2)
+        self.assertEqual(len(call_args), 1)
         self.assertEqual(
             call_args[0]["close_positions"],
             [
@@ -449,10 +523,9 @@ class TestKabucomBroker(unittest.TestCase):
         )
         self.assertEqual(call_args[0]["exchange"], 1)
         self.assertEqual(call_args[0]["margin_trade_type"], 3)
-        self.assertEqual(result["Qty"], 100)
-        self.assertEqual(result["filled_qty"], 100)
-        self.assertEqual(result["process_state"], OrderProcessState.TERMINAL.value)
-        self.assertEqual(result["terminal_reason"], OrderTerminalReason.FILLED.value)
+        self.assertTrue(result["unresolved"])
+        self.assertEqual(result["process_state"], OrderProcessState.UNKNOWN.value)
+        self.assertIsNone(result["terminal_reason"])
 
     def test_get_account_balance_live_separates_wallet_cash_and_margin(self):
         responses = iter([
@@ -500,6 +573,7 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_cancel_order_writes_order_journal(self):
         journal_events = []
+        captured_cancel = {}
 
         responses = iter([
             _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-1"}),
@@ -517,6 +591,8 @@ class TestKabucomBroker(unittest.TestCase):
         ])
 
         def fake_api_request(method, endpoint, **kwargs):
+            if endpoint == "cancelorder":
+                captured_cancel["json"] = kwargs["json"]
             return next(responses)
 
         def fake_append(event, path=None):
@@ -531,6 +607,8 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertGreaterEqual(len(journal_events), 2)
         self.assertEqual(journal_events[0]["event"], "CANCEL_REQUESTED")
         self.assertEqual(journal_events[1]["event"], "CANCELLED")
+        self.assertEqual(captured_cancel["json"]["OrderID"], "ORDER-1")
+        self.assertNotIn("OrderId", captured_cancel["json"])
 
     def test_get_active_orders_flags_unknown_orders_and_filters_terminal_orders(self):
         broker = _make_broker(_FakeSession([]))
