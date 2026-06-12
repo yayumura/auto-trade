@@ -113,6 +113,7 @@ from core.logic import (
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
+from core.live_order_gate import get_live_order_gate_status
 
 
 def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
@@ -927,6 +928,18 @@ def _main_exec():
         send_discord_notify(msg)
         return
 
+    live_order_gate_status = None
+    if TRADE_MODE == "KABUCOM_LIVE":
+        live_order_gate_status = get_live_order_gate_status()
+        print(
+            "🔐 [LIVE-GATE] "
+            f"allowed={live_order_gate_status.allowed} "
+            f"reason={live_order_gate_status.reason} "
+            f"runtime_hash={live_order_gate_status.runtime_config_hash}"
+        )
+        if not live_order_gate_status.allowed:
+            print("🛑 [LIVE-GATE] 新規エントリーはコード側で停止しています。監視と決済だけ継続します。")
+
     try:
         import psutil
         process = psutil.Process(os.getpid())
@@ -1233,6 +1246,7 @@ def _main_exec():
         elif not should_scan_override: should_scan = False
         elif not is_sim and account.get("wallet_snapshot_incomplete"): should_scan = False
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
+        elif live_order_gate_status is not None and not live_order_gate_status.allowed: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
         
