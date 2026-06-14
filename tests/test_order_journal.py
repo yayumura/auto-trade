@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from core.order_journal import append_order_journal, build_order_journal_replay_summary
 
@@ -35,11 +36,13 @@ def test_build_order_journal_replay_summary_marks_planned_and_accepted_as_unreso
     append_order_journal({"event": "CANCEL_REQUESTED", "order_id": "ORDER-2"}, path=str(journal_path))
     append_order_journal({"event": "CANCELLED", "order_id": "ORDER-2"}, path=str(journal_path))
     append_order_journal({"event": "REJECTED", "intent_id": "intent-3"}, path=str(journal_path))
+    append_order_journal({"event": "PLANNED", "intent_id": "intent-4"}, path=str(journal_path))
+    append_order_journal({"event": "FILLED_BEFORE_CANCEL", "intent_id": "intent-4", "order_id": "ORDER-4"}, path=str(journal_path))
 
     summary = build_order_journal_replay_summary(str(journal_path))
 
-    assert summary.total_lines == 5
-    assert summary.parsed_lines == 5
+    assert summary.total_lines == 7
+    assert summary.parsed_lines == 7
     assert summary.corrupt_lines == 0
     assert summary.has_unresolved is True
     assert summary.unresolved_count == 1
@@ -48,3 +51,16 @@ def test_build_order_journal_replay_summary_marks_planned_and_accepted_as_unreso
     resolved_keys = {intent.tracking_key for intent in summary.resolved_intents}
     assert "order:ORDER-2" in resolved_keys
     assert "intent:intent-3" in resolved_keys
+    assert "intent:intent-4" in resolved_keys
+
+
+def test_append_order_journal_raises_when_fsync_fails(tmp_path: Path):
+    journal_path = tmp_path / "order_journal.jsonl"
+
+    with patch("core.order_journal.os.fsync", side_effect=OSError("fsync failed")):
+        try:
+            append_order_journal({"event": "PLANNED"}, path=str(journal_path))
+        except OSError as exc:
+            assert "fsync failed" in str(exc)
+        else:
+            raise AssertionError("append_order_journal should raise when fsync fails")

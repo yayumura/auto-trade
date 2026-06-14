@@ -1299,11 +1299,14 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
                         cancel_result = broker.cancel_order(order_id)
                         cancel_confirmed = bool(cancel_result)
                         cancel_reason = None
-                        if hasattr(cancel_result, "confirmed"):
-                            cancel_confirmed = bool(getattr(cancel_result, "confirmed", False))
+                        if not cancel_confirmed:
+                            cancel_reason = getattr(cancel_result, "rejection_reason", None)
+                            cancel_terminal_status = getattr(cancel_result, "terminal_status", None)
+                            if cancel_reason is None and cancel_terminal_status is not None:
+                                cancel_reason = getattr(cancel_terminal_status, "value", str(cancel_terminal_status))
                             cancel_status = getattr(cancel_result, "status", None)
-                            if not cancel_confirmed and cancel_status is not None:
-                                cancel_reason = getattr(cancel_result, "rejection_reason", None) or getattr(cancel_status, "value", str(cancel_status))
+                            if cancel_reason is None and cancel_status is not None:
+                                cancel_reason = getattr(cancel_status, "value", str(cancel_status))
                         if not cancel_confirmed:
                             managed_order_cancel_failed = True
                             errors.append(f"managed_cancel_unconfirmed:{order_id}:{cancel_reason or 'unknown'}")
@@ -2059,7 +2062,10 @@ def _main_exec():
                 selected_candidates = []
                 max_to_buy = MAX_POSITIONS - len(portfolio)
                 max_to_review = max(5, max_to_buy * 4)
+                entry_flow_halted = False
                 for item in top_candidates:
+                    if entry_flow_halted:
+                        break
                     if len(selected_candidates) >= max_to_review:
                         break
 
@@ -2173,8 +2179,9 @@ def _main_exec():
                         opened_count += 1
                     else:
                         details = broker.execute_chase_order(item['code'], shares, side="2", atr=float(item.get('atr', 0.0)))
-                        if details and int(details.get("filled_qty", details.get("Qty", 0)) or 0) > 0:
-                            actual_qty = int(details.get("filled_qty", details.get("Qty", 0)) or 0)
+                        actual_qty = int(details.get("filled_qty", details.get("Qty", 0)) or 0) if isinstance(details, dict) else 0
+                        unresolved_entry = bool(isinstance(details, dict) and details.get("unresolved"))
+                        if actual_qty > 0:
                             exec_p = float(details.get("average_price", details.get("Price", 0)) or buy_price)
                             execution_ids = details.get("execution_ids") or ()
                             execution_id = details.get("execution_id")
@@ -2194,6 +2201,7 @@ def _main_exec():
                                 position_record["entry_order_submission_status"] = details.get("submission_status")
                                 position_record["entry_order_filled_qty"] = actual_qty
                                 position_record["entry_order_remaining_qty"] = int(details.get("remaining_qty", max(0, shares - actual_qty)) or max(0, shares - actual_qty))
+                                position_record["entry_order_unresolved_state"] = details.get("unresolved_reason") or "partial_unresolved"
                             portfolio.append(position_record)
                             broker.save_portfolio(portfolio)
                             broker.save_account(account)
@@ -2208,11 +2216,19 @@ def _main_exec():
                                 actions_taken.append(
                                     f"BUY {item['code']} - Daytrade entry unresolved (@{exec_p:,.1f})"
                                 )
+                                entry_flow_halted = True
                             else:
                                 actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                             if stop_order_id:
                                 actions_taken.append(f"STOP {item['code']} - protective stop armed (ID: {stop_order_id})")
-                            opened_count += 1
+                            if not entry_flow_halted:
+                                opened_count += 1
+                            else:
+                                break
+                        elif unresolved_entry:
+                            actions_taken.append(f"BUY {item['code']} - Daytrade entry unresolved (no fill)")
+                            entry_flow_halted = True
+                            break
 
                     if is_sim:
                         broker.save_portfolio(portfolio)

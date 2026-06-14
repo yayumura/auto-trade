@@ -15,6 +15,7 @@ from core.config import (
     EXECUTION_LOG_FILE,
     EXECUTION_AUDIT_LOG_FILE,
     KABUCOM_API_PASSWORD,
+    KABUCOM_ORDER_PASSWORD,
     KABUCOM_PORT_LIVE,
     KABUCOM_PORT_TEST,
     TRADE_MODE,
@@ -34,6 +35,7 @@ from core.portfolio_state import load_portfolio_positions, write_portfolio_state
 from core.kabucom_order_state import (
     CancelResult,
     CancelStatus,
+    CancelTerminalStatus,
     ExecutionFill,
     ExecutionWaitResult,
     OrderProcessState,
@@ -46,6 +48,7 @@ from core.kabucom_order_state import (
     classify_cancel_response,
     parse_kabucom_order,
     resolve_stock_order_action,
+    resolve_cancel_terminal_status,
 )
 from core.live_order_gate import get_live_order_gate_status
 from core.kabucom_quote import parse_board_quote
@@ -140,6 +143,7 @@ class KabucomBroker(BaseBroker):
         self.port = int(self.endpoint_config.port)
         self.base_url = self.endpoint_config.base_url or f"http://localhost:{self.port}/kabusapi"
         self.password = KABUCOM_API_PASSWORD
+        self.order_password = KABUCOM_ORDER_PASSWORD or self.password
         self.token = None
         # [Professional Audit] マルチスレッド環境での認証競合を防ぐためのロック
         self._auth_lock = threading.Lock()
@@ -747,7 +751,13 @@ class KabucomBroker(BaseBroker):
             print(f"⚠️ 返済建玉の再取得に失敗しました: {exc}")
             return None
 
-        matches = [p for p in positions if p.get("code") == str(code) and p.get("hold_id")]
+        matches = [
+            p
+            for p in positions
+            if p.get("code") == str(code)
+            and p.get("hold_id")
+            and str(p.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+        ]
         if not matches:
             return None
 
@@ -1018,7 +1028,7 @@ class KabucomBroker(BaseBroker):
         })
 
         data = {
-            "Password": self.password,
+            "Password": self.order_password,
             "Symbol": code,
             "Exchange": int(exchange),
             "SecurityType": 1,  # 1: 株式
@@ -1218,7 +1228,7 @@ class KabucomBroker(BaseBroker):
                 request_sent=False,
                 rejection_reason=reason,
             )
-        cancel_data = {"OrderID": order_id, "Password": self.password}
+        cancel_data = {"OrderID": order_id, "Password": self.order_password}
         cancel_validation = validate_cancel_order_request_payload(cancel_data)
         if not cancel_validation.valid:
             print(f"🛑 cancelorder payload をコード側で停止しました。reason={cancel_validation.reason}")
@@ -1253,19 +1263,46 @@ class KabucomBroker(BaseBroker):
             parsed_order = None
             cumulative_qty = 0
             remaining_qty = 0
-            append_order_journal({
-                "event": "CANCELLED" if confirmed else "UNKNOWN",
-                "order_id": order_id,
-                "http_status": submission.http_status,
-                "result": submission.result_code,
-                "is_production": bool(self.is_production),
-                "confirmed": bool(confirmed),
-            })
+            terminal_status: CancelTerminalStatus | None = None
+            terminal_reason = None
+            journal_event = "UNKNOWN"
             if confirmed:
                 parsed = parse_kabucom_order(confirmed)
                 parsed_order = parsed
                 cumulative_qty = parsed.cumulative_qty
                 remaining_qty = parsed.unfilled_qty
+                terminal_reason = parsed.terminal_reason
+                terminal_status = resolve_cancel_terminal_status(parsed)
+                if terminal_status == CancelTerminalStatus.CANCELLED:
+                    journal_event = "CANCELLED"
+                elif terminal_status == CancelTerminalStatus.FILLED_BEFORE_CANCEL:
+                    journal_event = "FILLED_BEFORE_CANCEL"
+                elif terminal_status == CancelTerminalStatus.EXPIRED:
+                    journal_event = "EXPIRED"
+                elif terminal_status == CancelTerminalStatus.REJECTED:
+                    journal_event = "REJECTED"
+                else:
+                    journal_event = "UNKNOWN"
+            else:
+                terminal_status = CancelTerminalStatus.UNKNOWN
+            append_order_journal({
+                "event": journal_event,
+                "order_id": order_id,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "is_production": bool(self.is_production),
+                "confirmed": bool(confirmed),
+                "terminal_reason": None if terminal_reason is None else terminal_reason.value,
+                "terminal_status": None if terminal_status is None else terminal_status.value,
+            })
+            if terminal_status is None:
+                terminal_status = CancelTerminalStatus.UNKNOWN
+            if terminal_status == CancelTerminalStatus.CANCELLED:
+                rejection_reason = None
+            elif terminal_status == CancelTerminalStatus.UNKNOWN and not confirmed:
+                rejection_reason = "cancel_not_confirmed"
+            else:
+                rejection_reason = terminal_status.value
             return CancelResult(
                 status=CancelStatus.ACCEPTED if confirmed else CancelStatus.UNKNOWN,
                 order_id=order_id,
@@ -1273,9 +1310,11 @@ class KabucomBroker(BaseBroker):
                 cumulative_qty=cumulative_qty,
                 remaining_qty=remaining_qty,
                 request_sent=True,
+                terminal_status=terminal_status,
+                terminal_reason=terminal_reason,
                 http_status=submission.http_status,
                 result_code=submission.result_code,
-                rejection_reason=None if confirmed else "cancel_not_confirmed",
+                rejection_reason=rejection_reason,
                 response_text=submission.response_text,
                 confirmed=bool(confirmed),
             )
@@ -1494,6 +1533,33 @@ class KabucomBroker(BaseBroker):
         last_submission = None
         last_terminal_reason = None
         last_process_state = OrderProcessState.UNKNOWN
+        unresolved_reason = None
+
+        def _log_unresolved_order_event(
+            *,
+            reason: str,
+            order_id: str | None,
+            filled_qty: int,
+            remaining_qty: int,
+            terminal_reason: OrderTerminalReason | None,
+            submission_status: SubmissionStatus | None,
+        ) -> None:
+            append_order_journal({
+                "event": "UNKNOWN",
+                "intent_id": None if last_submission is None else last_submission.intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "order_id": order_id,
+                "filled_qty": int(filled_qty),
+                "remaining_qty": int(remaining_qty),
+                "process_state": OrderProcessState.UNKNOWN.value,
+                "terminal_reason": None if terminal_reason is None else terminal_reason.value,
+                "unresolved_reason": reason,
+                "submission_status": None if submission_status is None else submission_status.value,
+                "is_production": bool(self.is_production),
+            })
 
         from core.logic import normalize_tick_size
         for attempt in range(1, 4):
@@ -1567,6 +1633,7 @@ class KabucomBroker(BaseBroker):
                     }
                 if last_submission and last_submission.status == SubmissionStatus.UNKNOWN:
                     unresolved = True
+                    unresolved_reason = "submission_unknown"
                 break
 
             print(f"⏳ 追従試行 {attempt}/3: 価格 {limit_price:.1f} で {remaining_shares}株 待機中...")
@@ -1580,6 +1647,7 @@ class KabucomBroker(BaseBroker):
                     if parsed.process_state == OrderProcessState.UNKNOWN:
                         print(f"⚠️ 注文 ID: {order_id} の状態が不明です。再注文は行わず終了します。")
                         unresolved = True
+                        unresolved_reason = "unknown_state"
                         terminal_details = details
                         last_process_state = parsed.process_state
                         last_terminal_reason = parsed.terminal_reason
@@ -1627,6 +1695,7 @@ class KabucomBroker(BaseBroker):
                 if terminal_details is None:
                     print("⛔ 取消完了が確認できないため、新規再発注は行わず終了します。")
                     unresolved = True
+                    unresolved_reason = "cancel_unconfirmed"
                     break
 
             if terminal_details:
@@ -1634,6 +1703,7 @@ class KabucomBroker(BaseBroker):
                 last_terminal_reason = parsed.terminal_reason
                 if parsed.process_state == OrderProcessState.UNKNOWN:
                     unresolved = True
+                    unresolved_reason = "unknown_state"
                     break
                 if parsed.cumulative_qty > 0:
                     for execution_id in parsed.execution_ids:
@@ -1657,11 +1727,20 @@ class KabucomBroker(BaseBroker):
 
         if unresolved:
             avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
+            terminal_reason = None if last_terminal_reason is None else last_terminal_reason.value
+            _log_unresolved_order_event(
+                reason=unresolved_reason or "unresolved",
+                order_id=last_order_id,
+                filled_qty=total_filled_qty,
+                remaining_qty=max(0, shares - total_filled_qty),
+                terminal_reason=last_terminal_reason,
+                submission_status=None if last_submission is None else last_submission.status,
+            )
             return {
                 "order_id": last_order_id,
                 "submission_status": None if last_submission is None else last_submission.status.value,
                 "process_state": OrderProcessState.UNKNOWN.value,
-                "terminal_reason": None,
+                "terminal_reason": terminal_reason,
                 "Qty": total_filled_qty,
                 "filled_qty": total_filled_qty,
                 "Price": avg_price,
@@ -1669,6 +1748,7 @@ class KabucomBroker(BaseBroker):
                 "remaining_qty": max(0, shares - total_filled_qty),
                 "Symbol": code,
                 "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                "unresolved_reason": unresolved_reason or (None if last_terminal_reason is None else last_terminal_reason.value),
                 "execution_ids": tuple(total_execution_ids),
                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
                 "unresolved": True,
@@ -1691,11 +1771,19 @@ class KabucomBroker(BaseBroker):
                 close_route = self._build_close_positions_for_symbol(code, remaining_shares)
                 if close_route is None:
                     print(f"⚠️ {code} の返済建玉を正しく特定できないため、強制執行を中止します。")
+                    _log_unresolved_order_event(
+                        reason="close_route_unavailable",
+                        order_id=last_order_id,
+                        filled_qty=total_filled_qty,
+                        remaining_qty=remaining_shares,
+                        terminal_reason=last_terminal_reason,
+                        submission_status=None if last_submission is None else last_submission.status,
+                    )
                     return {
                         "order_id": last_order_id,
                         "submission_status": None if last_submission is None else last_submission.status.value,
                         "process_state": OrderProcessState.UNKNOWN.value,
-                        "terminal_reason": None,
+                        "terminal_reason": None if last_terminal_reason is None else last_terminal_reason.value,
                         "Qty": total_filled_qty,
                         "filled_qty": total_filled_qty,
                         "Price": total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0,
@@ -1704,6 +1792,7 @@ class KabucomBroker(BaseBroker):
                         "Symbol": code,
                         "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                         "rejection_reason": "close_positions_unavailable",
+                        "unresolved_reason": "close_route_unavailable",
                         "unresolved": True,
                     }
                 close_pos_list = close_route["close_positions"]
@@ -1738,12 +1827,20 @@ class KabucomBroker(BaseBroker):
                             total_filled_qty += fill_qty
                             total_filled_value += float(fill_price) * fill_qty
                             remaining_shares = max(0, shares - total_filled_qty)
+                        _log_unresolved_order_event(
+                            reason="wait_for_execution_unresolved",
+                            order_id=last_order_id,
+                            filled_qty=total_filled_qty,
+                            remaining_qty=max(0, shares - total_filled_qty),
+                            terminal_reason=parsed.terminal_reason or last_terminal_reason,
+                            submission_status=None if last_submission is None else last_submission.status,
+                        )
                         avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
                         return {
                             "order_id": last_order_id,
                             "submission_status": None if last_submission is None else last_submission.status.value,
                             "process_state": OrderProcessState.UNKNOWN.value,
-                            "terminal_reason": None,
+                            "terminal_reason": None if parsed.terminal_reason is None else parsed.terminal_reason.value,
                             "Qty": total_filled_qty,
                             "filled_qty": total_filled_qty,
                             "Price": avg_price,
@@ -1751,6 +1848,7 @@ class KabucomBroker(BaseBroker):
                             "remaining_qty": max(0, shares - total_filled_qty),
                             "Symbol": code,
                             "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                            "unresolved_reason": f_details.get("unresolved_reason") or "wait_for_execution_unresolved",
                             "unresolved": True,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
@@ -1769,12 +1867,20 @@ class KabucomBroker(BaseBroker):
                             total_filled_qty += fill_qty
                             total_filled_value += float(fill_price) * fill_qty
                             remaining_shares = max(0, shares - total_filled_qty)
+                        _log_unresolved_order_event(
+                            reason="force_fill_unknown_state",
+                            order_id=last_order_id,
+                            filled_qty=total_filled_qty,
+                            remaining_qty=max(0, shares - total_filled_qty),
+                            terminal_reason=parsed.terminal_reason or last_terminal_reason,
+                            submission_status=None if last_submission is None else last_submission.status,
+                        )
                         avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
                         return {
                             "order_id": last_order_id,
                             "submission_status": None if last_submission is None else last_submission.status.value,
                             "process_state": OrderProcessState.UNKNOWN.value,
-                            "terminal_reason": None,
+                            "terminal_reason": None if parsed.terminal_reason is None else parsed.terminal_reason.value,
                             "Qty": total_filled_qty,
                             "filled_qty": total_filled_qty,
                             "Price": avg_price,
@@ -1782,6 +1888,7 @@ class KabucomBroker(BaseBroker):
                             "remaining_qty": max(0, shares - total_filled_qty),
                             "Symbol": code,
                             "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
+                            "unresolved_reason": "force_fill_unknown_state",
                             "unresolved": True,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
@@ -2018,7 +2125,7 @@ class KabucomBroker(BaseBroker):
         })
 
         data = {
-            "Password": self.password,
+            "Password": self.order_password,
             "Symbol": code,
             "Exchange": int(exchange),
             "SecurityType": 1,
@@ -2219,7 +2326,14 @@ class KabucomBroker(BaseBroker):
             time.sleep(2)
         print(f"⚠️ 注文 ID: {order_id} の約定確認がタイムアウトしました。ゾンビ処理化を防ぐため取消要求を送信します。")
         cancel_result = self.cancel_order(order_id)
-        if cancel_result:
+        if isinstance(cancel_result, CancelResult):
+            if bool(cancel_result):
+                print("✅ タイムアウト注文の強制取消要求を送信しました。")
+            elif cancel_result.terminal_status == CancelTerminalStatus.FILLED_BEFORE_CANCEL:
+                print(f"⚠️ 注文 ID: {order_id} は取消要求より先に約定していました。")
+            else:
+                print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）")
+        elif cancel_result:
             print("✅ タイムアウト注文の強制取消要求を送信しました。")
         else:
             print(f"⚠️ 取消要求の送信に失敗しました（手動で約定状況を確認してください）")

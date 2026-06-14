@@ -11,6 +11,7 @@ from core.kabu_launcher import _wait_for_api_server, check_api_health
 from core.kabucom_order_state import (
     CancelResult,
     CancelStatus,
+    CancelTerminalStatus,
     classify_cancel_response,
     ExecutionWaitResult,
     OrderProcessState,
@@ -65,6 +66,7 @@ def _make_broker(session):
     broker.port = 18081
     broker.base_url = "http://localhost:18081/kabusapi"
     broker.password = "test-password"
+    broker.order_password = "test-order-password"
     broker.token = "token"
     broker._auth_lock = None
     broker.session = session
@@ -511,6 +513,24 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["json"]["FrontOrderType"], 10)
         self.assertEqual(captured["json"]["Price"], 0)
 
+    def test_execute_market_order_uses_order_password_when_separate_from_api_password(self):
+        captured = {}
+
+        def fake_api_request(method, endpoint, **kwargs):
+            captured["json"] = kwargs["json"]
+            return _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-1"})
+
+        broker = _make_broker(_FakeSession([]))
+        broker.password = "api-secret"
+        broker.order_password = "order-secret"
+        broker._api_request = fake_api_request
+
+        result = broker.execute_market_order("1234", 100, side="2", price=1234.2, exchange=9)
+
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertEqual(captured["json"]["Password"], "order-secret")
+        self.assertNotEqual(captured["json"]["Password"], broker.password)
+
     def test_execute_market_order_sell_side_uses_close_positions_and_daytrade_margin(self):
         captured = {}
 
@@ -600,9 +620,10 @@ class TestKabucomBroker(unittest.TestCase):
                     runtime_config_hash="sha256:runtime",
                     approved_config_hash="",
                 ),
-        ):
+            ):
             broker = KabucomBroker(BrokerEndpointConfig.live())
             broker.password = "test-password"
+            broker.order_password = "test-password"
             broker.token = "token"
             broker._api_request = fake_api_request
             broker.get_positions = lambda: [
@@ -613,6 +634,7 @@ class TestKabucomBroker(unittest.TestCase):
                     "available_qty": 100,
                     "hold_qty": 0,
                     "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
                 }
             ]
 
@@ -705,6 +727,7 @@ class TestKabucomBroker(unittest.TestCase):
                 "margin_trade_type": 3,
                 "available_qty": 100,
                 "code": "1234",
+                "ownership": "MANAGED_BY_BOT",
             }
         ]
 
@@ -773,8 +796,8 @@ class TestKabucomBroker(unittest.TestCase):
             }
         }
         broker.get_positions = lambda: [
-            {"code": "1234", "hold_id": "HOLD-1", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 60, "hold_qty": 0, "available_qty": 60, "buy_time": "2026-04-21 09:00:00", "execution_id": "EX-1"},
-            {"code": "1234", "hold_id": "HOLD-2", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 40, "hold_qty": 0, "available_qty": 40, "buy_time": "2026-04-21 09:01:00", "execution_id": "EX-2"},
+            {"code": "1234", "hold_id": "HOLD-1", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 60, "hold_qty": 0, "available_qty": 60, "buy_time": "2026-04-21 09:00:00", "execution_id": "EX-1", "ownership": "MANAGED_BY_BOT"},
+            {"code": "1234", "hold_id": "HOLD-2", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 40, "hold_qty": 0, "available_qty": 40, "buy_time": "2026-04-21 09:01:00", "execution_id": "EX-2", "ownership": "MANAGED_BY_BOT"},
         ]
         broker.cancel_order = lambda order_id: True
 
@@ -1070,16 +1093,65 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertIsInstance(result, CancelResult)
         self.assertEqual(result.status, CancelStatus.ACCEPTED)
         self.assertTrue(result.confirmed)
-        self.assertTrue(result)
+        self.assertFalse(result)
+        self.assertEqual(result.terminal_status, CancelTerminalStatus.FILLED_BEFORE_CANCEL)
+        self.assertEqual(result.terminal_reason, OrderTerminalReason.FILLED)
         self.assertEqual(result.order_id, "ORDER-1")
         self.assertEqual(result.cumulative_qty, 100)
         self.assertEqual(result.remaining_qty, 0)
         self.assertIsNotNone(result.parsed_order)
         self.assertGreaterEqual(len(journal_events), 2)
         self.assertEqual(journal_events[0]["event"], "CANCEL_REQUESTED")
-        self.assertEqual(journal_events[1]["event"], "CANCELLED")
+        self.assertEqual(journal_events[1]["event"], "FILLED_BEFORE_CANCEL")
         self.assertEqual(captured_cancel["json"]["OrderID"], "ORDER-1")
         self.assertNotIn("OrderId", captured_cancel["json"])
+
+    def test_cancel_order_marks_filled_before_cancel_as_terminal_and_not_successful(self):
+        responses = iter([
+            _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-1"}),
+            _FakeResponse(200, [
+                {
+                    "OrderId": "ORDER-1",
+                    "State": 5,
+                    "OrderQty": 100,
+                    "CumQty": 100,
+                    "Details": [
+                        {"RecType": 8, "State": 5, "Qty": 100, "Price": 1000.0, "ExecutionID": "EX-1"},
+                    ],
+                }
+            ]),
+        ])
+
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: next(responses)
+
+        result = broker.cancel_order("ORDER-1")
+
+        self.assertEqual(result.status, CancelStatus.ACCEPTED)
+        self.assertTrue(result.confirmed)
+        self.assertEqual(result.terminal_status, CancelTerminalStatus.FILLED_BEFORE_CANCEL)
+        self.assertEqual(result.terminal_reason, OrderTerminalReason.FILLED)
+        self.assertFalse(result)
+        self.assertEqual(result.rejection_reason, "filled_before_cancel")
+
+    def test_cancel_order_uses_order_password_when_separate_from_api_password(self):
+        captured = {}
+
+        def fake_api_request(method, endpoint, **kwargs):
+            if endpoint == "cancelorder":
+                captured["json"] = kwargs["json"]
+            return _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-1"})
+
+        broker = _make_broker(_FakeSession([]))
+        broker.password = "api-secret"
+        broker.order_password = "order-secret"
+        broker._api_request = fake_api_request
+        broker._confirm_terminal_order_state = lambda *args, **kwargs: None
+
+        result = broker.cancel_order("ORDER-1")
+
+        self.assertEqual(captured["json"]["Password"], "order-secret")
+        self.assertEqual(result.status, CancelStatus.UNKNOWN)
 
     def test_get_active_orders_flags_unknown_orders_and_filters_terminal_orders(self):
         broker = _make_broker(_FakeSession([]))
