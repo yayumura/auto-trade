@@ -284,6 +284,7 @@ pip install -r requirements.txt
 `.env` には少なくとも次の系統の設定が必要です。
 
 - auカブコム証券 API
+- `KABUCOM_API_PASSWORD` と、必要に応じて注文用の `KABUCOM_ORDER_PASSWORD`
 - J-Quants
 - AI フィルタ用 API キー
 - 通知先やデバッグ設定
@@ -607,8 +608,10 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - partial remainder の protective stop rearm が失敗したら unresolved exit として止めること
   - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
   - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
+  - protective stop が filled-before-cancel だった場合も exit を送らずに止めること
   - shared flatten 経路でも protective stop cancel 未確定なら exit を送らないこと
   - unresolved な exit order を持つ建玉では重複する flatten を送らないこと
+  - live entry の unresolved partial / zero-fill を未解決注文として journal に残し、続きの entry を止めること
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
   - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
   - 監視銘柄 registry 同期の成功 / 失敗を entry gate に反映すること
@@ -642,8 +645,10 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 注文 payload の tick 正規化と float 送信
   - 逆指値 payload の trigger price 正規化
   - `cancelorder` の `OrderID` 送信と cancel 完了確認、unknown order 監視
+  - cancel 完了時の terminal reason を保持し、filled-before-cancel / expired を見分けること
+  - `KABUCOM_ORDER_PASSWORD` を設定した場合に sendorder / cancelorder が API 認証用パスワードと分離されること
   - `POST 401` の再送抑止と `GET 401` の再試行
-  - 複数 HoldID を使う売り返済の close position 割り当て
+  - managed position だけを使う売り返済の close position 割り当て
   - 注文一覧取得失敗時の fail closed
   - API health が 401 を成功扱いしないこと
   - launcher の port reachable と authenticated ready を分離し、401 を認証完了扱いしないこと
@@ -657,6 +662,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - kabucom API 契約 fixture が送受信の validator を通ること
   - fixture の内容変更で hash が変わること
   - official `kabucom/kabusapi` の `reference/kabu_STATION_API.yaml` (commit `0119077f1647b7c3ff64460b862c1978142df43d`) と version `1.5` を manifest に記録すること
+  - order / cancel の request password policy を検証すること
 - `tests/test_analyze_intraday_logs.py`
   - `analyze_intraday_logs.py` の decision 集計
   - intraday trade path 集計
@@ -671,6 +677,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - order journal に `schema_version` / `event_id` / `sequence` / `process_id` を付けること
   - JSONL append が連番で追記されること
   - journal replay が PLANNED / ACCEPTED / CANCEL_REQUESTED の未解決 intent を拾うこと
+  - journal replay が filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
 - `tests/test_portfolio_state.py`
   - `portfolio.json` を schema-versioned JSON で保存すること
   - legacy CSV を読み込んで migration できること

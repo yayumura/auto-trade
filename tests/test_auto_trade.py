@@ -18,7 +18,7 @@ from auto_trade import (
     sync_daytrade_registry,
 )
 from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
-from core.kabucom_order_state import CancelResult, CancelStatus
+from core.kabucom_order_state import CancelResult, CancelStatus, CancelTerminalStatus
 
 
 def _build_snapshot_df():
@@ -812,6 +812,72 @@ def test_close_daytrade_positions_blocks_live_exit_when_protective_stop_cancel_i
     assert remaining_portfolio[0]["protective_stop_cancel_unresolved"] is True
     assert remaining_portfolio[0]["exit_order_unresolved"] is True
     assert remaining_portfolio[0]["exit_order_unresolved_reason"] == "cancel_not_confirmed"
+    assert any(action.startswith("SKIP 1000 - protective stop cancel unresolved") for action in sell_actions)
+    assert updated_account["realized_pnl_today"] == 0.0
+
+
+def test_close_daytrade_positions_skips_exit_when_protective_stop_filled_before_cancel():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+        "execution_id": "EX-1",
+        "hold_id": "HOLD-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_status": "armed",
+        "ownership": "MANAGED_BY_BOT",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        95.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def cancel_order(self, order_id):
+            return CancelResult(
+                status=CancelStatus.ACCEPTED,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=100,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=True,
+                terminal_status=CancelTerminalStatus.FILLED_BEFORE_CANCEL,
+                rejection_reason="filled_before_cancel",
+            )
+
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called when the linked stop filled before cancel")
+
+    remaining_portfolio, sell_actions, updated_account = auto_trade.close_daytrade_positions(
+        portfolio=[position],
+        account={"cash": 1_000_000.0, "realized_pnl_today": 0.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["protective_stop_cancel_unresolved"] is True
+    assert remaining_portfolio[0]["exit_order_unresolved"] is True
+    assert remaining_portfolio[0]["exit_order_unresolved_reason"] == "filled_before_cancel"
     assert any(action.startswith("SKIP 1000 - protective stop cancel unresolved") for action in sell_actions)
     assert updated_account["realized_pnl_today"] == 0.0
 

@@ -39,6 +39,14 @@ class CancelStatus(Enum):
     UNKNOWN = "unknown"
 
 
+class CancelTerminalStatus(Enum):
+    CANCELLED = "cancelled"
+    FILLED_BEFORE_CANCEL = "filled_before_cancel"
+    EXPIRED = "expired"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
 MAX_RESPONSE_TEXT_CHARS = 2048
 _SECRET_VALUE_PATTERN = re.compile(
     r'(?i)(?P<prefix>"?(?:APIPassword|Password|Token)"?\s*[:=]\s*"?)'
@@ -232,13 +240,37 @@ class CancelResult:
     remaining_qty: int
     request_sent: bool
     confirmed: bool = False
+    terminal_status: CancelTerminalStatus | None = None
+    terminal_reason: OrderTerminalReason | None = None
     http_status: int | None = None
     result_code: int | None = None
     rejection_reason: str | None = None
     response_text: str | None = None
 
     def __bool__(self) -> bool:
-        return self.confirmed and self.status == CancelStatus.ACCEPTED
+        if self.terminal_status is None:
+            return self.confirmed and self.status == CancelStatus.ACCEPTED
+        return (
+            self.confirmed
+            and self.status == CancelStatus.ACCEPTED
+            and self.terminal_status == CancelTerminalStatus.CANCELLED
+        )
+
+
+def resolve_cancel_terminal_status(parsed_order: ParsedOrder | None) -> CancelTerminalStatus | None:
+    if parsed_order is None:
+        return None
+    if parsed_order.terminal_reason == OrderTerminalReason.CANCELLED:
+        return CancelTerminalStatus.CANCELLED
+    if parsed_order.terminal_reason == OrderTerminalReason.FILLED:
+        return CancelTerminalStatus.FILLED_BEFORE_CANCEL
+    if parsed_order.terminal_reason == OrderTerminalReason.EXPIRED:
+        return CancelTerminalStatus.EXPIRED
+    if parsed_order.terminal_reason == OrderTerminalReason.REJECTED:
+        return CancelTerminalStatus.REJECTED
+    if parsed_order.process_state == OrderProcessState.TERMINAL:
+        return CancelTerminalStatus.UNKNOWN
+    return None
 
 
 def resolve_stock_order_action(side: str, cash_margin: int | None = None) -> StockOrderAction:

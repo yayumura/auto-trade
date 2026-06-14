@@ -13,7 +13,7 @@ from core.file_io import ensure_absolute_path
 ORDER_JOURNAL_SCHEMA_VERSION = 1
 _ORDER_JOURNAL_SEQUENCE = itertools.count(1)
 
-_TERMINAL_EVENTS = {"REJECTED", "CANCELLED"}
+_TERMINAL_EVENTS = {"REJECTED", "CANCELLED", "FILLED_BEFORE_CANCEL", "EXPIRED"}
 _UNRESOLVED_EVENTS = {"PLANNED", "ACCEPTED", "CANCEL_REQUESTED", "UNKNOWN"}
 
 
@@ -72,8 +72,7 @@ def append_order_journal(event: dict, path: str = ORDER_JOURNAL_FILE) -> dict:
         try:
             os.fsync(f.fileno())
         except OSError:
-            # Windows/ファイルシステム都合で fsync が失敗しても、append 自体は維持する。
-            pass
+            raise
     return payload
 
 

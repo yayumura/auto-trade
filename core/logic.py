@@ -4174,7 +4174,7 @@ def cancel_linked_protective_stop_before_exit(
         return False, None
 
     if isinstance(cancel_result, CancelResult):
-        if cancel_result.confirmed or cancel_result.status == CancelStatus.ACCEPTED:
+        if bool(cancel_result):
             position["protective_stop_status"] = "cancelled"
             position["protective_stop_cancelled_order_id"] = stop_order_id
             return True, cancel_result
