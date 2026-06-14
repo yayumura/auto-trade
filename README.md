@@ -115,6 +115,7 @@
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
 - 次の `clean holdout` は、現在の使用データ最新日 `2026-06-05` の翌営業日以降、つまり `2026-06-08` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
+- `RUNTIME_LIVE_ORDER_CONFIG_HASH` は、実行設定に加えて `core.logic` の daytrade 定数、monthly rotation モジュール fingerprint、主要コードファイルの fingerprint も含めた承認マニフェストから計算します
 - 不一致または未設定の場合でも、監視・保護逆指値・決済は継続します
 
 ## リポジトリ構成
@@ -412,6 +413,7 @@ python auto_trade.py
 ```
 
 `KABUCOM_LIVE` で新規エントリーを許可する場合は、事前に `ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` を設定し、起動ログに出る `runtime_hash` と一致させてください。
+必要なら `core.live_approval_manifest.write_live_approval_manifest()` で承認マニフェストをファイルへ書き出してから、その hash を使ってください。
 
 backtest trade log 分析:
 
@@ -586,6 +588,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 一貫性の高い候補が fragility の高い候補より上に来る採点
 - `tests/test_auto_trade.py`
   - `auto_trade.py` の軽量な回帰確認
+  - インスタンスロックのメタデータ保存と、malformed LIVE lock を削除せず停止すること
+  - LIVE 口座 snapshot が `configured_risk_capital` や `realized_pnl_today` を 0 で潰さないこと
   - スナップショット計算
   - scan 候補と live entry 判断ログの行生成
   - server time ベースの月次 state / 月初資産ロールオーバー
@@ -596,9 +600,24 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - shared intraday stop / target と `14:30` force flatten の live exit フロー
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
   - live での unmanaged position を signal flatten / force flatten から除外すること
+  - exact `execution_id` でのみ保護逆指値を紐づけること
+  - `HoldQty` 欠損の建玉を fail closed にして、保護逆指値 / 返済割当で数量を推測しないこと
+  - signal/manual exit 前に linked protective stop を cancel し、未確定なら exit を止めること
+  - signal/manual exit 後に partial remainder の protective stop を再 arm すること
+  - partial remainder の protective stop rearm が失敗したら unresolved exit として止めること
+  - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
+  - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
+  - shared flatten 経路でも protective stop cancel 未確定なら exit を送らないこと
+  - unresolved な exit order を持つ建玉では重複する flatten を送らないこと
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
   - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
-  - SIGINT/SIGTERM が安全停止フラグに変換されること
+  - 監視銘柄 registry 同期の成功 / 失敗を entry gate に反映すること
+  - SIGINT/SIGTERM が安全停止フラグに変換され、signal handler が I/O を行わないこと
+  - safe shutdown の structured result と reconciliation failure の可視化
+  - safe shutdown が managed order cancel 未確定なら flatten を見送ること
+  - safe shutdown が managed order だけを cancel し、unmanaged order / position を触らないこと
+  - unexpected exception が最後の runtime state を使って safe shutdown を試みること
+  - board quote freshness helper が stale / cross-day quote を entry 前に落とすこと
 - `tests/test_kabucom_broker.py`
   - `core/kabucom_broker.py` の POST 再送抑止
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
@@ -606,9 +625,20 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `SeqNum` 順の detail 並べ替え、`RecType=8` のみを fill / ExecutionID に使うこと、`State=4` detail を reject 扱いにすること
   - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject
   - `SubmissionResult` の accepted / rejected / unknown 分岐
+  - response text が長すぎる場合の truncation と秘密値 redaction
+  - `OrderSubmissionResult` / `ExecutionWaitResult` / `CancelResult` の typed result と、未解決・取消結果の情報落ち防止
+  - `live_approval_manifest` の hash が strategy 定数変更で変わり、`generated_at` では変わらないこと
+  - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
+  - runtime entry authorization context が registry 未同期もブロックすること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離
+  - `BrokerEnvironment` / `BrokerEndpointConfig` の mismatch を constructor / validate で拒否すること
+  - live / test endpoint の mutating write が trade mode 不一致では拒否されること
   - 新規注文の `Exchange` 設定参照と返済ルート由来の `Exchange` / `MarginTradeType`
+  - 買い新規の `Exchange` 未設定時は `KABUCOM_ORDER_EXCHANGE` を暗黙既定せずに reject すること
+  - `AccountType` 未設定時は暗黙 4 へ fallback せずに reject すること
   - broker position の `ownership` 判定と live での unmanaged スキップ
+  - broker position の ownership 判定が local `execution_ids` の any-match を使うこと
+  - `HoldQty` 欠損の建玉を unknown 扱いにし、返済割当を fail closed にすること
   - 注文 payload の tick 正規化と float 送信
   - 逆指値 payload の trigger price 正規化
   - `cancelorder` の `OrderID` 送信と cancel 完了確認、unknown order 監視
@@ -616,14 +646,35 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 複数 HoldID を使う売り返済の close position 割り当て
   - 注文一覧取得失敗時の fail closed
   - API health が 401 を成功扱いしないこと
+  - launcher の port reachable と authenticated ready を分離し、401 を認証完了扱いしないこと
+  - `get_server_time` が symbol endpoint ではなく `wallet/cash` の `Date` header を使うこと
+  - request budget が orders / wallet / registry / market_data で分かれて記録されること
   - trade history の append-only 化
   - order journal の append-only 記録
+- `tests/test_file_io.py`
+  - JSONL 監査ログ helper が append-only に追記すること
+- `tests/test_kabucom_contracts.py`
+  - kabucom API 契約 fixture が送受信の validator を通ること
+  - fixture の内容変更で hash が変わること
+  - official `kabucom/kabusapi` の `reference/kabu_STATION_API.yaml` (commit `0119077f1647b7c3ff64460b862c1978142df43d`) と version `1.5` を manifest に記録すること
 - `tests/test_analyze_intraday_logs.py`
   - `analyze_intraday_logs.py` の decision 集計
   - intraday trade path 集計
   - exit log を使った final outcome 上書き
   - source file status と analysis readiness の可視化
   - setup 別サマリー出力
+- `tests/test_live_approval_manifest.py`
+  - ライブ承認マニフェスト hash の生成と永続化
+  - `generated_at` を hash から除外すること
+  - `core.logic` の strategy 定数変更で hash が変わること
+- `tests/test_order_journal.py`
+  - order journal に `schema_version` / `event_id` / `sequence` / `process_id` を付けること
+  - JSONL append が連番で追記されること
+  - journal replay が PLANNED / ACCEPTED / CANCEL_REQUESTED の未解決 intent を拾うこと
+- `tests/test_portfolio_state.py`
+  - `portfolio.json` を schema-versioned JSON で保存すること
+  - legacy CSV を読み込んで migration できること
+  - migration 時に archive backup を残すこと
 
 全件実行:
 
@@ -643,6 +694,7 @@ python -m pytest tests/test_jp_optimizer.py
 python -m pytest tests/test_jp_walkforward.py
 python -m pytest tests/test_auto_trade.py
 python -m pytest tests/test_kabucom_broker.py
+python -m pytest tests/test_kabucom_contracts.py
 python -m pytest tests/test_analyze_intraday_logs.py
 ```
 

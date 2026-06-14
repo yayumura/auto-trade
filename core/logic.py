@@ -12,6 +12,7 @@ from core.config import (
     BULL_GAP_LIMIT, RS_THRESHOLD,
     USE_COMPOUNDING, INITIAL_CASH, LEVERAGE, MIN_PRICE, MAX_PRICE
 )
+from core.kabucom_order_state import CancelResult, CancelStatus
 
 DAYTRADE_MIN_GAP = -0.005
 DAYTRADE_MAX_GAP = 0.03
@@ -4064,6 +4065,10 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
 
     for p in portfolio:
         code = str(p['code'])
+        if not is_simulation and p.get("exit_order_unresolved"):
+            sell_actions.append(f"SKIP {code} - unresolved exit order pending")
+            remaining_portfolio.append(dict(p))
+            continue
         if realtime_buffers and code in realtime_buffers:
             current_price = realtime_buffers[code].get_latest_price()
         else:
@@ -4073,6 +4078,31 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             sell_actions.append(f"SKIP {code} - unmanaged position ({ownership})")
             remaining_portfolio.append(dict(p))
             continue
+        if not is_simulation:
+            stop_order_id = str(p.get("protective_stop_order_id") or "").strip()
+            if stop_order_id:
+                stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
+                    broker=broker,
+                    position=p,
+                    stop_order_id=stop_order_id,
+                )
+                if not stop_cancel_ok:
+                    unresolved_position = dict(p)
+                    unresolved_position["protective_stop_cancel_unresolved"] = True
+                    unresolved_position["exit_order_unresolved"] = True
+                    unresolved_position["exit_order_unresolved_reason"] = "protective_stop_cancel_unconfirmed"
+                    if isinstance(stop_cancel_result, CancelResult):
+                        unresolved_position["exit_order_unresolved_reason"] = (
+                            stop_cancel_result.rejection_reason
+                            or getattr(stop_cancel_result.status, "value", "protective_stop_cancel_unconfirmed")
+                        )
+                        unresolved_position["exit_order_submission_status"] = getattr(stop_cancel_result.status, "value", None)
+                    unresolved_position["exit_order_remaining_qty"] = int(unresolved_position.get("shares", 0) or 0)
+                    sell_actions.append(
+                        f"SKIP {code} - protective stop cancel unresolved"
+                    )
+                    remaining_portfolio.append(unresolved_position)
+                    continue
         sell_actions.append(f"SELL {code} - Day Trade Flatten (@{current_price:,.1f})")
         if is_simulation or not broker:
             continue
@@ -4119,6 +4149,46 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
     if is_simulation:
         return [], sell_actions, fill_events
     return remaining_portfolio, sell_actions, fill_events
+
+
+def cancel_linked_protective_stop_before_exit(
+    *,
+    broker=None,
+    position: dict | None = None,
+    stop_order_id: str | None = None,
+) -> tuple[bool, CancelResult | None]:
+    """返済前に linked protective stop を停止し、確定しないなら fail closed で止める。"""
+    if position is None:
+        position = {}
+    stop_order_id = str(stop_order_id or position.get("protective_stop_order_id") or "").strip()
+    if not stop_order_id:
+        return True, None
+    if broker is None or not hasattr(broker, "cancel_order"):
+        print(f"⚠️ protective stop {stop_order_id} を解除できないため返済を止めます。")
+        return False, None
+
+    try:
+        cancel_result = broker.cancel_order(stop_order_id)
+    except Exception as exc:
+        print(f"⚠️ protective stop {stop_order_id} の解除に失敗しました: {exc}")
+        return False, None
+
+    if isinstance(cancel_result, CancelResult):
+        if cancel_result.confirmed or cancel_result.status == CancelStatus.ACCEPTED:
+            position["protective_stop_status"] = "cancelled"
+            position["protective_stop_cancelled_order_id"] = stop_order_id
+            return True, cancel_result
+        reason = cancel_result.rejection_reason or cancel_result.status.value
+        print(f"⚠️ protective stop {stop_order_id} の解除が未確定です: {reason}")
+        return False, cancel_result
+
+    if bool(cancel_result):
+        position["protective_stop_status"] = "cancelled"
+        position["protective_stop_cancelled_order_id"] = stop_order_id
+        return True, None
+
+    print(f"⚠️ protective stop {stop_order_id} の解除に失敗しました。")
+    return False, None
 
 def calculate_dynamic_leverage(breadth_val, config_leverage=1.5):
     """V17.0 Fixed Breadth Scaling: On if a shared day-trade setup can be active."""

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Mapping
 
 
@@ -22,6 +24,36 @@ class SubmissionStatus(Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     UNKNOWN = "unknown"
+
+
+class StockOrderAction(Enum):
+    MARGIN_NEW_LONG = "margin_new_long"
+    MARGIN_CLOSE_LONG = "margin_close_long"
+    MARGIN_NEW_SHORT = "margin_new_short"
+    MARGIN_CLOSE_SHORT = "margin_close_short"
+
+
+class CancelStatus(Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+MAX_RESPONSE_TEXT_CHARS = 2048
+_SECRET_VALUE_PATTERN = re.compile(
+    r'(?i)(?P<prefix>"?(?:APIPassword|Password|Token)"?\s*[:=]\s*"?)'
+    r'(?P<secret>[^\s,"\'};]+)'
+)
+
+
+def _sanitize_response_text(text: Any) -> str | None:
+    if text is None:
+        return None
+    sanitized = str(text)
+    sanitized = _SECRET_VALUE_PATTERN.sub(lambda match: f"{match.group('prefix')}***REDACTED***", sanitized)
+    if len(sanitized) > MAX_RESPONSE_TEXT_CHARS:
+        sanitized = sanitized[:MAX_RESPONSE_TEXT_CHARS] + "...[truncated]"
+    return sanitized
 
 
 @dataclass(frozen=True)
@@ -56,6 +88,170 @@ class SubmissionResult:
     result_code: int | None = None
     rejection_reason: str | None = None
     response_text: str | None = None
+
+
+@dataclass(frozen=True)
+class OrderSubmissionResult:
+    status: SubmissionStatus
+    intent_id: str
+    broker_order_id: str | None
+    request_sent: bool
+    action: StockOrderAction
+    symbol: str
+    qty: int
+    side: str
+    limit_price: float | None = None
+    trigger_price: float | None = None
+    http_status: int | None = None
+    result_code: int | None = None
+    rejection_reason: str | None = None
+    response_text: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.status == SubmissionStatus.ACCEPTED and bool(self.broker_order_id)
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: SubmissionResult,
+        *,
+        action: StockOrderAction,
+        request_sent: bool,
+        side: str,
+        limit_price: float | None = None,
+        trigger_price: float | None = None,
+    ) -> "OrderSubmissionResult":
+        return cls(
+            status=submission.status,
+            intent_id=submission.intent_id,
+            broker_order_id=submission.broker_order_id,
+            request_sent=bool(request_sent),
+            action=action,
+            symbol=submission.symbol,
+            qty=int(submission.qty),
+            side=side,
+            limit_price=limit_price,
+            trigger_price=trigger_price,
+            http_status=submission.http_status,
+            result_code=submission.result_code,
+            rejection_reason=submission.rejection_reason,
+            response_text=submission.response_text,
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionFill:
+    execution_id: str
+    qty: int
+    price: float
+    executed_at: datetime | None = None
+    commission: float | None = None
+    commission_tax: float | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionWaitResult:
+    process_state: OrderProcessState
+    terminal_reason: OrderTerminalReason | None
+    fills: tuple[ExecutionFill, ...]
+    cumulative_qty: int
+    remaining_qty: int
+    unresolved: bool
+    unresolved_reason: str | None
+    order_id: str | None = None
+    submission_status: SubmissionStatus | None = None
+    raw_details: dict[str, Any] | None = None
+
+    def __bool__(self) -> bool:
+        return not self.unresolved or self.cumulative_qty > 0
+
+    @property
+    def average_price(self) -> float | None:
+        qty_sum = sum(max(0, int(fill.qty)) for fill in self.fills)
+        if qty_sum <= 0:
+            return None
+        value_sum = sum(max(0, int(fill.qty)) * float(fill.price) for fill in self.fills)
+        return value_sum / qty_sum
+
+    @property
+    def execution_ids(self) -> tuple[str, ...]:
+        return tuple(fill.execution_id for fill in self.fills if fill.execution_id)
+
+    def to_legacy_dict(self, *, symbol: str | None = None, side: str | None = None) -> dict[str, Any]:
+        average_price = self.average_price
+        order_qty = self.cumulative_qty + max(0, int(self.remaining_qty))
+        detail_state = 10 if self.unresolved else (5 if self.process_state == OrderProcessState.TERMINAL else 3)
+        details = [
+            {
+                "RecType": 8,
+                "SeqNum": idx + 1,
+                "State": detail_state,
+                "Qty": int(fill.qty),
+                "Price": float(fill.price),
+                "ExecutionID": fill.execution_id,
+            }
+            for idx, fill in enumerate(self.fills)
+        ]
+        return {
+            "OrderId": self.order_id,
+            "OrderQty": order_qty,
+            "CumQty": self.cumulative_qty,
+            "State": detail_state,
+            "OrderState": detail_state,
+            "Details": details,
+            "unresolved": self.unresolved,
+            "unresolved_reason": self.unresolved_reason,
+            "submission_status": None if self.submission_status is None else self.submission_status.value,
+            "process_state": self.process_state.value,
+            "terminal_reason": None if self.terminal_reason is None else self.terminal_reason.value,
+            "Qty": self.cumulative_qty,
+            "filled_qty": self.cumulative_qty,
+            "Price": average_price if average_price is not None else 0.0,
+            "average_price": average_price,
+            "remaining_qty": max(0, int(self.remaining_qty)),
+            "Symbol": symbol,
+            "side": side,
+            "has_partial_fill": self.cumulative_qty > 0 and self.remaining_qty > 0,
+            "execution_ids": self.execution_ids,
+            "execution_id": self.execution_ids[0] if self.execution_ids else None,
+            "__parsed_process_state__": self.process_state.value,
+            "__parsed_terminal_reason__": None if self.terminal_reason is None else self.terminal_reason.value,
+            "__parsed_cumulative_qty__": self.cumulative_qty,
+            "__parsed_order_qty__": order_qty,
+            "__parsed_average_fill_price__": average_price,
+            "__parsed_has_partial_fill__": self.cumulative_qty > 0 and self.remaining_qty > 0,
+        }
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    status: CancelStatus
+    order_id: str | None
+    parsed_order: ParsedOrder | None
+    cumulative_qty: int
+    remaining_qty: int
+    request_sent: bool
+    confirmed: bool = False
+    http_status: int | None = None
+    result_code: int | None = None
+    rejection_reason: str | None = None
+    response_text: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.confirmed and self.status == CancelStatus.ACCEPTED
+
+
+def resolve_stock_order_action(side: str, cash_margin: int | None = None) -> StockOrderAction:
+    side_text = str(side or "").strip()
+    if side_text == "2":
+        if cash_margin == 3:
+            return StockOrderAction.MARGIN_CLOSE_SHORT
+        return StockOrderAction.MARGIN_NEW_LONG
+    if side_text == "1":
+        if cash_margin == 2:
+            return StockOrderAction.MARGIN_NEW_SHORT
+        return StockOrderAction.MARGIN_CLOSE_LONG
+    raise ValueError(f"Unsupported stock order side: {side!r}")
 
 
 _ACTIVE_RAW_STATES = {1, 2, 3, 4}
@@ -260,10 +456,9 @@ def classify_submission_response(
     qty: int,
     price: float | None,
     response: Any,
-    allow_missing_order_id: bool = False,
 ) -> SubmissionResult:
     http_status = None if response is None else getattr(response, "status_code", None)
-    response_text = None if response is None else getattr(response, "text", None)
+    response_text = None if response is None else _sanitize_response_text(getattr(response, "text", None))
 
     if response is None:
         return SubmissionResult(
@@ -321,20 +516,6 @@ def classify_submission_response(
                 price=price,
                 http_status=http_status,
                 result_code=result_code,
-                response_text=response_text,
-            )
-        if result_code == 0 and allow_missing_order_id:
-            return SubmissionResult(
-                status=SubmissionStatus.ACCEPTED,
-                intent_id=intent_id,
-                broker_order_id=order_id,
-                symbol=symbol,
-                side=side,
-                qty=int(qty),
-                price=price,
-                http_status=http_status,
-                result_code=result_code,
-                rejection_reason="missing_order_id_but_allowed",
                 response_text=response_text,
             )
         if result_code is None:
@@ -414,6 +595,138 @@ def classify_submission_response(
         side=side,
         qty=int(qty),
         price=price,
+        http_status=http_status,
+        rejection_reason="unclassified_response",
+        response_text=response_text,
+    )
+
+
+def classify_cancel_response(*, intent_id: str, response: Any) -> SubmissionResult:
+    """cancelorder の応答を、OrderId 欠損を許容する専用ルールで分類する。"""
+    http_status = None if response is None else getattr(response, "status_code", None)
+    response_text = None if response is None else _sanitize_response_text(getattr(response, "text", None))
+
+    if response is None:
+        return SubmissionResult(
+            status=SubmissionStatus.UNKNOWN,
+            intent_id=intent_id,
+            broker_order_id=None,
+            symbol="",
+            side="",
+            qty=0,
+            price=None,
+            http_status=None,
+            rejection_reason="no_response",
+            response_text=None,
+        )
+
+    if http_status == 200:
+        try:
+            payload = response.json()
+        except Exception:
+            return SubmissionResult(
+                status=SubmissionStatus.UNKNOWN,
+                intent_id=intent_id,
+                broker_order_id=None,
+                symbol="",
+                side="",
+                qty=0,
+                price=None,
+                http_status=http_status,
+                rejection_reason="malformed_200_response",
+                response_text=response_text,
+            )
+        if not isinstance(payload, Mapping):
+            return SubmissionResult(
+                status=SubmissionStatus.UNKNOWN,
+                intent_id=intent_id,
+                broker_order_id=None,
+                symbol="",
+                side="",
+                qty=0,
+                price=None,
+                http_status=http_status,
+                rejection_reason="schema_invalid",
+                response_text=response_text,
+            )
+        result_code = _coerce_int(payload.get("Result"))
+        order_id = _normalize_order_id(payload)
+        if result_code == 0:
+            return SubmissionResult(
+                status=SubmissionStatus.ACCEPTED,
+                intent_id=intent_id,
+                broker_order_id=order_id,
+                symbol="",
+                side="",
+                qty=0,
+                price=None,
+                http_status=http_status,
+                result_code=result_code,
+                response_text=response_text,
+            )
+        if result_code is None:
+            return SubmissionResult(
+                status=SubmissionStatus.UNKNOWN,
+                intent_id=intent_id,
+                broker_order_id=order_id,
+                symbol="",
+                side="",
+                qty=0,
+                price=None,
+                http_status=http_status,
+                rejection_reason="missing_result_code",
+                response_text=response_text,
+            )
+        return SubmissionResult(
+            status=SubmissionStatus.REJECTED,
+            intent_id=intent_id,
+            broker_order_id=order_id,
+            symbol="",
+            side="",
+            qty=0,
+            price=None,
+            http_status=http_status,
+            result_code=result_code,
+            rejection_reason="result_non_zero",
+            response_text=response_text,
+        )
+
+    if http_status in {400, 401, 403, 404, 405, 413, 415, 429}:
+        return SubmissionResult(
+            status=SubmissionStatus.REJECTED,
+            intent_id=intent_id,
+            broker_order_id=None,
+            symbol="",
+            side="",
+            qty=0,
+            price=None,
+            http_status=http_status,
+            rejection_reason=f"http_{http_status}",
+            response_text=response_text,
+        )
+
+    if http_status is not None and http_status >= 500:
+        return SubmissionResult(
+            status=SubmissionStatus.UNKNOWN,
+            intent_id=intent_id,
+            broker_order_id=None,
+            symbol="",
+            side="",
+            qty=0,
+            price=None,
+            http_status=http_status,
+            rejection_reason=f"http_{http_status}",
+            response_text=response_text,
+        )
+
+    return SubmissionResult(
+        status=SubmissionStatus.UNKNOWN,
+        intent_id=intent_id,
+        broker_order_id=None,
+        symbol="",
+        side="",
+        qty=0,
+        price=None,
         http_status=http_status,
         rejection_reason="unclassified_response",
         response_text=response_text,

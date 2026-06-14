@@ -1,13 +1,17 @@
 import os
 import sys
 import datetime
+import json
 import numpy as np
 import pandas as pd
 import time
 import pickle
 import signal
+import socket
 import jpholiday
 from enum import Enum
+from dataclasses import dataclass
+import psutil
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
 
@@ -36,59 +40,326 @@ def get_market_phase(now_time) -> MarketPhase:
     else:
         return MarketPhase.CLOSING_TIME
 
+
+@dataclass(frozen=True)
+class ShutdownResult:
+    success: bool
+    managed_remaining_orders: tuple[dict, ...]
+    managed_remaining_positions: tuple[dict, ...]
+    unmanaged_orders: tuple[dict, ...]
+    unmanaged_positions: tuple[dict, ...]
+    ambiguous_items: tuple[dict, ...]
+    unknown_items: tuple[dict, ...]
+    errors: tuple[str, ...]
+    updated_portfolio: list[dict]
+    updated_account: dict
+
+    def __iter__(self):
+        yield self.updated_portfolio
+        yield self.updated_account
+
 # --- ファイルパス・設定・APIキー設定 (core.configより一括取得) ---
 from core.config import (
     PROJECT_ROOT, DATA_ROOT,
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE,
     EXECUTION_LOG_FILE, TARGET_MARKETS, DAYTRADE_EXIT_LOG_FILE,
-    DEBUG_MODE, TRADE_MODE,
+    DEBUG_MODE, TRADE_MODE, RUNTIME_LIVE_ORDER_CONFIG_HASH,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
     SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
     SLIPPAGE_RATE, STOP_LOSS_ATR, INITIAL_CASH, load_insider_exclusion_codes,
     INTRADAY_SNAPSHOT_FILE, DATA_CACHE_ROOT,
 )
 from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
+from core.live_approval_manifest import read_git_commit_sha
 
 # --- インスタンスロック機構 ---
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
+LOCK_SCHEMA_VERSION = 1
 STOP_FILE = os.path.join(PROJECT_ROOT, "stop.txt")
 ENTRY_SCAN_CUTOFF_TIME = datetime.time(14, 0)
 FORCE_FLATTEN_TIME = datetime.time(14, 30)
 SHUTDOWN_REQUESTED = False
 SHUTDOWN_REASON = ""
+ACTIVE_RUNTIME_STATE = {
+    "broker": None,
+    "portfolio": [],
+    "account": {},
+    "is_sim": True,
+    "realtime_buffers": {},
+}
 
-def acquire_lock():
-    """原子的なロックファイル取得。open('x')はファイルが既存の場合FileExistsErrorを発生させる。"""
-    if os.path.exists(LOCK_FILE):
-        try:
-            with open(LOCK_FILE, 'r') as f:
-                old_pid = int(f.read().strip())
-            import psutil
-            if psutil.pid_exists(old_pid):
-                print(f"[WARNING] エラー: 他のインスタンス(PID: {old_pid})が既に実行中です。")
-                return False
-            print(f"[WARNING] 古いロックファイルを検出(PID: {old_pid}, 既に終了)。削除して続行します。")
-            os.remove(LOCK_FILE)
-        except (ValueError, ImportError, OSError) as e:
-            print(f"[WARNING] ロックファイルの解析に失敗しました({e})。古いロックを削除して続行します。")
-            try:
-                os.remove(LOCK_FILE)
-            except OSError:
-                pass
+def _resolve_lock_broker_environment(trade_mode: str | None = None) -> str:
+    mode = TRADE_MODE if trade_mode is None else str(trade_mode).strip().upper()
+    if mode == "KABUCOM_LIVE":
+        return "live"
+    if mode == "KABUCOM_TEST":
+        return "test"
+    return "sim"
+
+
+def _current_lock_identity(trade_mode: str | None = None) -> dict[str, object]:
+    process = psutil.Process(os.getpid())
+    code_sha = read_git_commit_sha()
+    if not code_sha:
+        raise RuntimeError("Git commit SHA を取得できませんでした。")
+    approval_hash = str(RUNTIME_LIVE_ORDER_CONFIG_HASH or "").strip()
+    if not approval_hash:
+        raise RuntimeError("LIVE 承認ハッシュが空です。")
+    return {
+        "pid": int(process.pid),
+        "process_start_time": round(float(process.create_time()), 6),
+        "hostname": socket.gethostname() or "unknown",
+        "executable": os.path.abspath(sys.executable),
+        "trade_mode": str(TRADE_MODE if trade_mode is None else trade_mode).strip().upper(),
+        "broker_environment": _resolve_lock_broker_environment(trade_mode),
+        "code_sha": str(code_sha).strip(),
+        "approval_hash": approval_hash,
+    }
+
+
+def _build_lock_payload(trade_mode: str | None = None) -> dict[str, object]:
+    payload = dict(_current_lock_identity(trade_mode))
+    payload["schema_version"] = LOCK_SCHEMA_VERSION
+    payload["acquired_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return payload
+
+
+def _normalize_lock_payload(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
     try:
-        with open(LOCK_FILE, 'x') as f:
-            f.write(str(os.getpid()))
+        schema_version = int(payload["schema_version"])
+        pid = int(payload["pid"])
+        process_start_time = float(payload["process_start_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    hostname = str(payload.get("hostname") or "").strip()
+    executable = str(payload.get("executable") or "").strip()
+    trade_mode = str(payload.get("trade_mode") or "").strip().upper()
+    broker_environment = str(payload.get("broker_environment") or "").strip().lower()
+    code_sha = str(payload.get("code_sha") or "").strip()
+    approval_hash = str(payload.get("approval_hash") or "").strip()
+    acquired_at = str(payload.get("acquired_at") or "").strip()
+    if schema_version != LOCK_SCHEMA_VERSION:
+        return None
+    if pid <= 0 or process_start_time <= 0:
+        return None
+    if not hostname or not executable or not trade_mode or not broker_environment or not code_sha or not approval_hash or not acquired_at:
+        return None
+    if trade_mode not in {"SIM", "KABUCOM_TEST", "KABUCOM_LIVE"}:
+        return None
+    if broker_environment != _resolve_lock_broker_environment(trade_mode):
+        return None
+    normalized = dict(payload)
+    normalized.update(
+        {
+            "schema_version": schema_version,
+            "pid": pid,
+            "process_start_time": process_start_time,
+            "hostname": hostname,
+            "executable": executable,
+            "trade_mode": trade_mode,
+            "broker_environment": broker_environment,
+            "code_sha": code_sha,
+            "approval_hash": approval_hash,
+            "acquired_at": acquired_at,
+        }
+    )
+    return normalized
+
+
+def _read_lock_payload(lock_file: str) -> tuple[str, dict[str, object] | None, str]:
+    if not os.path.exists(lock_file):
+        return "missing", None, "missing"
+    try:
+        if os.path.getsize(lock_file) == 0:
+            return "empty", None, "empty"
+    except OSError as exc:
+        return "corrupt", None, f"stat_failed:{exc}"
+
+    try:
+        with open(lock_file, "r", encoding="utf-8") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        return "corrupt", None, f"read_failed:{exc}"
+
+    stripped = raw.strip()
+    if not stripped:
+        return "empty", None, "blank"
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        if stripped.isdigit():
+            return "legacy", {"pid": int(stripped)}, "legacy_pid_text"
+        return "corrupt", None, "json_parse_failed"
+
+    normalized = _normalize_lock_payload(payload)
+    if normalized is None:
+        return "schema_mismatch", payload if isinstance(payload, dict) else None, "invalid_schema"
+    return "valid", normalized, "ok"
+
+
+def _lock_identity_matches_current(existing_payload: dict[str, object], current_identity: dict[str, object]) -> bool:
+    identity_keys = (
+        "pid",
+        "process_start_time",
+        "hostname",
+        "executable",
+        "trade_mode",
+        "broker_environment",
+        "code_sha",
+        "approval_hash",
+    )
+    for key in identity_keys:
+        if key == "process_start_time":
+            try:
+                existing_start = float(existing_payload.get(key))
+                current_start = float(current_identity.get(key))
+            except (TypeError, ValueError):
+                return False
+            if abs(existing_start - current_start) > 0.001:
+                return False
+            continue
+        if str(existing_payload.get(key)) != str(current_identity.get(key)):
+            return False
+    return True
+
+
+def _get_pid_start_time(pid: int) -> float | None:
+    try:
+        return round(float(psutil.Process(int(pid)).create_time()), 6)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError, TypeError, OSError):
+        return None
+
+
+def _write_lock_payload(lock_file: str, payload: dict[str, object]) -> bool:
+    try:
+        with open(lock_file, "x", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         return True
     except FileExistsError:
-        print("[WARNING] エラー: ロックファイルの競合が発生しました。別のインスタンスが起動した可能性があります。")
         return False
+    except OSError as exc:
+        print(f"[WARNING] ロックファイルの作成に失敗しました: {exc}")
+        return False
+
+
+def acquire_lock():
+    """原子的なロックファイル取得。ロックの不整合は fail closed で扱う。"""
+    try:
+        current_identity = _current_lock_identity()
+    except Exception as exc:
+        print(f"[WARNING] ロックメタデータの生成に失敗しました: {exc}")
+        return False
+
+    status, payload, reason = _read_lock_payload(LOCK_FILE)
+    if status == "missing":
+        return _write_lock_payload(LOCK_FILE, _build_lock_payload())
+
+    if status in {"empty", "corrupt", "schema_mismatch"}:
+        print(
+            f"[WARNING] ロックファイル({LOCK_FILE})が {reason} のため、上書きせず終了します。"
+        )
+        return False
+
+    if status == "legacy":
+        legacy_pid = int((payload or {}).get("pid") or 0)
+        if legacy_pid > 0 and not psutil.pid_exists(legacy_pid):
+            print(
+                f"[WARNING] 旧ロックを検出(PID: {legacy_pid}, 既に終了)。削除して続行します。"
+            )
+            try:
+                os.remove(LOCK_FILE)
+            except OSError as exc:
+                print(f"[WARNING] 旧ロックファイルの削除に失敗しました: {exc}")
+                return False
+            return _write_lock_payload(LOCK_FILE, _build_lock_payload())
+        print(
+            f"[WARNING] 旧形式のロックファイルを検出しましたが、PID {legacy_pid} の所有権を安全に確認できません。"
+        )
+        return False
+
+    if status != "valid" or payload is None:
+        print(f"[WARNING] ロックファイルの状態を解釈できませんでした: {reason}")
+        return False
+
+    existing_pid = int(payload["pid"])
+    existing_start = float(payload["process_start_time"])
+    if _lock_identity_matches_current(payload, current_identity):
+        return True
+
+    if not psutil.pid_exists(existing_pid):
+        print(
+            f"[WARNING] 古いロックファイルを検出(PID: {existing_pid}, 既に終了)。削除して続行します。"
+        )
+        try:
+            os.remove(LOCK_FILE)
+        except OSError as exc:
+            print(f"[WARNING] 古いロックファイルの削除に失敗しました: {exc}")
+            return False
+        return _write_lock_payload(LOCK_FILE, _build_lock_payload())
+
+    current_start = _get_pid_start_time(existing_pid)
+    if current_start is None:
+        print(
+            f"[WARNING] PID {existing_pid} の起動時刻を確認できないため、ロックを上書きせず終了します。"
+        )
+        return False
+    if abs(current_start - existing_start) > 0.001:
+        print(
+            f"[WARNING] PID再利用を検出しました(PID: {existing_pid}, lock_start={existing_start}, current_start={current_start})。削除して続行します。"
+        )
+        try:
+            os.remove(LOCK_FILE)
+        except OSError as exc:
+            print(f"[WARNING] 旧ロックファイルの削除に失敗しました: {exc}")
+            return False
+        return _write_lock_payload(LOCK_FILE, _build_lock_payload())
+
+    print(f"[WARNING] エラー: 他のインスタンス(PID: {existing_pid})が既に実行中です。")
+    return False
 
 def release_lock():
     if os.path.exists(LOCK_FILE):
         try:
-            os.remove(LOCK_FILE)
+            status, payload, reason = _read_lock_payload(LOCK_FILE)
+            current_identity = _current_lock_identity()
+            if status == "valid" and payload is not None:
+                if _lock_identity_matches_current(payload, current_identity):
+                    os.remove(LOCK_FILE)
+                    return
+                print(
+                    f"[WARNING] ロックファイル({LOCK_FILE})は現在プロセスの所有物ではないため削除しません。"
+                )
+                return
+            if status == "legacy" and payload is not None:
+                if int(payload.get("pid") or 0) == int(current_identity["pid"]):
+                    os.remove(LOCK_FILE)
+                    return
+                print(
+                    f"[WARNING] 旧形式ロック({LOCK_FILE})の所有権を確認できないため削除しません。"
+                )
+                return
+            print(f"[WARNING] ロックファイル({LOCK_FILE})は {reason} のため削除しません。")
         except OSError as e:
             print(f"[WARNING] ロックファイルの削除に失敗しました: {e}")
+
+
+def _set_active_runtime_state(*, broker=None, portfolio=None, account=None, is_sim=None, realtime_buffers=None):
+    if broker is not None:
+        ACTIVE_RUNTIME_STATE["broker"] = broker
+    if portfolio is not None:
+        ACTIVE_RUNTIME_STATE["portfolio"] = portfolio
+    if account is not None:
+        ACTIVE_RUNTIME_STATE["account"] = account
+    if is_sim is not None:
+        ACTIVE_RUNTIME_STATE["is_sim"] = bool(is_sim)
+    if realtime_buffers is not None:
+        ACTIVE_RUNTIME_STATE["realtime_buffers"] = realtime_buffers
 
 from core.logic import (
     detect_market_regime,
@@ -110,10 +381,17 @@ from core.logic import (
     resolve_daytrade_intraday_target_mult,
     resolve_daytrade_live_exit_decision,
     calculate_position_stops,
+    cancel_linked_protective_stop_before_exit,
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
-from core.live_order_gate import get_live_order_gate_status
+from core.live_order_gate import (
+    EntryAuthorizationContext,
+    evaluate_entry_authorization,
+    get_live_order_gate_status,
+)
+from core.order_journal import build_order_journal_replay_summary
+from core.startup_recovery import build_startup_recovery_report
 
 
 def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
@@ -130,15 +408,52 @@ def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
     }
 
 
+def sync_daytrade_registry(broker, current_targets, already_tracked, market_index_code="1321", is_sim=False):
+    """監視銘柄の register / unregister 結果から registry 同期成功可否を返す。"""
+    new_codes = set(current_targets) - set(already_tracked)
+    removed_codes = (set(already_tracked) - set(current_targets)) - {str(market_index_code)}
+    registry_sync_ok = True
+
+    if not is_sim:
+        if new_codes:
+            registry_sync_ok = bool(broker.register_symbols(list(new_codes))) and registry_sync_ok
+        if removed_codes:
+            registry_sync_ok = bool(broker.unregister_symbols(list(removed_codes))) and registry_sync_ok
+
+    return registry_sync_ok, new_codes, removed_codes
+
+
 def is_inverse_only_candidate_set(candidates):
     return bool(candidates) and all(
         is_daytrade_inverse_setup_type(item.get("setup_type")) for item in candidates
     )
 
 
-def merge_account_state(account, persisted_state):
+def merge_account_state(account, persisted_state, *, is_sim: bool):
+    """broker snapshot を durable state に安全に反映する。
+
+    SIM では local account.json が唯一の状態源なので、snapshot をそのまま反映する。
+    LIVE では wallet snapshot だけを取り込み、strategy state を 0 で潰さない。
+    """
+    snapshot = dict(account or {})
     merged = dict(persisted_state or {})
-    merged.update(account or {})
+
+    if is_sim:
+        merged.update(snapshot)
+        return merged
+
+    wallet_snapshot_incomplete = bool(snapshot.get("wallet_snapshot_incomplete"))
+    if snapshot.get("wallet_cash_ok") or not wallet_snapshot_incomplete:
+        if "stock_buying_power" in snapshot:
+            merged["stock_buying_power"] = snapshot["stock_buying_power"]
+    if snapshot.get("wallet_margin_ok") or not wallet_snapshot_incomplete:
+        if "margin_buying_power" in snapshot:
+            merged["margin_buying_power"] = snapshot["margin_buying_power"]
+
+    for key in ("wallet_snapshot_incomplete", "wallet_cash_ok", "wallet_margin_ok"):
+        if key in snapshot:
+            merged[key] = snapshot[key]
+
     return merged
 
 
@@ -232,7 +547,38 @@ def _collect_protective_stop_order_ids(portfolio):
     return stop_order_ids
 
 
-def _find_live_managed_position_for_entry(broker, code, execution_id=None, shares=None):
+def _coerce_jst_datetime(value):
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=JST)
+    return value.astimezone(JST)
+
+
+def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
+    reference_dt = _coerce_jst_datetime(reference_time)
+    if reference_dt is None:
+        return False
+    if not boards:
+        return False
+
+    max_age = datetime.timedelta(seconds=int(max_age_seconds))
+    for board in boards.values():
+        if not isinstance(board, dict):
+            return False
+        quote_dt = _coerce_jst_datetime(board.get("quote_timestamp") or board.get("current_price_timestamp"))
+        if quote_dt is None:
+            return False
+        if quote_dt.date() != reference_dt.date():
+            return False
+        if quote_dt > reference_dt + datetime.timedelta(minutes=1):
+            return False
+        if reference_dt - quote_dt > max_age:
+            return False
+    return True
+
+
+def _find_live_managed_position_for_entry(broker, code, execution_id=None, execution_ids=None, shares=None):
     if broker is None or not hasattr(broker, "get_positions"):
         return None
 
@@ -244,16 +590,13 @@ def _find_live_managed_position_for_entry(broker, code, execution_id=None, share
 
     code_str = str(code)
     execution_id_str = str(execution_id or "").strip()
-    target_shares = None
-    if shares is not None:
-        try:
-            target_shares = int(shares)
-        except (TypeError, ValueError):
-            target_shares = None
+    execution_id_set = {execution_id_str} if execution_id_str else set()
+    for item in execution_ids or []:
+        execution_text = str(item or "").strip()
+        if execution_text:
+            execution_id_set.add(execution_text)
 
     exact_matches = []
-    share_matches = []
-    managed_matches = []
 
     for position in live_positions or []:
         if str(position.get("code")) != code_str:
@@ -262,20 +605,12 @@ def _find_live_managed_position_for_entry(broker, code, execution_id=None, share
         if ownership != "MANAGED_BY_BOT":
             continue
 
-        managed_matches.append(position)
         live_execution_id = str(position.get("execution_id") or "").strip()
-        live_shares = int(position.get("shares", 0) or 0)
-        if execution_id_str and live_execution_id == execution_id_str:
+        if execution_id_set and live_execution_id in execution_id_set:
             exact_matches.append(position)
-        elif target_shares is not None and live_shares == target_shares:
-            share_matches.append(position)
 
     if exact_matches:
         return exact_matches[0]
-    if len(share_matches) == 1:
-        return share_matches[0]
-    if len(managed_matches) == 1:
-        return managed_matches[0]
     return None
 
 
@@ -292,10 +627,12 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         return None
 
     execution_id = position.get("execution_id")
+    execution_ids = position.get("execution_ids")
     live_position = _find_live_managed_position_for_entry(
         broker=broker,
         code=code,
         execution_id=execution_id,
+        execution_ids=execution_ids,
         shares=expected_shares if expected_shares is not None else position.get("shares"),
     )
     if live_position is None:
@@ -307,13 +644,17 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         print(f"⚠️ {code} の保護逆指値に必要な HoldID が取得できませんでした。")
         return None
 
+    if live_position.get("hold_qty") is None or live_position.get("available_qty") is None:
+        print(f"⚠️ {code} の保護逆指値に必要な建玉数量が不明です。")
+        return None
+
     shares = int(expected_shares if expected_shares is not None else live_position.get("shares", position.get("shares", 0)) or 0)
     if shares <= 0:
         return None
 
     exchange = live_position.get("exchange")
     margin_trade_type = live_position.get("margin_trade_type")
-    stop_order_id = broker.execute_stop_order(
+    stop_result = broker.execute_stop_order(
         code,
         shares,
         side="1",
@@ -322,7 +663,8 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         exchange=None if exchange is None else int(exchange),
         margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
     )
-    if stop_order_id:
+    stop_order_id = getattr(stop_result, "broker_order_id", None)
+    if stop_result and stop_order_id:
         position["hold_id"] = hold_id
         if exchange is not None:
             position["exchange"] = exchange
@@ -337,13 +679,24 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
     return None
 
 
-def build_daytrade_position_record(item, executed_price, shares, buy_time, execution_id=None):
+def build_daytrade_position_record(item, executed_price, shares, buy_time, execution_id=None, execution_ids=None):
     setup_type = str(item.get("setup_type", ""))
     stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
     target_mult = float(item.get("target_mult", resolve_daytrade_intraday_target_mult()))
     buy_atr = float(item.get("atr", 0.0))
     entry_stop_price = max(0.01, float(executed_price) - (buy_atr * stop_mult))
     entry_target_price = float(executed_price) + (buy_atr * target_mult)
+
+    normalized_execution_ids = []
+    for item_execution_id in (execution_ids or []):
+        execution_text = str(item_execution_id or "").strip()
+        if execution_text and execution_text not in normalized_execution_ids:
+            normalized_execution_ids.append(execution_text)
+    execution_id_text = str(execution_id or "").strip() or None
+    if execution_id_text and execution_id_text not in normalized_execution_ids:
+        normalized_execution_ids.insert(0, execution_id_text)
+    if not execution_id_text and normalized_execution_ids:
+        execution_id_text = normalized_execution_ids[0]
 
     return {
         "code": str(item["code"]),
@@ -359,7 +712,8 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "current_price": round(float(executed_price), 1),
         "last_quote_timestamp": buy_time,
         "shares": int(shares),
-        "execution_id": execution_id,
+        "execution_id": execution_id_text,
+        "execution_ids": tuple(normalized_execution_ids),
         "hold_id": None,
         "exchange": None,
         "margin_trade_type": None,
@@ -381,6 +735,16 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "protective_stop_order_id": None,
         "protective_stop_trigger_price": None,
         "protective_stop_status": None,
+        "entry_order_unresolved": False,
+        "entry_order_unresolved_reason": None,
+        "entry_order_submission_status": None,
+        "entry_order_filled_qty": int(shares),
+        "entry_order_remaining_qty": 0,
+        "exit_order_unresolved": False,
+        "exit_order_unresolved_reason": None,
+        "exit_order_submission_status": None,
+        "exit_order_filled_qty": 0,
+        "exit_order_remaining_qty": 0,
     }
 
 
@@ -613,6 +977,10 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
     for position in portfolio:
         code = str(position["code"])
         ownership = str(position.get("ownership", "MANAGED_BY_BOT" if is_sim else "AMBIGUOUS")).upper()
+        if not is_sim and position.get("exit_order_unresolved"):
+            remaining_portfolio.append(position)
+            exit_actions.append(f"SKIP {code} - unresolved exit order pending")
+            continue
         if not is_sim and ownership != "MANAGED_BY_BOT":
             remaining_portfolio.append(position)
             exit_actions.append(f"SKIP {code} - unmanaged position ({ownership})")
@@ -668,6 +1036,30 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             continue
 
         shares = int(position["shares"])
+        stop_order_id = str(position.get("protective_stop_order_id") or "").strip()
+        if not is_sim and stop_order_id:
+            stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
+                broker=broker,
+                position=position,
+                stop_order_id=stop_order_id,
+            )
+            if not stop_cancel_ok:
+                unresolved_position = dict(position)
+                unresolved_position["protective_stop_cancel_unresolved"] = True
+                unresolved_position["exit_order_unresolved"] = True
+                cancel_reason = None
+                if stop_cancel_result is not None:
+                    cancel_reason = getattr(stop_cancel_result, "rejection_reason", None)
+                    cancel_status = getattr(stop_cancel_result, "status", None)
+                    if cancel_reason is None and cancel_status is not None:
+                        cancel_reason = getattr(cancel_status, "value", str(cancel_status))
+                unresolved_position["protective_stop_cancel_reason"] = cancel_reason
+                unresolved_position["exit_order_unresolved_reason"] = cancel_reason or "protective_stop_cancel_unconfirmed"
+                unresolved_position["exit_order_submission_status"] = None if stop_cancel_result is None else getattr(getattr(stop_cancel_result, "status", None), "value", None)
+                unresolved_position["exit_order_remaining_qty"] = shares
+                remaining_portfolio.append(unresolved_position)
+                exit_actions.append(f"SKIP {code} - protective stop cancel unresolved")
+                continue
         if is_sim:
             observed_price = float(modeled_exit_price) * (1.0 - SLIPPAGE_RATE)
             account["cash"] = round(float(account["cash"]) + (observed_price * shares), 4)
@@ -709,7 +1101,15 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             filled_shares = int(details.get("filled_qty", details.get("Qty", 0)) or 0)
             observed_price = float(details.get("average_price", details.get("Price", current_price)) or current_price)
         if filled_shares <= 0:
-            remaining_portfolio.append(position)
+            if isinstance(details, dict) and details.get("unresolved"):
+                unresolved_position = dict(position)
+                unresolved_position["exit_order_unresolved"] = True
+                unresolved_position["exit_order_unresolved_reason"] = details.get("terminal_reason") or details.get("process_state") or "unknown"
+                unresolved_position["exit_order_submission_status"] = details.get("submission_status")
+                unresolved_position["exit_order_remaining_qty"] = int(details.get("remaining_qty", shares) or shares)
+                remaining_portfolio.append(unresolved_position)
+            else:
+                remaining_portfolio.append(position)
             continue
 
         remaining_shares = max(0, shares - filled_shares)
@@ -752,6 +1152,31 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             remaining_position["post_entry_high"] = remaining_position["highest_price"]
             remaining_position["post_entry_low"] = remaining_position["lowest_price"]
             remaining_position["last_quote_timestamp"] = exit_time
+            if isinstance(details, dict) and details.get("unresolved"):
+                remaining_position["exit_order_unresolved"] = True
+                remaining_position["exit_order_unresolved_reason"] = details.get("terminal_reason") or details.get("process_state") or "unknown"
+                remaining_position["exit_order_submission_status"] = details.get("submission_status")
+                remaining_position["exit_order_filled_qty"] = filled_shares
+                remaining_position["exit_order_remaining_qty"] = remaining_shares
+            elif not is_sim and stop_order_id:
+                remaining_position["protective_stop_order_id"] = None
+                remaining_position["protective_stop_trigger_price"] = None
+                remaining_position["protective_stop_status"] = None
+                rearmed_stop_order_id = _arm_daytrade_protective_stop(
+                    broker,
+                    remaining_position,
+                    trigger_price=float(position.get("entry_stop_price", stop_price)),
+                    expected_shares=remaining_shares,
+                )
+                if rearmed_stop_order_id:
+                    exit_actions.append(f"STOP {code} - protective stop rearmed (ID: {rearmed_stop_order_id})")
+                else:
+                    remaining_position["protective_stop_status"] = "failed"
+                    remaining_position["exit_order_unresolved"] = True
+                    remaining_position["exit_order_unresolved_reason"] = "protective_stop_rearm_failed"
+                    remaining_position["exit_order_submission_status"] = "unknown"
+                    remaining_position["exit_order_remaining_qty"] = remaining_shares
+                    exit_actions.append(f"STOP {code} - protective stop rearm failed")
             remaining_portfolio.append(remaining_position)
 
     return remaining_portfolio, exit_actions, account
@@ -761,6 +1186,80 @@ def request_shutdown(reason: str):
     global SHUTDOWN_REQUESTED, SHUTDOWN_REASON
     SHUTDOWN_REQUESTED = True
     SHUTDOWN_REASON = str(reason or "shutdown")
+
+
+def _normalize_shutdown_order_id(order: dict) -> str:
+    return str(order.get("ID") or order.get("OrderId") or order.get("OrderID") or "").strip()
+
+
+def _classify_shutdown_portfolio_items(portfolio: list[dict] | None) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    managed: list[dict] = []
+    unmanaged: list[dict] = []
+    ambiguous: list[dict] = []
+    unknown: list[dict] = []
+    for position in portfolio or []:
+        ownership = str(position.get("ownership", "")).upper()
+        if ownership == "MANAGED_BY_BOT":
+            managed.append(position)
+        elif ownership == "UNMANAGED":
+            unmanaged.append(position)
+        elif ownership == "AMBIGUOUS":
+            ambiguous.append(position)
+        else:
+            unknown.append(position)
+    return managed, unmanaged, ambiguous, unknown
+
+
+def _classify_shutdown_orders(active_orders_info: dict | None, portfolio: list[dict] | None) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    managed_positions, unmanaged_positions, ambiguous_positions, unknown_positions = _classify_shutdown_portfolio_items(portfolio)
+    managed_symbols = {str(position.get("code") or "").replace(".T", "") for position in managed_positions}
+    unmanaged_symbols = {str(position.get("code") or "").replace(".T", "") for position in unmanaged_positions}
+    ambiguous_symbols = {str(position.get("code") or "").replace(".T", "") for position in ambiguous_positions}
+    protected_stop_ids = _collect_protective_stop_order_ids(portfolio or [])
+
+    managed_orders: list[dict] = []
+    unmanaged_orders: list[dict] = []
+    ambiguous_orders: list[dict] = []
+    unknown_orders: list[dict] = []
+
+    if active_orders_info is None:
+        if managed_positions or unmanaged_positions or ambiguous_positions or unknown_positions:
+            unknown_orders.append({
+                "kind": "orders_snapshot_unavailable",
+                "reason": "get_active_orders_failed",
+            })
+        return managed_orders, unmanaged_orders, ambiguous_orders, unknown_orders
+
+    for order in active_orders_info.get("orders", []):
+        if not isinstance(order, dict):
+            continue
+        order_id = _normalize_shutdown_order_id(order)
+        symbol = str(order.get("Symbol") or order.get("symbol") or "").replace(".T", "")
+        if order_id and order_id in protected_stop_ids:
+            managed_orders.append(order)
+        elif symbol and symbol in managed_symbols:
+            managed_orders.append(order)
+        elif symbol and symbol in unmanaged_symbols:
+            unmanaged_orders.append(order)
+        elif symbol and symbol in ambiguous_symbols:
+            ambiguous_orders.append(order)
+        else:
+            unknown_orders.append(order)
+
+    for unresolved_order_id in active_orders_info.get("unresolved_order_ids", []):
+        if unresolved_order_id:
+            unknown_orders.append({
+                "kind": "unresolved_order",
+                "order_id": unresolved_order_id,
+            })
+
+    if active_orders_info.get("has_unknown"):
+        unknown_orders.append({
+            "kind": "has_unknown",
+            "reason": "order_state_unresolved",
+        })
+
+    return managed_orders, unmanaged_orders, ambiguous_orders, unknown_orders
 
 
 def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, reason: str):
@@ -773,23 +1272,55 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
 
     updated_portfolio = list(portfolio or [])
     updated_account = dict(account or {})
+    errors: list[str] = []
+    pre_shutdown_active_orders = None
+    pre_shutdown_managed_orders: list[dict] = []
+    pre_shutdown_unmanaged_orders: list[dict] = []
+    pre_shutdown_ambiguous_orders: list[dict] = []
+    pre_shutdown_unknown_orders: list[dict] = []
+    managed_order_cancel_failed = False
 
     if broker and not is_sim:
         try:
-            active_orders_info = broker.get_active_orders()
-            if active_orders_info is None:
+            pre_shutdown_active_orders = broker.get_active_orders()
+            if pre_shutdown_active_orders is None:
                 print("⚠️ [STOP] 未約定注文の照会に失敗しました。キャンセルを見送ります。")
+                errors.append("active_orders_snapshot_unavailable")
             else:
-                for order in active_orders_info.get("orders", []):
+                (
+                    pre_shutdown_managed_orders,
+                    pre_shutdown_unmanaged_orders,
+                    pre_shutdown_ambiguous_orders,
+                    pre_shutdown_unknown_orders,
+                ) = _classify_shutdown_orders(pre_shutdown_active_orders, updated_portfolio)
+                for order in pre_shutdown_managed_orders:
                     order_id = order.get("ID")
                     if order_id:
-                        broker.cancel_order(order_id)
-                if active_orders_info.get("has_unknown"):
+                        cancel_result = broker.cancel_order(order_id)
+                        cancel_confirmed = bool(cancel_result)
+                        cancel_reason = None
+                        if hasattr(cancel_result, "confirmed"):
+                            cancel_confirmed = bool(getattr(cancel_result, "confirmed", False))
+                            cancel_status = getattr(cancel_result, "status", None)
+                            if not cancel_confirmed and cancel_status is not None:
+                                cancel_reason = getattr(cancel_result, "rejection_reason", None) or getattr(cancel_status, "value", str(cancel_status))
+                        if not cancel_confirmed:
+                            managed_order_cancel_failed = True
+                            errors.append(f"managed_cancel_unconfirmed:{order_id}:{cancel_reason or 'unknown'}")
+                            print(
+                                f"⚠️ [STOP] managed order {order_id} の取消が未確定のため、ポジション解消を保留します。"
+                            )
+                if pre_shutdown_unknown_orders:
                     print("⚠️ [STOP] 終端状態が不明な注文がありました。手動確認が必要です。")
+                if pre_shutdown_unmanaged_orders:
+                    print("⚠️ [STOP] unmanaged 注文が残っているため、安全停止は保留扱いになります。")
+                if pre_shutdown_ambiguous_orders:
+                    print("⚠️ [STOP] 所有権が曖昧な注文が残っているため、安全停止は保留扱いになります。")
         except Exception as exc:
             print(f"⚠️ [STOP] 未約定注文のキャンセル中にエラー: {exc}")
+            errors.append(f"cancel_orders_error:{exc}")
 
-    if updated_portfolio:
+    if updated_portfolio and not managed_order_cancel_failed:
         try:
             updated_portfolio, close_actions, updated_account = close_daytrade_positions(
                 portfolio=updated_portfolio,
@@ -803,6 +1334,9 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
                     print(f"[STOP] {action}")
         except Exception as exc:
             print(f"⚠️ [STOP] ポジション解消中にエラー: {exc}")
+            errors.append(f"close_positions_error:{exc}")
+    elif managed_order_cancel_failed:
+        print("⚠️ [STOP] managed order の取消未確定のため、ポジション解消は見送りました。")
 
     try:
         if broker:
@@ -810,15 +1344,50 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
             broker.save_portfolio(updated_portfolio)
     except Exception as exc:
         print(f"⚠️ [STOP] state 保存に失敗しました: {exc}")
+        errors.append(f"state_save_error:{exc}")
 
+    post_shutdown_active_orders = None
     if broker and not is_sim:
         try:
-            if hasattr(broker, "unregister_all"):
-                broker.unregister_all()
+            post_shutdown_active_orders = broker.get_active_orders()
         except Exception as exc:
-            print(f"⚠️ [STOP] 銘柄解除中にエラー: {exc}")
+            print(f"⚠️ [STOP] 停止後の未約定注文照会に失敗しました: {exc}")
+            errors.append(f"post_shutdown_orders_error:{exc}")
 
-    return updated_portfolio, updated_account
+    managed_positions, unmanaged_positions, ambiguous_positions, unknown_positions = _classify_shutdown_portfolio_items(updated_portfolio)
+    managed_orders, unmanaged_orders, ambiguous_orders, unknown_orders = _classify_shutdown_orders(
+        post_shutdown_active_orders if post_shutdown_active_orders is not None else pre_shutdown_active_orders,
+        updated_portfolio,
+    )
+    success = (
+        not errors
+        and not managed_positions
+        and not managed_orders
+        and not unmanaged_positions
+        and not unmanaged_orders
+        and not ambiguous_positions
+        and not ambiguous_orders
+        and not unknown_positions
+        and not unknown_orders
+    )
+
+    if success:
+        print("✅ [STOP] 安全停止が完了しました。managed state は解放済みです。")
+    else:
+        print("⚠️ [STOP] 安全停止は完了しましたが、reconciliation が残っています。")
+
+    return ShutdownResult(
+        success=success,
+        managed_remaining_orders=tuple(managed_orders),
+        managed_remaining_positions=tuple(managed_positions),
+        unmanaged_orders=tuple(unmanaged_orders),
+        unmanaged_positions=tuple(unmanaged_positions),
+        ambiguous_items=tuple(ambiguous_orders) + tuple(ambiguous_positions),
+        unknown_items=tuple(unknown_orders) + tuple(unknown_positions),
+        errors=tuple(errors),
+        updated_portfolio=updated_portfolio,
+        updated_account=updated_account,
+    )
 
 
 def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
@@ -848,10 +1417,6 @@ def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
 
 # --- シグナルハンドラ ---
 def handle_shutdown(signum, frame):
-    print(f"\n[STOP] シグナル({signum})を受信しました。安全にシャットダウンを開始します...")
-    try:
-        send_discord_notify("[STOP] 【システム通知】運営者による停止操作（Ctrl+C等）を検知しました。ボットを安全に終了します。")
-    except: pass
     request_shutdown(f"signal:{signum}")
 
 # --- メインループ ---
@@ -872,6 +1437,24 @@ def main():
             send_discord_notify(msg)
         except:
             pass
+        try:
+            request_shutdown("unexpected_exception")
+            runtime_state = ACTIVE_RUNTIME_STATE
+            broker = runtime_state.get("broker")
+            if broker is not None:
+                shutdown_result = perform_safe_shutdown(
+                    broker=broker,
+                    portfolio=runtime_state.get("portfolio") or [],
+                    account=runtime_state.get("account") or {},
+                    is_sim=bool(runtime_state.get("is_sim")),
+                    realtime_buffers=runtime_state.get("realtime_buffers") or {},
+                    reason="unexpected_exception",
+                )
+                if shutdown_result.success and not bool(runtime_state.get("is_sim")):
+                    from core.kabu_launcher import terminate_kabu_station
+                    terminate_kabu_station()
+        except Exception as shutdown_exc:
+            print(f"⚠️ [CRITICAL] 予期しない例外後の安全停止に失敗しました: {shutdown_exc}")
         time.sleep(1)
         sys.exit(1)
     finally:
@@ -912,11 +1495,11 @@ def _main_exec():
     try:
         if TRADE_MODE == "KABUCOM_LIVE":
             print("[LIVE] 【本番モード】auカブコム証券 本番API (Port 18080) に接続します")
-            broker = KabucomBroker(is_production=True)
+            broker = KabucomBroker.from_trade_mode(TRADE_MODE)
             is_sim = False
         elif TRADE_MODE == "KABUCOM_TEST":
             print("[TEST] 【テストモード】auカブコム証券 検証用API (Port 18081) に接続します")
-            broker = KabucomBroker(is_production=False)
+            broker = KabucomBroker.from_trade_mode(TRADE_MODE)
             is_sim = False
         else:
             print("[SIM] 【シミュレーションモード】ローカルCSVベースで実行します")
@@ -927,6 +1510,7 @@ def _main_exec():
         print(msg)
         send_discord_notify(msg)
         return
+    _set_active_runtime_state(broker=broker, is_sim=is_sim)
 
     live_order_gate_status = None
     if TRADE_MODE == "KABUCOM_LIVE":
@@ -976,6 +1560,7 @@ def _main_exec():
     watchlist = load_watchlist()
     special_quote_watchlist = {} # { "code": item_dict }
     realtime_buffers = {}
+    _set_active_runtime_state(realtime_buffers=realtime_buffers)
     canceled_orders = {}
     cooling_until = None # [V132] Over-trading prevention (Date based parity)
     breadth_val = 0.5    # [Parity] Market breadth (updated each scan, default neutral)
@@ -986,16 +1571,19 @@ def _main_exec():
     month_start_equity = account_data.get('month_start_equity', 0)
 
     # 初回起動時または月替わり時に月初資産を記録
-    account = merge_account_state(broker.get_account_balance(), account_data)
+    account = merge_account_state(broker.get_account_balance(), account_data, is_sim=is_sim)
     if float(account.get("configured_risk_capital", 0.0) or 0.0) <= 0:
         account["configured_risk_capital"] = float(INITIAL_CASH)
     account.setdefault("realized_pnl_today", float(account.get("realized_pnl_today", 0.0) or 0.0))
+    positions_snapshot_fresh = True
     try:
         initial_portfolio = broker.get_positions()
     except Exception:
         initial_portfolio = []
+        positions_snapshot_fresh = False
     portfolio = list(initial_portfolio)
     initial_total = _resolve_account_equity(account, initial_portfolio, is_sim)
+    _set_active_runtime_state(portfolio=portfolio, account=account)
     if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
         month_start_equity = initial_total
         account['month_start_equity'] = month_start_equity
@@ -1003,6 +1591,39 @@ def _main_exec():
         atomic_write_json(ACCOUNT_FILE, account)
         print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
     account = ensure_daytrade_week_state(account, initial_total, datetime.datetime.now(JST))
+
+    order_journal_replay_summary = build_order_journal_replay_summary()
+    startup_recovery_report = build_startup_recovery_report(
+        portfolio=portfolio,
+        active_orders_info=None,
+        order_journal_summary=order_journal_replay_summary,
+        wallet_snapshot_incomplete=bool(account.get("wallet_snapshot_incomplete")),
+    )
+    account["order_journal_unresolved_count"] = order_journal_replay_summary.unresolved_count
+    account["order_journal_total_intents"] = len(order_journal_replay_summary.intents)
+    account["order_journal_unresolved_keys"] = [
+        intent.tracking_key for intent in order_journal_replay_summary.unresolved_intents[:25]
+    ]
+    account["startup_recovery_needs_manual_review"] = startup_recovery_report.needs_manual_review
+    account["startup_recovery_blocking_reasons"] = list(startup_recovery_report.blocking_reasons[:25])
+    if order_journal_replay_summary.has_unresolved:
+        print(
+            "⚠️ [Journal Replay] 未解決の注文 intent が "
+            f"{order_journal_replay_summary.unresolved_count} 件あります。"
+            "新規 entry は保留されます。"
+        )
+        for intent in order_journal_replay_summary.unresolved_intents[:5]:
+            print(
+                "⚠️ [Journal Replay] "
+                f"{intent.tracking_key} / event={intent.latest_event} / reason={intent.unresolved_reason}"
+            )
+    else:
+        print("✅ [Journal Replay] 未解決の注文 intent はありません。")
+    if startup_recovery_report.needs_manual_review:
+        print("⚠️ [Startup Recovery] manual review が必要です:")
+        for reason in startup_recovery_report.blocking_reasons[:5]:
+            print(f"⚠️ [Startup Recovery] - {reason}")
+
     atomic_write_json(ACCOUNT_FILE, account)
 
     while True:
@@ -1013,7 +1634,7 @@ def _main_exec():
             request_shutdown("stop.txt")
 
         if SHUTDOWN_REQUESTED:
-            portfolio, account = perform_safe_shutdown(
+            shutdown_result = perform_safe_shutdown(
                 broker=broker,
                 portfolio=portfolio,
                 account=account,
@@ -1021,8 +1642,12 @@ def _main_exec():
                 realtime_buffers=realtime_buffers,
                 reason=SHUTDOWN_REASON,
             )
-            if not is_sim:
+            portfolio = shutdown_result.updated_portfolio
+            account = shutdown_result.updated_account
+            if not is_sim and shutdown_result.success:
                 terminate_kabu_station()
+            elif not is_sim:
+                print("⚠️ [STOP] 安全停止のreconciliationが完了しないため、kabuステーション終了は見送ります。")
             break
 
         loop_start_time = time.time()
@@ -1046,7 +1671,7 @@ def _main_exec():
         if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
             print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
             send_discord_notify("🏁 【業務終了】大引けを過ぎたため運用を終了しました。")
-            portfolio, account = perform_safe_shutdown(
+            shutdown_result = perform_safe_shutdown(
                 broker=broker,
                 portfolio=portfolio,
                 account=account,
@@ -1054,10 +1679,15 @@ def _main_exec():
                 realtime_buffers=realtime_buffers,
                 reason="closing_time",
             )
-            if not is_sim:
+            portfolio = shutdown_result.updated_portfolio
+            account = shutdown_result.updated_account
+            if not is_sim and shutdown_result.success:
                 terminate_kabu_station()
+            elif not is_sim:
+                print("⚠️ [STOP] 大引けの安全停止が未解決のため、kabuステーション終了は見送ります。")
             break
 
+        phase_entry_blocked = False
         if not DEBUG_MODE:
             is_weekend = server_datetime.weekday() >= 5
             is_holiday = jpholiday.is_holiday(server_datetime.date())
@@ -1066,9 +1696,10 @@ def _main_exec():
                 break
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
-                time.sleep(MONITOR_INTERVAL_SEC)
-                continue
+                phase_entry_blocked = True
 
+        active_orders_info = None
+        active_orders_block_entry = False
         if not is_sim:
             try:
                 active_orders_info = broker.get_active_orders()
@@ -1076,22 +1707,22 @@ def _main_exec():
                     msg = "⚠️ 未約定注文の取得に失敗しました。新規エントリーを保留します。"
                     print(msg)
                     send_discord_notify(msg)
-                    time.sleep(MONITOR_INTERVAL_SEC)
-                    continue
-                if active_orders_info.get("has_unknown"):
-                    msg = "⚠️ 注文状態が不明な注文があります。reconciliationが必要なため新規エントリーを保留します。"
-                    print(msg)
-                    send_discord_notify(msg)
-                    time.sleep(MONITOR_INTERVAL_SEC)
-                    continue
-                active_orders = active_orders_info.get("orders", [])
-                protected_stop_order_ids = _collect_protective_stop_order_ids(portfolio)
-                if active_orders:
+                    active_orders_block_entry = True
+                else:
+                    protected_stop_order_ids = _collect_protective_stop_order_ids(portfolio)
+                    active_orders = active_orders_info.get("orders", [])
+                    blocking_unknown_order_ids = [
+                        order_id
+                        for order_id in active_orders_info.get("unresolved_order_ids", [])
+                        if order_id not in protected_stop_order_ids
+                    ]
+                    blocking_orders = []
                     has_stuck_order = False
                     for order in active_orders:
                         order_id = order.get('ID')
                         if order_id and order_id in protected_stop_order_ids:
                             continue
+                        blocking_orders.append(order)
                         recv_time_str = order.get('RecvTime')
                         if order_id and recv_time_str:
                             try:
@@ -1100,29 +1731,55 @@ def _main_exec():
                                 duration_mins = (datetime.datetime.now(JST) - order_time).total_seconds() / 60
                                 if duration_mins >= 5.0:
                                     cancel_count = canceled_orders.get(order_id, 0)
-                                    if cancel_count >= 3: continue
+                                    if cancel_count >= 3:
+                                        continue
                                     broker.cancel_order(order_id)
                                     canceled_orders[order_id] = cancel_count + 1
                                     has_stuck_order = True
                             except: pass
+                    if blocking_unknown_order_ids:
+                        msg = (
+                            "⚠️ 注文状態が不明な注文があります。"
+                            "reconciliationが必要なため新規エントリーを保留します。"
+                        )
+                        print(msg)
+                        send_discord_notify(msg)
+                        active_orders_block_entry = True
                     if has_stuck_order:
-                        time.sleep(10)
-                        continue
-                    print(f"[WARNING] 未約定の注文が {len(active_orders)} 件あります。待機します。")
-                    time.sleep(MONITOR_INTERVAL_SEC)
-                    continue
-            except: pass
+                        active_orders_block_entry = True
+                    if blocking_orders:
+                        print(f"[WARNING] 未約定の注文が {len(blocking_orders)} 件あります。待機します。")
+                        active_orders_block_entry = True
+            except Exception as exc:
+                print(f"⚠️ 未約定注文の取得中に例外が発生しました: {exc}")
+                active_orders_block_entry = True
 
         try:
             account = merge_account_state(
                 broker.get_account_balance(),
                 safe_read_json(ACCOUNT_FILE, default={}) or {},
+                is_sim=is_sim,
             )
             portfolio = broker.get_positions()
         except Exception as e:
             print(f"[WARNING] 口座情報取得エラー: {e}")
             time.sleep(MONITOR_INTERVAL_SEC)
             continue
+
+        current_order_journal_replay_summary = build_order_journal_replay_summary()
+        loop_recovery_report = build_startup_recovery_report(
+            portfolio=portfolio,
+            active_orders_info=active_orders_info,
+            order_journal_summary=current_order_journal_replay_summary,
+            wallet_snapshot_incomplete=bool(account.get("wallet_snapshot_incomplete")),
+        )
+        account["order_journal_unresolved_count"] = current_order_journal_replay_summary.unresolved_count
+        account["order_journal_total_intents"] = len(current_order_journal_replay_summary.intents)
+        account["order_journal_unresolved_keys"] = [
+            intent.tracking_key for intent in current_order_journal_replay_summary.unresolved_intents[:25]
+        ]
+        account["startup_recovery_needs_manual_review"] = loop_recovery_report.needs_manual_review
+        account["startup_recovery_blocking_reasons"] = list(loop_recovery_report.blocking_reasons[:25])
 
         # --- [Step 3.2] 特注監視（特別気配・価格未定）銘柄の高頻度チェック ---
         force_scan = False
@@ -1146,6 +1803,7 @@ def _main_exec():
         trade_logs = [] 
 
         boards = {}
+        registry_sync_ok = True
         try:
             watch_plan = build_daytrade_watch_plan(
                 watchlist=watchlist,
@@ -1153,12 +1811,13 @@ def _main_exec():
             )
             current_targets = watch_plan["current_targets"]
             already_tracked = set(realtime_buffers.keys())
-            new_codes = current_targets - already_tracked
-            removed_codes = (already_tracked - current_targets) - {'1321'}
-            
-            if not is_sim:
-                if new_codes: broker.register_symbols(list(new_codes))
-                if removed_codes: broker.unregister_symbols(list(removed_codes))
+            registry_sync_ok, new_codes, removed_codes = sync_daytrade_registry(
+                broker=broker,
+                current_targets=current_targets,
+                already_tracked=already_tracked,
+                market_index_code="1321",
+                is_sim=is_sim,
+            )
             
             for code in new_codes:
                 print(f"[NEW] 新規銘柄をバッファに追加: {code}")
@@ -1194,6 +1853,7 @@ def _main_exec():
                             low_price=b_info.get('low'),
                         )
         except Exception as e:
+            registry_sync_ok = False
             print(f"[WARNING] バッファ同期エラー: {e}")
         if boards:
             record_intraday_snapshots(server_datetime, boards, realtime_buffers)
@@ -1240,15 +1900,47 @@ def _main_exec():
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
         broker.save_account(account)
         broker.save_portfolio(portfolio)
+        _set_active_runtime_state(portfolio=portfolio, account=account, realtime_buffers=realtime_buffers)
 
         should_scan = True
         if monthly_risk_blocked and not portfolio: should_scan = False  # Block fresh entries, but still allow liquidation.
         elif not should_scan_override: should_scan = False
+        elif phase_entry_blocked: should_scan = False
+        elif active_orders_block_entry: should_scan = False
         elif not is_sim and account.get("wallet_snapshot_incomplete"): should_scan = False
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
+        elif not is_sim and any(position.get("entry_order_unresolved") or position.get("exit_order_unresolved") for position in portfolio): should_scan = False
+        elif not is_sim and loop_recovery_report.needs_manual_review: should_scan = False
         elif live_order_gate_status is not None and not live_order_gate_status.allowed: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
+
+        entry_authorization_context = EntryAuthorizationContext(
+            production_endpoint=TRADE_MODE == "KABUCOM_LIVE",
+            approved_manifest_valid=bool(live_order_gate_status.allowed) if live_order_gate_status is not None else True,
+            reconciliation_clean=not loop_recovery_report.needs_manual_review,
+            unresolved_order_count=loop_recovery_report.active_orders_unknown_count,
+            ambiguous_position_count=loop_recovery_report.ambiguous_position_count,
+            wallet_snapshot_fresh=is_sim or not loop_recovery_report.wallet_snapshot_incomplete,
+            positions_snapshot_fresh=is_sim or positions_snapshot_fresh,
+            orders_snapshot_fresh=is_sim or active_orders_info is not None,
+            quote_fresh=is_sim or _is_board_quote_snapshot_fresh(boards, server_datetime),
+            registry_ready=is_sim or registry_sync_ok,
+            critical_state_valid=not loop_recovery_report.needs_manual_review,
+            session_allows_entry=(
+                should_scan_override
+                and not phase_entry_blocked
+                and not monthly_risk_blocked
+                and now_time >= datetime.time(9, 30)
+                and now_time < ENTRY_SCAN_CUTOFF_TIME
+            ),
+            clock_healthy=server_datetime is not None,
+            shutdown_requested=SHUTDOWN_REQUESTED,
+        )
+        entry_authorization = evaluate_entry_authorization(entry_authorization_context)
+        if not entry_authorization.allowed:
+            print(f"🛑 [ENTRY-AUTH] 新規エントリーを保留しました: {entry_authorization.reason}")
+            should_scan = False
         
         if should_scan and not force_scan:
              if time.time() - last_scan_time < SCAN_INTERVAL_SEC:
@@ -1467,15 +2159,16 @@ def _main_exec():
                             inverse_day_buying_power = max(0.0, inverse_day_buying_power - (exec_p * shares))
                         else:
                             day_buying_power = max(0.0, day_buying_power - (exec_p * shares))
-                        portfolio.append(
-                            build_daytrade_position_record(
-                                item=item,
-                                executed_price=exec_p,
-                                shares=shares,
-                                buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                execution_id=None,
+                            portfolio.append(
+                                build_daytrade_position_record(
+                                    item=item,
+                                    executed_price=exec_p,
+                                    shares=shares,
+                                    buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                                    execution_id=None,
+                                    execution_ids=(),
+                                )
                             )
-                        )
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                         opened_count += 1
                     else:
@@ -1493,7 +2186,14 @@ def _main_exec():
                                 shares=actual_qty,
                                 buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                                 execution_id=execution_id,
+                                execution_ids=execution_ids,
                             )
+                            if isinstance(details, dict) and details.get("unresolved"):
+                                position_record["entry_order_unresolved"] = True
+                                position_record["entry_order_unresolved_reason"] = details.get("unresolved_reason") or details.get("process_state") or "unknown"
+                                position_record["entry_order_submission_status"] = details.get("submission_status")
+                                position_record["entry_order_filled_qty"] = actual_qty
+                                position_record["entry_order_remaining_qty"] = int(details.get("remaining_qty", max(0, shares - actual_qty)) or max(0, shares - actual_qty))
                             portfolio.append(position_record)
                             broker.save_portfolio(portfolio)
                             broker.save_account(account)
@@ -1504,7 +2204,12 @@ def _main_exec():
                                 expected_shares=actual_qty,
                             )
                             broker.save_portfolio(portfolio)
-                            actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                            if position_record.get("entry_order_unresolved"):
+                                actions_taken.append(
+                                    f"BUY {item['code']} - Daytrade entry unresolved (@{exec_p:,.1f})"
+                                )
+                            else:
+                                actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                             if stop_order_id:
                                 actions_taken.append(f"STOP {item['code']} - protective stop armed (ID: {stop_order_id})")
                             opened_count += 1
