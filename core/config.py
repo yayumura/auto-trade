@@ -89,6 +89,7 @@ PORTFOLIO_FILE      = str(DATA_ROOT / "portfolio.json")
 HISTORY_FILE        = str(DATA_ROOT / "trade_history.csv")
 ACCOUNT_FILE        = str(DATA_ROOT / "account.json")
 EXECUTION_LOG_FILE  = str(DATA_ROOT / "execution_log.csv")
+EXECUTION_AUDIT_LOG_FILE = str(DATA_ROOT / "execution_audit_log.jsonl")
 EXCLUSION_CACHE_FILE = str(DATA_ROOT / "invalid_tickers.json")
 INSIDER_FILE        = str(DATA_ROOT / "insider_exclusion.json")
 WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
@@ -178,9 +179,12 @@ def build_runtime_live_order_config_snapshot() -> dict:
 
 
 def compute_runtime_live_order_config_hash(snapshot: dict | None = None) -> str:
-    """実行設定スナップショットの SHA256 ハッシュを返す。"""
-    payload = snapshot if snapshot is not None else build_runtime_live_order_config_snapshot()
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    """ライブ承認用マニフェストの SHA256 ハッシュを返す。"""
+    from core.live_approval_manifest import compute_live_approval_manifest_hash
+
+    if snapshot is None:
+        return compute_live_approval_manifest_hash()
+    raw = json.dumps(snapshot, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 

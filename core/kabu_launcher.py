@@ -3,7 +3,16 @@ import subprocess
 import os
 import psutil
 import requests
-from core.config import KABUCOM_LOGIN_PASSWORD, TRADE_MODE, is_placeholder_secret
+from email.utils import parsedate_to_datetime
+
+from core.config import (
+    KABUCOM_API_PASSWORD,
+    KABUCOM_LOGIN_PASSWORD,
+    KABUCOM_PORT_LIVE,
+    KABUCOM_PORT_TEST,
+    TRADE_MODE,
+    is_placeholder_secret,
+)
 from core.log_setup import send_discord_notify
 
 def is_admin():
@@ -13,6 +22,80 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except:
         return False
+
+
+def _resolve_kabu_port() -> int:
+    return KABUCOM_PORT_LIVE if TRADE_MODE == "KABUCOM_LIVE" else KABUCOM_PORT_TEST
+
+
+def _resolve_kabu_base_url() -> str:
+    return f"http://localhost:{_resolve_kabu_port()}/kabusapi"
+
+
+def is_api_port_reachable(timeout_sec=60, silent=False) -> bool:
+    """kabuステーションのHTTPポートが応答するかを確認する。401/403 でも疎通としては成功とみなす。"""
+    port = _resolve_kabu_port()
+    url = f"http://localhost:{port}/kabusapi/board/7203@1"
+
+    if not silent:
+        print(f"⏳ APIポートの疎通を確認中 (Port {port})...（最長{timeout_sec}秒）")
+
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < timeout_sec:
+        try:
+            res = requests.get(url, timeout=2)
+            if res is not None:
+                if not silent:
+                    print("✨ [Success] APIポートの応答を確認しました。")
+                return True
+        except requests.exceptions.ConnectionError:
+            pass
+        except Exception:
+            pass
+        time.sleep(2)
+
+    if not silent:
+        print("❌ APIポートの疎通確認がタイムアウトしました。")
+    return False
+
+
+def is_api_authenticated_ready(timeout_sec=60, silent=False) -> bool:
+    """kabuステーションAPIに認証でき、業務 API を使える状態かを確認する。"""
+    if is_placeholder_secret(KABUCOM_API_PASSWORD):
+        if not silent:
+            print("⚠️ API認証確認に必要な KABUCOM_API_PASSWORD が未設定です。")
+        return False
+
+    base_url = _resolve_kabu_base_url()
+    url = f"{base_url}/token"
+    headers = {"Content-Type": "application/json"}
+    data = {"APIPassword": KABUCOM_API_PASSWORD}
+
+    if not silent:
+        print(f"⏳ API認証の完了を確認中 (Port {_resolve_kabu_port()})...（最長{timeout_sec}秒）")
+
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < timeout_sec:
+        try:
+            res = requests.post(url, headers=headers, json=data, timeout=5)
+            if res is not None and res.status_code == 200:
+                try:
+                    token = res.json().get("Token")
+                except Exception:
+                    token = None
+                if token:
+                    if not silent:
+                        print("✨ [Success] API認証済みであることを確認しました。")
+                    return True
+        except requests.exceptions.ConnectionError:
+            pass
+        except Exception:
+            pass
+        time.sleep(2)
+
+    if not silent:
+        print("❌ API認証完了の確認がタイムアウトしました。")
+    return False
 
 def ensure_kabu_station_running():
     """
@@ -40,7 +123,7 @@ def ensure_kabu_station_running():
             # プロセス名も KabuS.exe に合わせる
             if proc.info['name'] in ['KabuS.exe', 'kabu.station.exe']:
                 print(f"✅ kabuステーション({proc.info['name']})は既に起動しています。")
-                return _wait_for_api_server()
+                return _wait_for_manual_login_and_api(timeout_mins=10)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
@@ -100,10 +183,10 @@ def ensure_kabu_station_running():
     # ログインウィンドウが出るのを待つ
     login_window = None
     timeout = 60
-    start_time = time.time()
+    start_time = time.monotonic()
     print(f"⏳ ログインウィンドウを探索中 (PIDベース)...")
     
-    while time.time() - start_time < timeout:
+    while time.monotonic() - start_time < timeout:
         try:
             # PIDを取得
             target_pid = None
@@ -166,12 +249,12 @@ def ensure_kabu_station_running():
 
 def _wait_for_manual_login_and_api(timeout_mins=5):
     """ユーザーが手動でログインを完了し、APIサーバーが立ち上がるのを待つ"""
-    print(f"⏳ ログイン完了（およびAPIサーバーの起動）を待機しています（最長{timeout_mins}分）...")
+    print(f"⏳ ログイン完了（およびAPI認証の完了）を待機しています（最長{timeout_mins}分）...")
     print("🔔 ワンタイムパスワード等の入力が必要な場合は、kabuステーションの画面で操作を行ってください。")
     
-    start_time = time.time()
-    while time.time() - start_time < (timeout_mins * 60):
-        if _wait_for_api_server(timeout_sec=10, silent=True):
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < (timeout_mins * 60):
+        if is_api_authenticated_ready(timeout_sec=10, silent=True):
             return True
         time.sleep(5)
     
@@ -179,33 +262,8 @@ def _wait_for_manual_login_and_api(timeout_mins=5):
     return False
 
 def _wait_for_api_server(timeout_sec=60, silent=False):
-    """APIサーバー（Port 18080/18081）の起動をポーリングで待機する"""
-    port = 18080 if TRADE_MODE == "KABUCOM_LIVE" else 18081
-    # 文書化された info API を使い、HTTP 応答が返ること自体を起動確認とする。
-    # 認証なしでは 401 になるが、それでもサーバー稼働の確認には十分。
-    url = f"http://localhost:{port}/kabusapi/board/7203@1"
-    
-    start_wait = time.time()
-    if not silent:
-        print(f"⏳ APIサーバーの起動を待機中 (Port {port})への疎通確認を開始します（最長{timeout_sec}秒）...")
-    
-    start_time = time.time()
-    while time.time() - start_time < timeout_sec:
-        try:
-            res = requests.get(url, timeout=2)
-            if res is not None:
-                if not silent:
-                    print(f"✨ [Success] APIサーバーの稼働を確認しました。")
-                return True
-            time.sleep(2)
-        except requests.exceptions.ConnectionError:
-            time.sleep(2)
-        except Exception:
-            time.sleep(2)
-            
-    if not silent:
-        print("❌ APIサーバーの起動確認がタイムアウトしました。")
-    return False
+    """APIサーバー（Port 18080/18081）の起動をポーリングで待機する。"""
+    return is_api_port_reachable(timeout_sec=timeout_sec, silent=silent)
 
 def terminate_kabu_station():
     """
@@ -239,6 +297,8 @@ def terminate_kabu_station():
 
 def check_api_health():
     """
-    APIサーバーが現在稼働中（ログイン済み）かを確認する。
+    APIサーバーが稼働し、認証済みで業務 API を使えるかを確認する。
     """
-    return _wait_for_api_server(timeout_sec=2, silent=True)
+    if not is_api_port_reachable(timeout_sec=2, silent=True):
+        return False
+    return is_api_authenticated_ready(timeout_sec=2, silent=True)

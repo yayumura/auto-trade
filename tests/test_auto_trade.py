@@ -1,6 +1,12 @@
+import json
+import os
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import auto_trade
 from auto_trade import (
@@ -9,8 +15,10 @@ from auto_trade import (
     close_daytrade_positions_by_signal,
     compute_daytrade_snapshot,
     is_inverse_only_candidate_set,
+    sync_daytrade_registry,
 )
 from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
+from core.kabucom_order_state import CancelResult, CancelStatus
 
 
 def _build_snapshot_df():
@@ -92,6 +100,38 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["protective_stop_order_id"] is None
 
 
+def test_sync_daytrade_registry_tracks_success_and_failure():
+    class _Broker:
+        def __init__(self, register_result=True, unregister_result=True):
+            self.register_result = register_result
+            self.unregister_result = unregister_result
+            self.registered = []
+            self.unregistered = []
+
+        def register_symbols(self, symbols):
+            self.registered.append(list(symbols))
+            return self.register_result
+
+        def unregister_symbols(self, symbols):
+            self.unregistered.append(list(symbols))
+            return self.unregister_result
+
+    broker = _Broker(register_result=True, unregister_result=False)
+    ok, new_codes, removed_codes = sync_daytrade_registry(
+        broker=broker,
+        current_targets={"1000", "1321"},
+        already_tracked={"1321", "9999"},
+        market_index_code="1321",
+        is_sim=False,
+    )
+
+    assert ok is False
+    assert new_codes == {"1000"}
+    assert removed_codes == {"9999"}
+    assert broker.registered == [["1000"]]
+    assert broker.unregistered == [["9999"]]
+
+
 def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id():
     record = build_daytrade_position_record(
         {
@@ -121,6 +161,8 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
                     "exchange": 1,
                     "margin_trade_type": 3,
                     "shares": 300,
+                    "hold_qty": 300,
+                    "available_qty": 300,
                 }
             ]
 
@@ -134,7 +176,7 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
                 "exchange": exchange,
                 "margin_trade_type": margin_trade_type,
             })
-            return "STOP-1"
+            return SimpleNamespace(broker_order_id="STOP-1", status="accepted")
 
     stop_order_id = auto_trade._arm_daytrade_protective_stop(
         _Broker(),
@@ -157,6 +199,414 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
         "exchange": 1,
         "margin_trade_type": 3,
     }
+
+
+def test_arm_daytrade_protective_stop_requires_exact_execution_id_match():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+    )
+
+    class _Broker:
+        def get_positions(self):
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-2",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                    "hold_qty": 300,
+                    "available_qty": 300,
+                }
+            ]
+
+        def execute_stop_order(self, *args, **kwargs):
+            raise AssertionError("execute_stop_order should not be called without an exact execution_id match")
+
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) is None
+
+
+def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_ids_list():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+        execution_ids=("EX-1", "EX-2"),
+    )
+
+    class _Broker:
+        def get_positions(self):
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-2",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                    "hold_qty": 300,
+                    "available_qty": 300,
+                }
+            ]
+
+        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
+            return SimpleNamespace(broker_order_id="STOP-1", status="accepted")
+
+    assert record["execution_ids"] == ("EX-1", "EX-2")
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) == "STOP-1"
+
+
+def test_arm_daytrade_protective_stop_refuses_when_hold_qty_is_unknown():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+    )
+
+    class _Broker:
+        def get_positions(self):
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                    "hold_qty": None,
+                    "available_qty": None,
+                }
+            ]
+
+        def execute_stop_order(self, *args, **kwargs):
+            raise AssertionError("execute_stop_order should not be called when hold_qty is unknown")
+
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) is None
+
+
+def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_and_rearms_partial_remainder():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 105.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 300,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+        "execution_id": "EX-1",
+        "hold_id": "HOLD-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_trigger_price": 98.0,
+        "protective_stop_status": "armed",
+        "ownership": "MANAGED_BY_BOT",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        100.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=105.0,
+        low_price=99.5,
+    )
+
+    call_order = []
+
+    class _Broker:
+        def __init__(self):
+            self.positions = [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 150,
+                    "hold_qty": 150,
+                    "available_qty": 150,
+                }
+            ]
+
+        def cancel_order(self, order_id):
+            call_order.append(("cancel_order", order_id))
+            return CancelResult(
+                status=CancelStatus.ACCEPTED,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=True,
+            )
+
+        def execute_chase_order(self, code, shares, side, atr=0):
+            call_order.append(("execute_chase_order", code, shares, side))
+            assert shares == 300
+            self.positions[0]["shares"] = 150
+            self.positions[0]["hold_qty"] = 150
+            self.positions[0]["available_qty"] = 150
+            return {
+                "filled_qty": 150,
+                "average_price": 101.0,
+                "remaining_qty": 150,
+                "unresolved": False,
+                "execution_ids": ("EX-1",),
+                "execution_id": "EX-1",
+                "submission_status": "accepted",
+                "process_state": "terminal",
+            }
+
+        def get_positions(self):
+            call_order.append(("get_positions", None))
+            return list(self.positions)
+
+        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
+            call_order.append(("execute_stop_order", code, shares, side, trigger_price, hold_id, exchange, margin_trade_type))
+            return SimpleNamespace(broker_order_id="STOP-2", status="accepted")
+
+        def log_trade(self, trade_record):
+            call_order.append(("log_trade", trade_record["side"], trade_record["shares"]))
+
+    remaining_portfolio, exit_actions, updated_account = auto_trade.close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0, "realized_pnl_today": 0.0},
+        broker=_Broker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert call_order[0] == ("cancel_order", "STOP-1")
+    assert any(item[0] == "execute_chase_order" for item in call_order)
+    assert any(item[0] == "execute_stop_order" for item in call_order)
+    assert any(action.startswith("STOP 1000 - protective stop rearmed") for action in exit_actions)
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["shares"] == 150
+    assert remaining_portfolio[0]["protective_stop_order_id"] == "STOP-2"
+    assert remaining_portfolio[0]["protective_stop_status"] == "armed"
+    assert updated_account["realized_pnl_today"] > 0
+
+
+def test_close_daytrade_positions_by_signal_marks_partial_remainder_unresolved_when_rearm_fails():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 105.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 300,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+        "execution_id": "EX-1",
+        "hold_id": "HOLD-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_trigger_price": 98.0,
+        "protective_stop_status": "armed",
+        "ownership": "MANAGED_BY_BOT",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        100.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=105.0,
+        low_price=99.5,
+    )
+
+    class _Broker:
+        def __init__(self):
+            self.positions = [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 150,
+                    "hold_qty": 150,
+                    "available_qty": 150,
+                }
+            ]
+
+        def cancel_order(self, order_id):
+            return CancelResult(
+                status=CancelStatus.ACCEPTED,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=True,
+            )
+
+        def execute_chase_order(self, code, shares, side, atr=0):
+            self.positions[0]["shares"] = 150
+            self.positions[0]["hold_qty"] = 150
+            self.positions[0]["available_qty"] = 150
+            return {
+                "filled_qty": 150,
+                "average_price": 101.0,
+                "remaining_qty": 150,
+                "unresolved": False,
+                "execution_ids": ("EX-1",),
+                "execution_id": "EX-1",
+                "submission_status": "accepted",
+                "process_state": "terminal",
+            }
+
+        def get_positions(self):
+            return list(self.positions)
+
+        def execute_stop_order(self, *args, **kwargs):
+            return SimpleNamespace(status="accepted")
+
+        def log_trade(self, trade_record):
+            pass
+
+    remaining_portfolio, exit_actions, updated_account = auto_trade.close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0, "realized_pnl_today": 0.0},
+        broker=_Broker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["exit_order_unresolved"] is True
+    assert remaining_portfolio[0]["exit_order_unresolved_reason"] == "protective_stop_rearm_failed"
+    assert remaining_portfolio[0]["exit_order_remaining_qty"] == 150
+    assert any(action.startswith("STOP 1000 - protective stop rearm failed") for action in exit_actions)
+    assert updated_account["realized_pnl_today"] > 0
+
+
+def test_close_daytrade_positions_by_signal_skips_exit_when_protective_stop_cancel_is_unconfirmed():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 105.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 300,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+        "execution_id": "EX-1",
+        "hold_id": "HOLD-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_status": "armed",
+        "ownership": "MANAGED_BY_BOT",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        100.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=105.0,
+        low_price=99.5,
+    )
+
+    class _Broker:
+        def cancel_order(self, order_id):
+            return CancelResult(
+                status=CancelStatus.UNKNOWN,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=False,
+                rejection_reason="cancel_not_confirmed",
+            )
+
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called until the linked stop is cleared")
+
+    remaining_portfolio, exit_actions, updated_account = auto_trade.close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0, "realized_pnl_today": 0.0},
+        broker=_Broker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["protective_stop_cancel_unresolved"] is True
+    assert remaining_portfolio[0]["protective_stop_cancel_reason"] == "cancel_not_confirmed"
+    assert remaining_portfolio[0]["exit_order_unresolved"] is True
+    assert any(action.startswith("SKIP 1000 - protective stop cancel unresolved") for action in exit_actions)
+    assert updated_account["realized_pnl_today"] == 0.0
 
 
 def test_daytrade_primary_failed_runup_exit_uses_live_session_high():
@@ -301,6 +751,71 @@ def test_close_daytrade_positions_skips_unmanaged_live_positions():
     assert updated_account["cash"] == 1_000_000.0
 
 
+def test_close_daytrade_positions_blocks_live_exit_when_protective_stop_cancel_is_unconfirmed():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "buy_atr": 2.0,
+        "stop_mult": 1.0,
+        "target_mult": 1.5,
+        "entry_stop_price": 98.0,
+        "entry_target_price": 103.0,
+        "execution_id": "EX-1",
+        "hold_id": "HOLD-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_status": "armed",
+        "ownership": "MANAGED_BY_BOT",
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        95.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def cancel_order(self, order_id):
+            return CancelResult(
+                status=CancelStatus.UNKNOWN,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=False,
+                rejection_reason="cancel_not_confirmed",
+            )
+
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called until the linked stop is cleared")
+
+    remaining_portfolio, sell_actions, updated_account = auto_trade.close_daytrade_positions(
+        portfolio=[position],
+        account={"cash": 1_000_000.0, "realized_pnl_today": 0.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["protective_stop_cancel_unresolved"] is True
+    assert remaining_portfolio[0]["exit_order_unresolved"] is True
+    assert remaining_portfolio[0]["exit_order_unresolved_reason"] == "cancel_not_confirmed"
+    assert any(action.startswith("SKIP 1000 - protective stop cancel unresolved") for action in sell_actions)
+    assert updated_account["realized_pnl_today"] == 0.0
+
+
 def test_close_daytrade_positions_by_signal_skips_unmanaged_live_positions():
     position = {
         "code": "1000",
@@ -343,17 +858,478 @@ def test_close_daytrade_positions_by_signal_skips_unmanaged_live_positions():
     assert updated_account["cash"] == 1_000_000.0
 
 
+def test_close_daytrade_positions_by_signal_skips_pending_unresolved_exit_orders():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "exit_order_unresolved": True,
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        95.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called while an exit order is unresolved")
+
+    remaining_portfolio, exit_actions, updated_account = auto_trade.close_daytrade_positions_by_signal(
+        portfolio=[position],
+        account={"cash": 1_000_000.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["code"] == "1000"
+    assert exit_actions and exit_actions[0].startswith("SKIP 1000 - unresolved exit order pending")
+    assert updated_account["cash"] == 1_000_000.0
+
+
+def test_close_daytrade_positions_skips_pending_unresolved_exit_orders():
+    position = {
+        "code": "1000",
+        "name": "Foo",
+        "setup_type": "primary",
+        "buy_time": "2026-04-21 09:03:00",
+        "buy_price": 100.0,
+        "highest_price": 101.0,
+        "lowest_price": 99.2,
+        "current_price": 100.0,
+        "shares": 100,
+        "exit_order_unresolved": True,
+    }
+
+    buffer = RealtimeBuffer("1000")
+    buffer.update(
+        95.0,
+        1_000,
+        pd.Timestamp("2026-04-21 10:15:00"),
+        open_price=100.0,
+        high_price=120.0,
+        low_price=95.0,
+    )
+
+    class _FailIfCalledBroker:
+        def execute_chase_order(self, *args, **kwargs):
+            raise AssertionError("execute_chase_order should not be called while an exit order is unresolved")
+
+    remaining_portfolio, sell_actions, updated_account = auto_trade.close_daytrade_positions(
+        portfolio=[position],
+        account={"cash": 1_000_000.0},
+        broker=_FailIfCalledBroker(),
+        is_sim=False,
+        realtime_buffers={"1000": buffer},
+    )
+
+    assert len(remaining_portfolio) == 1
+    assert remaining_portfolio[0]["code"] == "1000"
+    assert sell_actions and sell_actions[0].startswith("SKIP 1000 - unresolved exit order pending")
+    assert updated_account["cash"] == 1_000_000.0
+
+
 def test_handle_shutdown_marks_shutdown_requested_without_exiting():
     prev_requested = auto_trade.SHUTDOWN_REQUESTED
     prev_reason = auto_trade.SHUTDOWN_REASON
     try:
         auto_trade.SHUTDOWN_REQUESTED = False
         auto_trade.SHUTDOWN_REASON = ""
-        with patch("auto_trade.send_discord_notify") as mocked_notify:
-            auto_trade.handle_shutdown(15, None)
+        auto_trade.handle_shutdown(15, None)
         assert auto_trade.SHUTDOWN_REQUESTED is True
         assert auto_trade.SHUTDOWN_REASON == "signal:15"
-        mocked_notify.assert_called_once()
     finally:
         auto_trade.SHUTDOWN_REQUESTED = prev_requested
         auto_trade.SHUTDOWN_REASON = prev_reason
+
+
+def test_perform_safe_shutdown_returns_structured_result_when_reconciliation_is_clean():
+    class _Broker:
+        def __init__(self):
+            self.cancelled = []
+            self.saved_account = None
+            self.saved_portfolio = None
+
+        def get_active_orders(self):
+            return {"orders": [], "has_unknown": False, "unresolved_order_ids": []}
+
+        def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return True
+
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+    broker = _Broker()
+    with patch("auto_trade.send_discord_notify", return_value=None):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=[],
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert result.success is True
+    assert result.managed_remaining_orders == ()
+    assert result.managed_remaining_positions == ()
+    assert result.unknown_items == ()
+    assert result.errors == ()
+    assert result.updated_portfolio == []
+    assert result.updated_account["cash"] == 1_000_000.0
+    assert broker.saved_portfolio == []
+    assert broker.saved_account["cash"] == 1_000_000.0
+
+
+def test_perform_safe_shutdown_reports_reconciliation_failure_when_active_orders_snapshot_is_missing():
+    class _Broker:
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+        def get_active_orders(self):
+            return None
+
+    broker = _Broker()
+    with patch("auto_trade.send_discord_notify", return_value=None):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=[],
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert result.success is False
+    assert "active_orders_snapshot_unavailable" in result.errors
+
+
+def test_perform_safe_shutdown_cancels_only_managed_orders():
+    class _Broker:
+        def __init__(self):
+            self.cancelled = []
+            self.saved_account = None
+            self.saved_portfolio = None
+
+        def get_active_orders(self):
+            return {
+                "orders": [
+                    {"ID": "STOP-M", "Symbol": "1000"},
+                    {"ID": "UNM-1", "Symbol": "2000"},
+                ],
+                "has_unknown": False,
+                "unresolved_order_ids": [],
+            }
+
+        def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return True
+
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+    def _noop_close_daytrade_positions(*, portfolio, account, broker, is_sim, realtime_buffers):
+        return portfolio, [], account
+
+    broker = _Broker()
+    portfolio = [
+        {
+            "code": "1000",
+            "ownership": "MANAGED_BY_BOT",
+            "protective_stop_order_id": "STOP-M",
+        },
+        {
+            "code": "2000",
+            "ownership": "UNMANAGED",
+        },
+    ]
+
+    with patch("auto_trade.close_daytrade_positions", side_effect=_noop_close_daytrade_positions), patch(
+        "auto_trade.send_discord_notify",
+        return_value=None,
+    ):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=portfolio,
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert broker.cancelled == ["STOP-M"]
+    assert any(item.get("ID") == "UNM-1" for item in result.unmanaged_orders)
+    assert result.success is False
+
+
+def test_perform_safe_shutdown_blocks_flatten_when_managed_cancel_is_unconfirmed():
+    class _Broker:
+        def __init__(self):
+            self.cancelled = []
+            self.saved_account = None
+            self.saved_portfolio = None
+
+        def get_active_orders(self):
+            return {
+                "orders": [
+                    {"ID": "STOP-M", "Symbol": "1000"},
+                ],
+                "has_unknown": False,
+                "unresolved_order_ids": [],
+            }
+
+        def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return CancelResult(
+                status=CancelStatus.UNKNOWN,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=True,
+                confirmed=False,
+                rejection_reason="cancel_not_confirmed",
+            )
+
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+    def _fail_if_called_close_daytrade_positions(*args, **kwargs):
+        raise AssertionError("close_daytrade_positions should not run while managed order cancel is unconfirmed")
+
+    broker = _Broker()
+    portfolio = [
+        {
+            "code": "1000",
+            "ownership": "MANAGED_BY_BOT",
+            "protective_stop_order_id": "STOP-M",
+        },
+    ]
+
+    with patch("auto_trade.close_daytrade_positions", side_effect=_fail_if_called_close_daytrade_positions), patch(
+        "auto_trade.send_discord_notify",
+        return_value=None,
+    ):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=portfolio,
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert broker.cancelled == ["STOP-M"]
+    assert result.success is False
+    assert any(entry.startswith("managed_cancel_unconfirmed:STOP-M") for entry in result.errors)
+
+
+def test_main_attempts_safe_shutdown_when_main_exec_raises():
+    class _Broker:
+        pass
+
+    fake_broker = _Broker()
+    fake_result = auto_trade.ShutdownResult(
+        success=True,
+        managed_remaining_orders=(),
+        managed_remaining_positions=(),
+        unmanaged_orders=(),
+        unmanaged_positions=(),
+        ambiguous_items=(),
+        unknown_items=(),
+        errors=(),
+        updated_portfolio=[],
+        updated_account={},
+    )
+    original_state = dict(auto_trade.ACTIVE_RUNTIME_STATE)
+    performed = []
+    terminated = []
+
+    def _fake_safe_shutdown(**kwargs):
+        performed.append(kwargs)
+        return fake_result
+
+    def _fake_terminate():
+        terminated.append(True)
+
+    try:
+        auto_trade.ACTIVE_RUNTIME_STATE.update(
+            {
+                "broker": fake_broker,
+                "portfolio": [{"code": "1000", "ownership": "MANAGED_BY_BOT"}],
+                "account": {"cash": 1_000_000.0},
+                "is_sim": False,
+                "realtime_buffers": {},
+            }
+        )
+        with patch("auto_trade.acquire_lock", return_value=True), \
+            patch("auto_trade._main_exec", side_effect=RuntimeError("boom")), \
+            patch("auto_trade.send_discord_notify", return_value=None), \
+            patch("auto_trade.time.sleep", return_value=None), \
+            patch("auto_trade.release_lock", return_value=None), \
+            patch("auto_trade.perform_safe_shutdown", side_effect=_fake_safe_shutdown), \
+            patch("core.kabu_launcher.terminate_kabu_station", side_effect=_fake_terminate):
+            try:
+                auto_trade.main()
+                raise AssertionError("main() should have exited")
+            except SystemExit as exc:
+                assert exc.code == 1
+
+        assert performed and performed[0]["broker"] is fake_broker
+        assert performed[0]["reason"] == "unexpected_exception"
+        assert terminated
+    finally:
+        auto_trade.ACTIVE_RUNTIME_STATE.clear()
+        auto_trade.ACTIVE_RUNTIME_STATE.update(original_state)
+
+
+def test_is_board_quote_snapshot_fresh_accepts_recent_same_day_quotes():
+    boards = {
+        "1000": {
+            "quote_timestamp": pd.Timestamp("2026-04-21 09:10:00", tz="Asia/Tokyo"),
+        }
+    }
+    reference_time = pd.Timestamp("2026-04-21 09:14:00", tz="Asia/Tokyo")
+
+    assert auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
+
+
+def test_is_board_quote_snapshot_fresh_rejects_stale_or_cross_day_quotes():
+    stale_boards = {
+        "1000": {
+            "quote_timestamp": pd.Timestamp("2026-04-21 09:00:00", tz="Asia/Tokyo"),
+        }
+    }
+    cross_day_boards = {
+        "1000": {
+            "quote_timestamp": pd.Timestamp("2026-04-20 15:00:00", tz="Asia/Tokyo"),
+        }
+    }
+    reference_time = pd.Timestamp("2026-04-21 09:20:00", tz="Asia/Tokyo")
+
+    assert not auto_trade._is_board_quote_snapshot_fresh(stale_boards, reference_time, max_age_seconds=600)
+    assert not auto_trade._is_board_quote_snapshot_fresh(cross_day_boards, reference_time, max_age_seconds=600)
+
+
+def test_acquire_lock_writes_metadata_and_release_removes_owned_lock():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "bot.lock"
+
+        with patch("auto_trade.LOCK_FILE", str(lock_path)), \
+             patch("auto_trade.TRADE_MODE", "KABUCOM_LIVE"), \
+             patch("auto_trade.read_git_commit_sha", return_value="sha-test"):
+            assert auto_trade.acquire_lock()
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+
+            assert payload["schema_version"] == 1
+            assert payload["pid"] == os.getpid()
+            assert payload["trade_mode"] == "KABUCOM_LIVE"
+            assert payload["broker_environment"] == "live"
+            assert payload["code_sha"] == "sha-test"
+            assert payload["approval_hash"] == auto_trade.RUNTIME_LIVE_ORDER_CONFIG_HASH
+            assert isinstance(payload["process_start_time"], float)
+            assert payload["process_start_time"] > 0
+            assert payload["hostname"]
+            assert payload["executable"]
+            assert payload["acquired_at"]
+
+            auto_trade.release_lock()
+            assert not lock_path.exists()
+
+
+def test_acquire_lock_refuses_malformed_live_lock_without_deleting_it():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "bot.lock"
+        lock_path.write_text('{"schema_version": 1, "pid": 123}', encoding="utf-8")
+
+        with patch("auto_trade.LOCK_FILE", str(lock_path)), \
+             patch("auto_trade.TRADE_MODE", "KABUCOM_LIVE"), \
+             patch("auto_trade.read_git_commit_sha", return_value="sha-test"):
+            assert not auto_trade.acquire_lock()
+
+        assert lock_path.exists()
+
+
+def test_acquire_lock_detects_pid_reuse_and_replaces_stale_lock():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        lock_path = Path(tmpdir) / "bot.lock"
+
+        with patch("auto_trade.LOCK_FILE", str(lock_path)), \
+             patch("auto_trade.TRADE_MODE", "KABUCOM_LIVE"), \
+             patch("auto_trade.read_git_commit_sha", return_value="sha-test"):
+            current_identity = auto_trade._current_lock_identity()
+            stale_payload = dict(current_identity)
+            stale_payload["schema_version"] = 1
+            stale_payload["acquired_at"] = "2026-06-11T00:00:00+00:00"
+            stale_payload["process_start_time"] = float(current_identity["process_start_time"]) - 100.0
+            lock_path.write_text(json.dumps(stale_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            assert auto_trade.acquire_lock()
+            refreshed = json.loads(lock_path.read_text(encoding="utf-8"))
+
+            assert refreshed["pid"] == current_identity["pid"]
+            assert refreshed["process_start_time"] == current_identity["process_start_time"]
+            assert refreshed["trade_mode"] == "KABUCOM_LIVE"
+            assert refreshed["broker_environment"] == "live"
+            assert refreshed["code_sha"] == "sha-test"
+
+
+def test_merge_account_state_preserves_live_strategy_state_when_wallet_snapshot_is_incomplete():
+    persisted = {
+        "cash": 123456.0,
+        "configured_risk_capital": 1_000_000.0,
+        "realized_pnl_today": 12_345.0,
+        "daytrade_week_start_equity": 1_010_000.0,
+        "month_start_equity": 1_100_000.0,
+        "stock_buying_power": 111.0,
+        "margin_buying_power": 222.0,
+    }
+    snapshot = {
+        "cash": 0.0,
+        "configured_risk_capital": 0.0,
+        "realized_pnl_today": 0.0,
+        "stock_buying_power": 333.0,
+        "margin_buying_power": 0.0,
+        "wallet_snapshot_incomplete": True,
+        "wallet_cash_ok": True,
+        "wallet_margin_ok": False,
+    }
+
+    merged = auto_trade.merge_account_state(snapshot, persisted, is_sim=False)
+
+    assert merged["cash"] == 123456.0
+    assert merged["configured_risk_capital"] == 1_000_000.0
+    assert merged["realized_pnl_today"] == 12_345.0
+    assert merged["daytrade_week_start_equity"] == 1_010_000.0
+    assert merged["month_start_equity"] == 1_100_000.0
+    assert merged["stock_buying_power"] == 333.0
+    assert merged["margin_buying_power"] == 222.0
+    assert merged["wallet_snapshot_incomplete"] is True
+    assert merged["wallet_cash_ok"] is True
+    assert merged["wallet_margin_ok"] is False

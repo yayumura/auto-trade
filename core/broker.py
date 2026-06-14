@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 class BaseBroker(ABC):
     """
@@ -51,9 +52,9 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
+    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> Any:
         """
-        現物の成行・指値注文を発注し、注文ID（またはシミュレーションID）を返します。
+        現物の成行・指値注文を発注し、注文IDまたは structured result を返します。
         price > 0 の場合は指値（Marketable Limit Order等）として扱います。
         """
         pass

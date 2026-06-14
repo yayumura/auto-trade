@@ -16,6 +16,7 @@ _PROTECTED_FILES = {
     "trade_history.csv",
     "account.json",
     "execution_log.csv",
+    "execution_audit_log.jsonl",
     "jp_watchlist.json",
     "intraday_snapshots.csv",
 }

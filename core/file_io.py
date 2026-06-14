@@ -82,6 +82,16 @@ def append_csv_rows(path, rows):
     df.to_csv(path, mode='a', index=False, header=write_header, encoding='utf-8-sig')
 
 @retry_io()
+def append_jsonl(path, record):
+    path = ensure_absolute_path(path)
+    dir_name = os.path.dirname(path)
+    os.makedirs(dir_name, exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+@retry_io()
 def safe_read_json(path, default=None):
     path = ensure_absolute_path(path)
     if not os.path.exists(path) or os.path.getsize(path) == 0:

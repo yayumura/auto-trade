@@ -4,26 +4,35 @@ import os
 import pandas as pd
 from types import SimpleNamespace
 
-from core.kabucom_broker import KabucomBroker
-from core.kabu_launcher import _wait_for_api_server
+from core.kabucom_broker import KabucomBroker, RequestBudgetBucket
+from core.kabucom_broker import BrokerEndpointConfig
+from core.kabucom_broker import BrokerEnvironment
+from core.kabu_launcher import _wait_for_api_server, check_api_health
 from core.kabucom_order_state import (
+    CancelResult,
+    CancelStatus,
+    classify_cancel_response,
+    ExecutionWaitResult,
     OrderProcessState,
+    OrderSubmissionResult,
     OrderTerminalReason,
+    StockOrderAction,
     SubmissionResult,
     SubmissionStatus,
     classify_submission_response,
     parse_kabucom_order,
 )
 from core.kabucom_quote import parse_board_quote
-from core.live_order_gate import get_live_order_gate_status
+from core.live_order_gate import EntryAuthorizationContext, evaluate_entry_authorization, get_live_order_gate_status
 from core.sim_broker import SimulationBroker
 
 
 class _FakeResponse:
-    def __init__(self, status_code, payload=None, text=""):
+    def __init__(self, status_code, payload=None, text="", headers=None):
         self.status_code = status_code
         self._payload = payload if payload is not None else {}
         self.text = text
+        self.headers = headers if headers is not None else {}
 
     def json(self):
         return self._payload
@@ -50,6 +59,7 @@ class _FakeSession:
 
 
 def _make_broker(session):
+    os.environ.setdefault("KABUCOM_ACCOUNT_TYPE", "4")
     broker = KabucomBroker.__new__(KabucomBroker)
     broker.is_production = False
     broker.port = 18081
@@ -64,6 +74,16 @@ def _make_broker(session):
 
 
 class TestKabucomBroker(unittest.TestCase):
+    def test_broker_endpoint_config_rejects_mismatched_environment_and_port(self):
+        with self.assertRaises(ValueError):
+            BrokerEndpointConfig(BrokerEnvironment.LIVE, 18081).validate()
+
+        with self.assertRaises(ValueError):
+            BrokerEndpointConfig(BrokerEnvironment.TEST, 18080).validate()
+
+        with self.assertRaises(ValueError):
+            BrokerEndpointConfig(BrokerEnvironment.LIVE, 18080, "http://localhost:18081/kabusapi").validate()
+
     def test_parse_kabucom_order_handles_active_partial_terminal_and_unknown_states(self):
         active = parse_kabucom_order({
             "OrderId": "ORDER-A",
@@ -251,16 +271,34 @@ class TestKabucomBroker(unittest.TestCase):
         )
         self.assertEqual(missing_order_id.status, SubmissionStatus.UNKNOWN)
 
-        cancel_accept = classify_submission_response(
+        cancel_accept = classify_cancel_response(
             intent_id="intent-3",
-            symbol="1234",
-            side="1",
-            qty=0,
-            price=None,
             response=_FakeResponse(200, {"Result": 0}),
-            allow_missing_order_id=True,
         )
         self.assertEqual(cancel_accept.status, SubmissionStatus.ACCEPTED)
+        self.assertIsNone(cancel_accept.broker_order_id)
+
+        long_response = classify_submission_response(
+            intent_id="intent-3b",
+            symbol="1234",
+            side="2",
+            qty=100,
+            price=1000.0,
+            response=_FakeResponse(200, {"Result": 0, "OrderId": "ORDER-L"}, text=("y" * 3000)),
+        )
+        self.assertEqual(long_response.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(long_response.response_text.startswith("y"))
+        self.assertTrue(long_response.response_text.endswith("...[truncated]"))
+        self.assertLessEqual(len(long_response.response_text), 2062)
+
+        secret_text = "{" + "\"Password\":\"abc123\"," + "\"Token\":\"xyz789\"}" + ("x" * 3000)
+        secret_response = classify_cancel_response(
+            intent_id="intent-3c",
+            response=_FakeResponse(200, {"Result": 0}, text=secret_text),
+        )
+        self.assertEqual(secret_response.status, SubmissionStatus.ACCEPTED)
+        self.assertIn("***REDACTED***", secret_response.response_text)
+        self.assertLessEqual(len(secret_response.response_text), 2062)
 
         rejected = classify_submission_response(
             intent_id="intent-4",
@@ -313,6 +351,56 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(non_live.allowed)
         self.assertEqual(non_live.reason, "non_live_mode")
 
+    def test_entry_authorization_blocks_live_entries_on_runtime_reconciliation_and_quote_failure(self):
+        status = evaluate_entry_authorization(
+            EntryAuthorizationContext(
+                production_endpoint=True,
+                approved_manifest_valid=False,
+                reconciliation_clean=False,
+                unresolved_order_count=2,
+                ambiguous_position_count=1,
+                wallet_snapshot_fresh=False,
+                positions_snapshot_fresh=False,
+                orders_snapshot_fresh=False,
+                quote_fresh=False,
+                registry_ready=False,
+                critical_state_valid=False,
+                session_allows_entry=False,
+                clock_healthy=False,
+                shutdown_requested=True,
+            )
+        )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("approved_manifest_invalid", status.blocking_reasons)
+        self.assertIn("reconciliation_dirty", status.blocking_reasons)
+        self.assertIn("quote_stale", status.blocking_reasons)
+        self.assertIn("registry_not_ready", status.blocking_reasons)
+        self.assertIn("shutdown_requested", status.blocking_reasons)
+
+    def test_entry_authorization_allows_non_production_endpoints(self):
+        status = evaluate_entry_authorization(
+            EntryAuthorizationContext(
+                production_endpoint=False,
+                approved_manifest_valid=False,
+                reconciliation_clean=False,
+                unresolved_order_count=3,
+                ambiguous_position_count=2,
+                wallet_snapshot_fresh=False,
+                positions_snapshot_fresh=False,
+                orders_snapshot_fresh=False,
+                quote_fresh=False,
+                registry_ready=False,
+                critical_state_valid=False,
+                session_allows_entry=False,
+                clock_healthy=False,
+                shutdown_requested=True,
+            )
+        )
+
+        self.assertTrue(status.allowed)
+        self.assertEqual(status.reason, "non_production_endpoint")
+
     def test_api_request_does_not_retry_post_on_server_error(self):
         session = _FakeSession([_FakeResponse(500, text="server error")])
         broker = _make_broker(session)
@@ -322,6 +410,31 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
         self.assertIsNotNone(response)
         self.assertEqual(response.status_code, 500)
+
+    def test_live_endpoint_blocks_write_when_trade_mode_is_not_live(self):
+        with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
+             patch("core.kabucom_broker.TRADE_MODE", "SIM"):
+            broker = KabucomBroker(BrokerEndpointConfig.live())
+            broker.token = "token"
+            broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
+
+            submission = broker._submit_market_order("1234", 100, side="2", price=1234.2, exchange=9)
+
+        self.assertEqual(submission.status, SubmissionStatus.REJECTED)
+        self.assertEqual(submission.rejection_reason, "live_endpoint_write_blocked_by_trade_mode")
+        self.assertIsNone(submission.broker_order_id)
+
+    def test_test_endpoint_requires_kabucom_test_mode_for_write(self):
+        with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
+             patch("core.kabucom_broker.TRADE_MODE", "SIM"):
+            broker = KabucomBroker(BrokerEndpointConfig.test())
+            broker.token = "token"
+            broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
+
+            submission = broker._submit_market_order("1234", 100, side="2", price=1234.2, exchange=9)
+
+        self.assertEqual(submission.status, SubmissionStatus.REJECTED)
+        self.assertEqual(submission.rejection_reason, "test_endpoint_requires_kabucom_test_mode")
 
     def test_api_request_does_not_retry_post_on_unauthorized(self):
         session = _FakeSession([_FakeResponse(401, text="unauthorized")])
@@ -361,9 +474,15 @@ class TestKabucomBroker(unittest.TestCase):
         broker._api_request = fake_api_request
 
         with patch.dict(os.environ, {"KABUCOM_ORDER_EXCHANGE": "9"}):
-            order_id = broker.execute_market_order("1234", 100, side="2", price=1234.2)
+            result = broker.execute_market_order("1234", 100, side="2", price=1234.2)
 
-        self.assertEqual(order_id, "ORDER-1")
+        self.assertIsInstance(result, OrderSubmissionResult)
+        self.assertEqual(result.broker_order_id, "ORDER-1")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.request_sent)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_NEW_LONG)
+        self.assertEqual(result.limit_price, 1235.0)
+        self.assertIsNone(result.trigger_price)
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["endpoint"], "sendorder")
         self.assertIsInstance(captured["json"]["Price"], float)
@@ -382,9 +501,13 @@ class TestKabucomBroker(unittest.TestCase):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
 
-        order_id = broker.execute_market_order("1234", 100, side="2", price=0)
+        result = broker.execute_market_order("1234", 100, side="2", price=0, exchange=9)
 
-        self.assertEqual(order_id, "ORDER-0")
+        self.assertEqual(result.broker_order_id, "ORDER-0")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.request_sent)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_NEW_LONG)
+        self.assertIsNone(result.limit_price)
         self.assertEqual(captured["json"]["FrontOrderType"], 10)
         self.assertEqual(captured["json"]["Price"], 0)
 
@@ -398,7 +521,7 @@ class TestKabucomBroker(unittest.TestCase):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
 
-        order_id = broker.execute_market_order(
+        result = broker.execute_market_order(
             "1234",
             100,
             side="1",
@@ -408,7 +531,11 @@ class TestKabucomBroker(unittest.TestCase):
             margin_trade_type=3,
         )
 
-        self.assertEqual(order_id, "ORDER-SELL")
+        self.assertEqual(result.broker_order_id, "ORDER-SELL")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.request_sent)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
+        self.assertEqual(result.limit_price, 1234.0)
         self.assertEqual(captured["json"]["CashMargin"], 3)
         self.assertEqual(captured["json"]["MarginTradeType"], 3)
         self.assertEqual(captured["json"]["DelivType"], 2)
@@ -419,13 +546,18 @@ class TestKabucomBroker(unittest.TestCase):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {"Result": 0, "OrderId": "ORDER-FAIL"})
 
-        self.assertIsNone(broker.execute_market_order("1234", 100, side="1", price=1234.2))
+        result = broker.execute_market_order("1234", 100, side="1", price=1234.2)
+
+        self.assertEqual(result.status, SubmissionStatus.REJECTED)
+        self.assertFalse(result.request_sent)
+        self.assertEqual(result.rejection_reason, "missing_close_route")
+        self.assertIsNone(result.broker_order_id)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
 
     def test_submit_market_order_rejects_live_new_buy_when_live_gate_blocks(self):
-        broker = _make_broker(_FakeSession([]))
-        broker.is_production = True
-
-        with patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+        with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
+            patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+            patch("core.kabucom_broker.DEBUG_MODE", False), \
             patch(
                 "core.kabucom_broker.get_live_order_gate_status",
                 return_value=SimpleNamespace(
@@ -434,10 +566,13 @@ class TestKabucomBroker(unittest.TestCase):
                     runtime_config_hash="sha256:runtime",
                     approved_config_hash="",
                 ),
-            ), \
-            patch("core.kabucom_broker.append_order_journal") as mock_journal, \
-            patch.object(broker, "_api_request", side_effect=AssertionError("API should not be called")):
-            submission = broker._submit_market_order("1234", 100, side="2", price=1234.2)
+            ):
+            broker = KabucomBroker(BrokerEndpointConfig.live())
+            broker.token = "token"
+
+            with patch("core.kabucom_broker.append_order_journal") as mock_journal, \
+                patch.object(broker, "_api_request", side_effect=AssertionError("API should not be called")):
+                submission = broker._submit_market_order("1234", 100, side="2", price=1234.2, exchange=9)
 
         self.assertEqual(submission.status, SubmissionStatus.REJECTED)
         self.assertEqual(submission.rejection_reason, "live_new_order_disabled:approval_missing")
@@ -454,20 +589,9 @@ class TestKabucomBroker(unittest.TestCase):
             captured["json"] = kwargs["json"]
             return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
 
-        broker = _make_broker(_FakeSession([]))
-        broker.is_production = True
-        broker._api_request = fake_api_request
-        broker.get_positions = lambda: [
-            {
-                "hold_id": "HOLD-1",
-                "exchange": 1,
-                "margin_trade_type": 3,
-                "available_qty": 100,
-                "code": "1234",
-            }
-        ]
-
-        with patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+        with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
+            patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
+            patch("core.kabucom_broker.DEBUG_MODE", False), \
             patch(
                 "core.kabucom_broker.get_live_order_gate_status",
                 return_value=SimpleNamespace(
@@ -476,11 +600,31 @@ class TestKabucomBroker(unittest.TestCase):
                     runtime_config_hash="sha256:runtime",
                     approved_config_hash="",
                 ),
-            ), \
-            patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
-            order_id = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2, hold_id="HOLD-1")
+        ):
+            broker = KabucomBroker(BrokerEndpointConfig.live())
+            broker.password = "test-password"
+            broker.token = "token"
+            broker._api_request = fake_api_request
+            broker.get_positions = lambda: [
+                {
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "available_qty": 100,
+                    "hold_qty": 0,
+                    "code": "1234",
+                }
+            ]
 
-        self.assertEqual(order_id, "STOP-1")
+            with patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+                result = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2, hold_id="HOLD-1")
+
+        self.assertIsInstance(result, OrderSubmissionResult)
+        self.assertEqual(result.broker_order_id, "STOP-1")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.request_sent)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
+        self.assertEqual(result.trigger_price, 3000.0)
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["endpoint"], "sendorder")
         self.assertEqual(captured["json"]["FrontOrderType"], 30)
@@ -501,12 +645,47 @@ class TestKabucomBroker(unittest.TestCase):
         broker._api_request = fake_api_request
 
         with patch("core.kabucom_broker.append_order_journal", side_effect=fake_append):
-            order_id = broker.execute_market_order("1234", 100, side="2", price=1234.2)
+            result = broker.execute_market_order("1234", 100, side="2", price=1234.2, exchange=9)
 
-        self.assertEqual(order_id, "ORDER-1")
+        self.assertEqual(result.broker_order_id, "ORDER-1")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
         self.assertGreaterEqual(len(journal_events), 2)
         self.assertEqual(journal_events[0]["event"], "PLANNED")
         self.assertEqual(journal_events[1]["event"], "ACCEPTED")
+
+    def test_execute_market_order_rejects_missing_buy_exchange(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
+
+        result = broker.execute_market_order("1234", 100, side="2", price=1234.2)
+
+        self.assertEqual(result.status, SubmissionStatus.REJECTED)
+        self.assertFalse(result.request_sent)
+        self.assertEqual(result.rejection_reason, "missing_buy_exchange")
+        self.assertIsNone(result.broker_order_id)
+
+    def test_execute_market_order_rejects_missing_account_type(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
+
+        with patch.dict(os.environ, {"KABUCOM_ACCOUNT_TYPE": ""}):
+            result = broker.execute_market_order("1234", 100, side="2", price=1234.2, exchange=9)
+
+        self.assertEqual(result.status, SubmissionStatus.REJECTED)
+        self.assertFalse(result.request_sent)
+        self.assertEqual(result.rejection_reason, "missing_account_type")
+        self.assertIsNone(result.broker_order_id)
+
+    def test_execute_stop_order_rejects_missing_buy_exchange(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
+
+        result = broker.execute_stop_order("1234", 100, side="2", trigger_price=3001.2)
+
+        self.assertEqual(result.status, SubmissionStatus.REJECTED)
+        self.assertFalse(result.request_sent)
+        self.assertEqual(result.rejection_reason, "missing_buy_exchange")
+        self.assertIsNone(result.broker_order_id)
 
     def test_execute_stop_order_normalizes_trigger_price(self):
         captured = {}
@@ -529,9 +708,13 @@ class TestKabucomBroker(unittest.TestCase):
             }
         ]
 
-        order_id = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2, hold_id="HOLD-1")
+        result = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2, hold_id="HOLD-1")
 
-        self.assertEqual(order_id, "STOP-1")
+        self.assertEqual(result.broker_order_id, "STOP-1")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
+        self.assertTrue(result.request_sent)
+        self.assertEqual(result.trigger_price, 3000.0)
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["endpoint"], "sendorder")
         self.assertEqual(captured["json"]["FrontOrderType"], 30)
@@ -557,16 +740,24 @@ class TestKabucomBroker(unittest.TestCase):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
 
-        order_id = broker.execute_stop_order("1234", 100, side="2", trigger_price=3001.2)
+        result = broker.execute_stop_order("1234", 100, side="2", trigger_price=3001.2, exchange=9)
 
-        self.assertEqual(order_id, "STOP-2")
+        self.assertEqual(result.broker_order_id, "STOP-2")
+        self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_NEW_LONG)
         self.assertEqual(captured["json"]["ReverseLimitOrder"]["UnderOver"], 2)
 
     def test_execute_stop_order_aborts_without_hold_id_on_sell_side(self):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {"Result": 0, "OrderId": "STOP-FAIL"})
 
-        self.assertIsNone(broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2))
+        result = broker.execute_stop_order("1234", 100, side="1", trigger_price=3001.2)
+
+        self.assertEqual(result.status, SubmissionStatus.REJECTED)
+        self.assertFalse(result.request_sent)
+        self.assertEqual(result.rejection_reason, "missing_close_route")
+        self.assertIsNone(result.broker_order_id)
+        self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
 
     def test_execute_chase_order_stops_after_unknown_submission_without_forcing_second_order(self):
         call_args = []
@@ -582,8 +773,8 @@ class TestKabucomBroker(unittest.TestCase):
             }
         }
         broker.get_positions = lambda: [
-            {"code": "1234", "hold_id": "HOLD-1", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 60, "hold_qty": 0, "buy_time": "2026-04-21 09:00:00", "execution_id": "EX-1"},
-            {"code": "1234", "hold_id": "HOLD-2", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 40, "hold_qty": 0, "buy_time": "2026-04-21 09:01:00", "execution_id": "EX-2"},
+            {"code": "1234", "hold_id": "HOLD-1", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 60, "hold_qty": 0, "available_qty": 60, "buy_time": "2026-04-21 09:00:00", "execution_id": "EX-1"},
+            {"code": "1234", "hold_id": "HOLD-2", "exchange": 1, "margin_trade_type": 3, "leaves_qty": 40, "hold_qty": 0, "available_qty": 40, "buy_time": "2026-04-21 09:01:00", "execution_id": "EX-2"},
         ]
         broker.cancel_order = lambda order_id: True
 
@@ -650,11 +841,19 @@ class TestKabucomBroker(unittest.TestCase):
             patch("core.kabucom_broker.time.sleep", return_value=None):
             result = broker.wait_for_execution("ORDER-1", timeout_sec=0.5)
 
-        self.assertTrue(result["unresolved"])
-        self.assertEqual(result["__parsed_process_state__"], OrderProcessState.ACTIVE.value)
-        self.assertEqual(result["__parsed_cumulative_qty__"], 40)
-        self.assertEqual(result["Qty"], 40)
-        self.assertAlmostEqual(result["Price"], (25 * 1000.0 + 15 * 1010.0) / 40)
+        self.assertIsInstance(result, ExecutionWaitResult)
+        self.assertTrue(result.unresolved)
+        self.assertEqual(result.process_state, OrderProcessState.UNKNOWN)
+        self.assertEqual(result.cumulative_qty, 40)
+        self.assertEqual(result.remaining_qty, 60)
+        self.assertEqual(len(result.fills), 2)
+        self.assertEqual(result.execution_ids, ("EX-1", "EX-2"))
+        self.assertAlmostEqual(result.average_price, (25 * 1000.0 + 15 * 1010.0) / 40)
+        legacy = result.to_legacy_dict(symbol="1234", side="2")
+        self.assertEqual(legacy["__parsed_process_state__"], OrderProcessState.UNKNOWN.value)
+        self.assertEqual(legacy["__parsed_cumulative_qty__"], 40)
+        self.assertEqual(legacy["Qty"], 40)
+        self.assertAlmostEqual(legacy["Price"], (25 * 1000.0 + 15 * 1010.0) / 40)
 
     def test_wait_for_execution_marks_unknown_state_as_unresolved(self):
         details_iter = iter([
@@ -677,11 +876,17 @@ class TestKabucomBroker(unittest.TestCase):
 
         result = broker.wait_for_execution("ORDER-2", timeout_sec=30)
 
-        self.assertTrue(result["unresolved"])
-        self.assertEqual(result["unresolved_reason"], "unknown_state")
-        self.assertEqual(result["__parsed_process_state__"], OrderProcessState.UNKNOWN.value)
-        self.assertEqual(result["__parsed_cumulative_qty__"], 40)
-        self.assertEqual(result["Qty"], 40)
+        self.assertIsInstance(result, ExecutionWaitResult)
+        self.assertTrue(result.unresolved)
+        self.assertEqual(result.unresolved_reason, "unknown_state")
+        self.assertEqual(result.process_state, OrderProcessState.UNKNOWN)
+        self.assertEqual(result.cumulative_qty, 40)
+        self.assertEqual(result.remaining_qty, 60)
+        self.assertEqual(len(result.fills), 2)
+        legacy = result.to_legacy_dict(symbol="1234", side="2")
+        self.assertEqual(legacy["__parsed_process_state__"], OrderProcessState.UNKNOWN.value)
+        self.assertEqual(legacy["__parsed_cumulative_qty__"], 40)
+        self.assertEqual(legacy["Qty"], 40)
 
     def test_get_account_balance_live_separates_wallet_cash_and_margin(self):
         responses = iter([
@@ -702,6 +907,52 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(snapshot["margin_buying_power"], 654321.0)
         self.assertFalse(snapshot["wallet_snapshot_incomplete"])
 
+    def test_request_budget_is_tracked_by_endpoint_bucket(self):
+        broker = _make_broker(_FakeSession([
+            _FakeResponse(500, text="retry"),
+            _FakeResponse(200, []),
+            _FakeResponse(200, {"StockAccountWallet": 1.0}),
+            _FakeResponse(200, {"MarginAccountWallet": 2.0}),
+            _FakeResponse(200, {"ok": True}),
+        ]))
+
+        broker._api_request("GET", "orders")
+        broker._api_request("GET", "wallet/cash")
+        broker._api_request("GET", "wallet/margin")
+        broker._api_request("GET", "register")
+
+        self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.ORDERS], 2)
+        self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.WALLET], 2)
+        self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.REGISTRY], 1)
+        self.assertEqual(broker._classify_request_bucket("GET", "board/7203@1"), RequestBudgetBucket.MARKET_DATA)
+        self.assertEqual(broker._classify_request_bucket("POST", "sendorder"), RequestBudgetBucket.ORDERS)
+        self.assertEqual(broker._classify_request_bucket("PUT", "cancelorder"), RequestBudgetBucket.ORDERS)
+
+    def test_auth_budget_is_tracked_when_authentication_runs(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.token = None
+        broker.password = "test-password"
+
+        class _DummyLock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        broker._auth_lock = _DummyLock()
+
+        class _AuthResponse(_FakeResponse):
+            pass
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            return _AuthResponse(200, {"Token": "TOKEN"})
+
+        broker.session.post = fake_post
+        broker._authenticate()
+
+        self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.AUTH], 1)
+
     def test_get_positions_live_marks_managed_by_bot_using_execution_id(self):
         broker = _make_broker(_FakeSession([]))
         broker.is_production = True
@@ -719,13 +970,69 @@ class TestKabucomBroker(unittest.TestCase):
             }
         ])
 
-        with patch("core.kabucom_broker.safe_read_csv", return_value=pd.DataFrame([
-            {"code": "1234", "execution_id": "EX-1", "buy_time": "2026-04-21 09:00:00", "highest_price": 1000.0, "partial_sold": False}
-        ])):
+        with patch("core.portfolio_state.safe_read_json", return_value=None), \
+            patch("core.portfolio_state.safe_read_csv", return_value=pd.DataFrame([
+                {"code": "1234", "execution_id": "EX-1", "execution_ids": ["EX-1", "EX-2"], "buy_time": "2026-04-21 09:00:00", "highest_price": 1000.0, "partial_sold": False}
+            ])):
             positions = broker.get_positions()
 
         self.assertEqual(positions[0]["ownership"], "MANAGED_BY_BOT")
         self.assertEqual(positions[0]["ownership_reason"], "matched_execution_id")
+
+    def test_get_positions_live_marks_managed_by_bot_using_any_execution_id_in_execution_ids(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.is_production = True
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(200, [
+            {
+                "Symbol": "1234",
+                "SymbolName": "Foo",
+                "CurrentPrice": 1000.0,
+                "LeavesQty": 100,
+                "HoldQty": 0,
+                "Price": 900.0,
+                "ExecutionID": "EX-2",
+                "Exchange": 1,
+                "MarginTradeType": 3,
+            }
+        ])
+
+        with patch("core.portfolio_state.safe_read_json", return_value=None), \
+            patch("core.portfolio_state.safe_read_csv", return_value=pd.DataFrame([
+                {"code": "1234", "execution_id": "EX-1", "execution_ids": ["EX-1", "EX-2"], "buy_time": "2026-04-21 09:00:00", "highest_price": 1000.0, "partial_sold": False}
+            ])):
+            positions = broker.get_positions()
+
+        self.assertEqual(positions[0]["ownership"], "MANAGED_BY_BOT")
+        self.assertEqual(positions[0]["ownership_reason"], "matched_execution_id")
+
+    def test_get_positions_live_preserves_unknown_hold_qty_and_blocks_close_allocation(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.is_production = True
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(200, [
+            {
+                "Symbol": "1234",
+                "SymbolName": "Foo",
+                "CurrentPrice": 1000.0,
+                "LeavesQty": 100,
+                "HoldQty": None,
+                "Price": 900.0,
+                "ExecutionID": "EX-1",
+                "Exchange": 1,
+                "MarginTradeType": 3,
+            }
+        ])
+
+        with patch("core.portfolio_state.safe_read_json", return_value=None), \
+            patch("core.portfolio_state.safe_read_csv", return_value=pd.DataFrame([
+                {"code": "1234", "execution_id": "EX-1", "buy_time": "2026-04-21 09:00:00", "highest_price": 1000.0, "partial_sold": False}
+            ])):
+            positions = broker.get_positions()
+
+        self.assertIsNone(positions[0]["hold_qty"])
+        self.assertIsNone(positions[0]["available_qty"])
+
+        broker.get_positions = lambda: positions
+        self.assertIsNone(broker._build_close_positions_for_symbol("1234", 50))
 
     def test_cancel_order_writes_order_journal(self):
         journal_events = []
@@ -758,8 +1065,16 @@ class TestKabucomBroker(unittest.TestCase):
         broker._api_request = fake_api_request
 
         with patch("core.kabucom_broker.append_order_journal", side_effect=fake_append):
-            self.assertTrue(broker.cancel_order("ORDER-1"))
+            result = broker.cancel_order("ORDER-1")
 
+        self.assertIsInstance(result, CancelResult)
+        self.assertEqual(result.status, CancelStatus.ACCEPTED)
+        self.assertTrue(result.confirmed)
+        self.assertTrue(result)
+        self.assertEqual(result.order_id, "ORDER-1")
+        self.assertEqual(result.cumulative_qty, 100)
+        self.assertEqual(result.remaining_qty, 0)
+        self.assertIsNotNone(result.parsed_order)
         self.assertGreaterEqual(len(journal_events), 2)
         self.assertEqual(journal_events[0]["event"], "CANCEL_REQUESTED")
         self.assertEqual(journal_events[1]["event"], "CANCELLED")
@@ -814,10 +1129,32 @@ class TestKabucomBroker(unittest.TestCase):
     def test_api_health_accepts_authenticated_failure_responses(self):
         with patch("core.kabu_launcher.requests.get", return_value=_FakeResponse(401)) as mocked_get, \
              patch("core.kabu_launcher.time.sleep", return_value=None), \
-             patch("core.kabu_launcher.time.time", side_effect=[0.0, 0.01, 0.02, 0.2]):
+             patch("core.kabu_launcher.time.monotonic", side_effect=[0.0, 0.01, 0.02, 0.2]):
             self.assertTrue(_wait_for_api_server(timeout_sec=0.1, silent=True))
 
         self.assertIn("/kabusapi/board/7203@1", mocked_get.call_args.args[0])
+
+    def test_check_api_health_requires_authenticated_token(self):
+        with patch("core.kabu_launcher.KABUCOM_API_PASSWORD", "secret"), \
+            patch("core.kabu_launcher.requests.get", return_value=_FakeResponse(401)), \
+            patch("core.kabu_launcher.requests.post", return_value=_FakeResponse(200, {"Token": None})), \
+            patch("core.kabu_launcher.time.sleep", return_value=None), \
+            patch("core.kabu_launcher.time.monotonic", side_effect=[0.0, 0.01, 3.0, 3.01, 5.5]):
+            self.assertFalse(check_api_health())
+
+    def test_get_server_time_uses_wallet_date_header_instead_of_symbol_endpoint(self):
+        broker = _make_broker(_FakeSession([]))
+
+        class _ResponseWithDate(_FakeResponse):
+            def __init__(self):
+                super().__init__(200, {"StockAccountWallet": 0.0}, headers={"Date": "Tue, 21 Apr 2026 00:00:00 GMT"})
+
+        broker._api_request = lambda *args, **kwargs: _ResponseWithDate()
+        current_time = broker.get_server_time()
+
+        self.assertEqual(getattr(current_time.tzinfo, "key", None), "Asia/Tokyo")
+        self.assertEqual(current_time.hour, 9)
+        self.assertEqual(current_time.day, 21)
 
     def test_log_trade_appends_rows_instead_of_overwriting_history(self):
         broker = _make_broker(_FakeSession([]))

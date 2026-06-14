@@ -3,8 +3,9 @@ import json
 import pandas as pd
 from datetime import datetime
 from core.broker import BaseBroker
-from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE, INITIAL_CASH
-from core.file_io import atomic_write_json, atomic_write_csv, safe_read_json, safe_read_csv, append_csv_rows
+from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE, EXECUTION_AUDIT_LOG_FILE, INITIAL_CASH
+from core.file_io import atomic_write_json, safe_read_json, append_csv_rows, append_jsonl
+from core.portfolio_state import load_portfolio_positions, write_portfolio_state
 
 class SimulationBroker(BaseBroker):
     """
@@ -23,12 +24,10 @@ class SimulationBroker(BaseBroker):
         atomic_write_json(ACCOUNT_FILE, account_data)
 
     def get_positions(self) -> list:
-        df = safe_read_csv(PORTFOLIO_FILE)
-        return df.to_dict(orient="records") if not df.empty else []
+        return load_portfolio_positions(PORTFOLIO_FILE)
 
     def save_positions(self, portfolio: list):
-        df = pd.DataFrame(portfolio)
-        atomic_write_csv(PORTFOLIO_FILE, df)
+        write_portfolio_state(PORTFOLIO_FILE, portfolio, metadata={"source": "simulation_broker"})
 
     def save_portfolio(self, portfolio: list):
         """auto_trade.py との互換性のためのエイリアス（M-3修正）"""
@@ -176,7 +175,19 @@ class SimulationBroker(BaseBroker):
             "actions": actions_str
         }])
         atomic_write_csv(EXECUTION_LOG_FILE, df_log)
+        append_jsonl(EXECUTION_AUDIT_LOG_FILE, {
+            "event_type": "execution_summary",
+            "source": "sim_broker",
+            "logged_at": datetime.now().isoformat(),
+            "regime": summary_record.get('regime', 'UNKNOWN'),
+            "total_assets": total_assets,
+            "cash": summary_record.get('cash_yen', 0),
+            "stock_value": summary_record.get('stock_value_yen', 0),
+            "actions": actions,
+            "portfolio": summary_record.get('portfolio', []),
+        })
         
         # [Professional Audit] 実行ログの肥大化防止（ローテーション）
         from core.file_io import rotate_csv_if_large
         rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=5)
+        rotate_csv_if_large(EXECUTION_AUDIT_LOG_FILE, max_size_mb=5)

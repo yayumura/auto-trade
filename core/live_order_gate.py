@@ -22,6 +22,31 @@ class LiveOrderGateStatus:
     runtime_config_hash: str
 
 
+@dataclass(frozen=True)
+class EntryAuthorizationContext:
+    production_endpoint: bool
+    approved_manifest_valid: bool
+    reconciliation_clean: bool
+    unresolved_order_count: int
+    ambiguous_position_count: int
+    wallet_snapshot_fresh: bool
+    positions_snapshot_fresh: bool
+    orders_snapshot_fresh: bool
+    quote_fresh: bool
+    registry_ready: bool
+    critical_state_valid: bool
+    session_allows_entry: bool
+    clock_healthy: bool
+    shutdown_requested: bool
+
+
+@dataclass(frozen=True)
+class EntryAuthorizationStatus:
+    allowed: bool
+    reason: str
+    blocking_reasons: tuple[str, ...]
+
+
 def _coerce_bool(value: bool | str | None) -> bool:
     if isinstance(value, str):
         return value.strip().lower() == "true"
@@ -105,6 +130,57 @@ def get_live_order_gate_status(
         enable_live_order=enable_live_order,
         approved_config_hash=approved_config_hash,
         runtime_config_hash=runtime_config_hash,
+    )
+
+
+def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAuthorizationStatus:
+    """ライブ新規 entry の実行時認可を判定する。"""
+    if not context.production_endpoint:
+        return EntryAuthorizationStatus(
+            allowed=True,
+            reason="non_production_endpoint",
+            blocking_reasons=(),
+        )
+
+    blocking_reasons: list[str] = []
+    if not context.approved_manifest_valid:
+        blocking_reasons.append("approved_manifest_invalid")
+    if not context.reconciliation_clean:
+        blocking_reasons.append("reconciliation_dirty")
+    if context.unresolved_order_count > 0:
+        blocking_reasons.append(f"unresolved_orders:{int(context.unresolved_order_count)}")
+    if context.ambiguous_position_count > 0:
+        blocking_reasons.append(f"ambiguous_positions:{int(context.ambiguous_position_count)}")
+    if not context.wallet_snapshot_fresh:
+        blocking_reasons.append("wallet_snapshot_stale")
+    if not context.positions_snapshot_fresh:
+        blocking_reasons.append("positions_snapshot_stale")
+    if not context.orders_snapshot_fresh:
+        blocking_reasons.append("orders_snapshot_stale")
+    if not context.quote_fresh:
+        blocking_reasons.append("quote_stale")
+    if not context.registry_ready:
+        blocking_reasons.append("registry_not_ready")
+    if not context.critical_state_valid:
+        blocking_reasons.append("critical_state_invalid")
+    if not context.session_allows_entry:
+        blocking_reasons.append("session_disallows_entry")
+    if not context.clock_healthy:
+        blocking_reasons.append("clock_unhealthy")
+    if context.shutdown_requested:
+        blocking_reasons.append("shutdown_requested")
+
+    if blocking_reasons:
+        return EntryAuthorizationStatus(
+            allowed=False,
+            reason=" | ".join(blocking_reasons),
+            blocking_reasons=tuple(blocking_reasons),
+        )
+
+    return EntryAuthorizationStatus(
+        allowed=True,
+        reason="ready",
+        blocking_reasons=(),
     )
 
 
