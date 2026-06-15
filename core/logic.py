@@ -12,7 +12,7 @@ from core.config import (
     BULL_GAP_LIMIT, RS_THRESHOLD,
     USE_COMPOUNDING, INITIAL_CASH, LEVERAGE, MIN_PRICE, MAX_PRICE
 )
-from core.kabucom_order_state import CancelResult, CancelStatus
+from core.kabucom_order_state import CancelResult, CancelStatus, StockOrderAction
 
 DAYTRADE_MIN_GAP = -0.005
 DAYTRADE_MAX_GAP = 0.03
@@ -4092,8 +4092,10 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
                     unresolved_position["exit_order_unresolved"] = True
                     unresolved_position["exit_order_unresolved_reason"] = "protective_stop_cancel_unconfirmed"
                     if isinstance(stop_cancel_result, CancelResult):
+                        cancel_terminal_status = getattr(stop_cancel_result, "terminal_status", None)
                         unresolved_position["exit_order_unresolved_reason"] = (
                             stop_cancel_result.rejection_reason
+                            or getattr(cancel_terminal_status, "value", None)
                             or getattr(stop_cancel_result.status, "value", "protective_stop_cancel_unconfirmed")
                         )
                         unresolved_position["exit_order_submission_status"] = getattr(stop_cancel_result.status, "value", None)
@@ -4108,7 +4110,7 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             continue
 
         try:
-            details = broker.execute_chase_order(code, p['shares'], side="1")
+            details = broker.execute_chase_order(code, p['shares'], action=StockOrderAction.MARGIN_CLOSE_LONG)
         except Exception as exc:
             sell_actions.append(f"SELL {code} - Day Trade Flatten failed ({exc})")
             remaining_portfolio.append(dict(p))
@@ -4178,7 +4180,7 @@ def cancel_linked_protective_stop_before_exit(
             position["protective_stop_status"] = "cancelled"
             position["protective_stop_cancelled_order_id"] = stop_order_id
             return True, cancel_result
-        reason = cancel_result.rejection_reason or cancel_result.status.value
+        reason = cancel_result.rejection_reason or getattr(cancel_result.terminal_status, "value", None) or cancel_result.status.value
         print(f"⚠️ protective stop {stop_order_id} の解除が未確定です: {reason}")
         return False, cancel_result
 

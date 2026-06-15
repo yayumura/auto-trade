@@ -14,6 +14,7 @@ class StartupRecoveryReport:
     entry_unresolved_count: int
     exit_unresolved_count: int
     journal_unresolved_count: int
+    journal_corrupt_line_count: int
     active_orders_unknown_count: int
     wallet_snapshot_incomplete: bool
     needs_manual_review: bool
@@ -52,6 +53,7 @@ def build_startup_recovery_report(
 ) -> StartupRecoveryReport:
     counts = _count_positions(portfolio)
     journal_unresolved_count = 0 if order_journal_summary is None else order_journal_summary.unresolved_count
+    journal_corrupt_line_count = 0 if order_journal_summary is None else order_journal_summary.corrupt_lines
 
     active_orders_unknown_count = 0
     if active_orders_info is None:
@@ -72,6 +74,8 @@ def build_startup_recovery_report(
         blocking_reasons.append(f"ambiguous_positions:{counts['ambiguous']}")
     if journal_unresolved_count > 0:
         blocking_reasons.append(f"journal_unresolved:{journal_unresolved_count}")
+    if journal_corrupt_line_count > 0:
+        blocking_reasons.append(f"journal_corrupt_lines:{journal_corrupt_line_count}")
     if active_orders_unknown_count > 0:
         blocking_reasons.append(f"active_orders_unknown:{active_orders_unknown_count}")
 
@@ -82,6 +86,7 @@ def build_startup_recovery_report(
         entry_unresolved_count=counts["entry_unresolved"],
         exit_unresolved_count=counts["exit_unresolved"],
         journal_unresolved_count=journal_unresolved_count,
+        journal_corrupt_line_count=journal_corrupt_line_count,
         active_orders_unknown_count=active_orders_unknown_count,
         wallet_snapshot_incomplete=bool(wallet_snapshot_incomplete),
         needs_manual_review=bool(blocking_reasons),

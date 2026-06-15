@@ -19,6 +19,15 @@ from auto_trade import (
 )
 from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
 from core.kabucom_order_state import CancelResult, CancelStatus, CancelTerminalStatus
+from core.kabucom_order_state import StockOrderAction
+
+
+def _side_from_action(action):
+    if action == StockOrderAction.MARGIN_CLOSE_LONG:
+        return "1"
+    if action == StockOrderAction.MARGIN_NEW_LONG:
+        return "2"
+    return str(action)
 
 
 def _build_snapshot_df():
@@ -166,11 +175,12 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
                 }
             ]
 
-        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
+        def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
             captured.update({
                 "code": code,
                 "shares": shares,
-                "side": side,
+                "action": action,
+                "side": _side_from_action(action),
                 "trigger_price": trigger_price,
                 "hold_id": hold_id,
                 "exchange": exchange,
@@ -193,6 +203,7 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
     assert captured == {
         "code": "1000",
         "shares": 300,
+        "action": StockOrderAction.MARGIN_CLOSE_LONG,
         "side": "1",
         "trigger_price": 99.0,
         "hold_id": "HOLD-1",
@@ -277,7 +288,7 @@ def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_id
                 }
             ]
 
-        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
+        def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
             return SimpleNamespace(broker_order_id="STOP-1", status="accepted")
 
     assert record["execution_ids"] == ("EX-1", "EX-2")
@@ -287,6 +298,65 @@ def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_id
         trigger_price=99.0,
         expected_shares=300,
     ) == "STOP-1"
+
+
+def test_arm_daytrade_protective_stop_uses_close_positions_route_when_available():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=100,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+        execution_ids=("EX-1", "EX-2"),
+    )
+
+    captured = {}
+
+    class _Broker:
+        def _build_close_positions_for_symbol(self, code, requested_qty, managed_execution_ids=None):
+            assert code == "1000"
+            assert requested_qty == 100
+            assert managed_execution_ids == {"EX-1", "EX-2"}
+            return {
+                "close_positions": [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}],
+                "exchange": 1,
+                "margin_trade_type": 3,
+            }
+
+        def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
+            captured.update({
+                "code": code,
+                "shares": shares,
+                "action": action,
+                "side": _side_from_action(action),
+                "trigger_price": trigger_price,
+                "hold_id": hold_id,
+                "close_positions": close_positions,
+                "exchange": exchange,
+                "margin_trade_type": margin_trade_type,
+            })
+            return SimpleNamespace(broker_order_id="STOP-MULTI", status="accepted")
+
+    stop_order_id = auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=100,
+    )
+
+    assert stop_order_id == "STOP-MULTI"
+    assert captured["hold_id"] is None
+    assert captured["action"] == StockOrderAction.MARGIN_CLOSE_LONG
+    assert captured["close_positions"] == [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}]
+    assert captured["exchange"] == 1
+    assert captured["margin_trade_type"] == 3
 
 
 def test_arm_daytrade_protective_stop_refuses_when_hold_qty_is_unknown():
@@ -396,8 +466,8 @@ def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_
                 confirmed=True,
             )
 
-        def execute_chase_order(self, code, shares, side, atr=0):
-            call_order.append(("execute_chase_order", code, shares, side))
+        def execute_chase_order(self, code, shares, action, atr=0):
+            call_order.append(("execute_chase_order", code, shares, _side_from_action(action)))
             assert shares == 300
             self.positions[0]["shares"] = 150
             self.positions[0]["hold_qty"] = 150
@@ -417,8 +487,8 @@ def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_
             call_order.append(("get_positions", None))
             return list(self.positions)
 
-        def execute_stop_order(self, code, shares, side, trigger_price, hold_id=None, exchange=None, margin_trade_type=None):
-            call_order.append(("execute_stop_order", code, shares, side, trigger_price, hold_id, exchange, margin_trade_type))
+        def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
+            call_order.append(("execute_stop_order", code, shares, _side_from_action(action), trigger_price, hold_id, close_positions, exchange, margin_trade_type))
             return SimpleNamespace(broker_order_id="STOP-2", status="accepted")
 
         def log_trade(self, trade_record):
@@ -504,7 +574,7 @@ def test_close_daytrade_positions_by_signal_marks_partial_remainder_unresolved_w
                 confirmed=True,
             )
 
-        def execute_chase_order(self, code, shares, side, atr=0):
+        def execute_chase_order(self, code, shares, action, atr=0):
             self.positions[0]["shares"] = 150
             self.positions[0]["hold_qty"] = 150
             self.positions[0]["available_qty"] = 150
@@ -860,7 +930,6 @@ def test_close_daytrade_positions_skips_exit_when_protective_stop_filled_before_
                 request_sent=True,
                 confirmed=True,
                 terminal_status=CancelTerminalStatus.FILLED_BEFORE_CANCEL,
-                rejection_reason="filled_before_cancel",
             )
 
         def execute_chase_order(self, *args, **kwargs):
@@ -1303,6 +1372,17 @@ def test_is_board_quote_snapshot_fresh_rejects_stale_or_cross_day_quotes():
     assert not auto_trade._is_board_quote_snapshot_fresh(cross_day_boards, reference_time, max_age_seconds=600)
 
 
+def test_is_board_quote_snapshot_fresh_falls_back_to_received_at_when_quote_timestamps_are_missing():
+    boards = {
+        "1000": {
+            "received_at": pd.Timestamp("2026-04-21 09:14:00", tz="Asia/Tokyo"),
+        }
+    }
+    reference_time = pd.Timestamp("2026-04-21 09:15:00", tz="Asia/Tokyo")
+
+    assert auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
+
+
 def test_acquire_lock_writes_metadata_and_release_removes_owned_lock():
     with tempfile.TemporaryDirectory() as tmpdir:
         lock_path = Path(tmpdir) / "bot.lock"
@@ -1378,8 +1458,6 @@ def test_merge_account_state_preserves_live_strategy_state_when_wallet_snapshot_
     }
     snapshot = {
         "cash": 0.0,
-        "configured_risk_capital": 0.0,
-        "realized_pnl_today": 0.0,
         "stock_buying_power": 333.0,
         "margin_buying_power": 0.0,
         "wallet_snapshot_incomplete": True,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import psutil
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
+from core.kabucom_order_state import StockOrderAction
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -566,7 +567,11 @@ def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
     for board in boards.values():
         if not isinstance(board, dict):
             return False
-        quote_dt = _coerce_jst_datetime(board.get("quote_timestamp") or board.get("current_price_timestamp"))
+        quote_dt = _coerce_jst_datetime(
+            board.get("quote_timestamp")
+            or board.get("current_price_timestamp")
+            or board.get("received_at")
+        )
         if quote_dt is None:
             return False
         if quote_dt.date() != reference_dt.date():
@@ -628,44 +633,100 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
 
     execution_id = position.get("execution_id")
     execution_ids = position.get("execution_ids")
-    live_position = _find_live_managed_position_for_entry(
-        broker=broker,
-        code=code,
-        execution_id=execution_id,
-        execution_ids=execution_ids,
-        shares=expected_shares if expected_shares is not None else position.get("shares"),
-    )
-    if live_position is None:
-        print(f"⚠️ {code} の保護逆指値を設定するためのライブ建玉が特定できませんでした。")
-        return None
-
-    hold_id = str(live_position.get("hold_id") or live_position.get("execution_id") or "").strip()
-    if not hold_id:
-        print(f"⚠️ {code} の保護逆指値に必要な HoldID が取得できませんでした。")
-        return None
-
-    if live_position.get("hold_qty") is None or live_position.get("available_qty") is None:
-        print(f"⚠️ {code} の保護逆指値に必要な建玉数量が不明です。")
-        return None
-
-    shares = int(expected_shares if expected_shares is not None else live_position.get("shares", position.get("shares", 0)) or 0)
+    shares = int(expected_shares if expected_shares is not None else position.get("shares", 0) or 0)
     if shares <= 0:
         return None
 
-    exchange = live_position.get("exchange")
-    margin_trade_type = live_position.get("margin_trade_type")
+    normalized_execution_ids = []
+    raw_execution_ids = execution_ids
+    if isinstance(raw_execution_ids, str):
+        raw_execution_ids = [raw_execution_ids]
+    elif raw_execution_ids is None:
+        raw_execution_ids = []
+    elif not isinstance(raw_execution_ids, (list, tuple, set)):
+        raw_execution_ids = [raw_execution_ids]
+    for item in raw_execution_ids:
+        execution_text = str(item or "").strip()
+        if execution_text and execution_text not in normalized_execution_ids:
+            normalized_execution_ids.append(execution_text)
+    execution_id_text = str(execution_id or "").strip()
+    if execution_id_text and execution_id_text not in normalized_execution_ids:
+        normalized_execution_ids.insert(0, execution_id_text)
+    managed_execution_ids = set(normalized_execution_ids)
+
+    close_route = None
+    build_close_positions = getattr(broker, "_build_close_positions_for_symbol", None)
+    if callable(build_close_positions):
+        try:
+            close_route = build_close_positions(
+                code,
+                shares,
+                managed_execution_ids=managed_execution_ids or None,
+            )
+        except TypeError:
+            close_route = build_close_positions(code, shares)
+
+    close_positions = None
+    exchange = None
+    margin_trade_type = None
+    hold_id = None
+    live_position = None
+    if close_route and close_route.get("close_positions"):
+        close_positions = list(close_route["close_positions"])
+        exchange = close_route.get("exchange")
+        margin_trade_type = close_route.get("margin_trade_type")
+        hold_ids = [
+            str(item.get("HoldID") or "").strip()
+            for item in close_positions
+            if isinstance(item, dict) and str(item.get("HoldID") or "").strip()
+        ]
+        if len(hold_ids) == 1:
+            hold_id = hold_ids[0]
+    else:
+        live_position = _find_live_managed_position_for_entry(
+            broker=broker,
+            code=code,
+            execution_id=execution_id,
+            execution_ids=execution_ids,
+            shares=expected_shares if expected_shares is not None else position.get("shares"),
+        )
+        if live_position is None:
+            print(f"⚠️ {code} の保護逆指値を設定するためのライブ建玉が特定できませんでした。")
+            return None
+
+        hold_id = str(live_position.get("hold_id") or live_position.get("execution_id") or "").strip()
+        if not hold_id:
+            print(f"⚠️ {code} の保護逆指値に必要な HoldID が取得できませんでした。")
+            return None
+
+        if live_position.get("hold_qty") is None or live_position.get("available_qty") is None:
+            print(f"⚠️ {code} の保護逆指値に必要な建玉数量が不明です。")
+            return None
+
+        exchange = live_position.get("exchange")
+        margin_trade_type = live_position.get("margin_trade_type")
+
     stop_result = broker.execute_stop_order(
         code,
         shares,
-        side="1",
+        action=StockOrderAction.MARGIN_CLOSE_LONG,
         trigger_price=trigger_price,
         hold_id=hold_id,
+        close_positions=close_positions,
         exchange=None if exchange is None else int(exchange),
         margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
     )
     stop_order_id = getattr(stop_result, "broker_order_id", None)
     if stop_result and stop_order_id:
-        position["hold_id"] = hold_id
+        if close_positions and len(close_positions) > 1:
+            position["hold_ids"] = tuple(
+                str(item.get("HoldID") or "").strip()
+                for item in close_positions
+                if isinstance(item, dict) and str(item.get("HoldID") or "").strip()
+            )
+            position.pop("hold_id", None)
+        elif hold_id:
+            position["hold_id"] = hold_id
         if exchange is not None:
             position["exchange"] = exchange
         if margin_trade_type is not None:
@@ -1094,7 +1155,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             exit_actions.append(f"SELL {code} - {exit_reason} (@{observed_price:,.1f})")
             continue
 
-        details = broker.execute_chase_order(code, shares, side="1", atr=buy_atr)
+        details = broker.execute_chase_order(code, shares, action=StockOrderAction.MARGIN_CLOSE_LONG, atr=buy_atr)
         filled_shares = 0
         observed_price = current_price
         if isinstance(details, dict) and details:
@@ -1595,15 +1656,23 @@ def _main_exec():
         print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
     account = ensure_daytrade_week_state(account, initial_total, datetime.datetime.now(JST))
 
+    initial_active_orders_info = None
+    if not is_sim:
+        try:
+            initial_active_orders_info = broker.get_active_orders()
+        except Exception:
+            initial_active_orders_info = None
+
     order_journal_replay_summary = build_order_journal_replay_summary()
     startup_recovery_report = build_startup_recovery_report(
         portfolio=portfolio,
-        active_orders_info=None,
+        active_orders_info=initial_active_orders_info,
         order_journal_summary=order_journal_replay_summary,
         wallet_snapshot_incomplete=bool(account.get("wallet_snapshot_incomplete")),
     )
     account["order_journal_unresolved_count"] = order_journal_replay_summary.unresolved_count
     account["order_journal_total_intents"] = len(order_journal_replay_summary.intents)
+    account["order_journal_corrupt_count"] = order_journal_replay_summary.corrupt_lines
     account["order_journal_unresolved_keys"] = [
         intent.tracking_key for intent in order_journal_replay_summary.unresolved_intents[:25]
     ]
@@ -1778,6 +1847,7 @@ def _main_exec():
         )
         account["order_journal_unresolved_count"] = current_order_journal_replay_summary.unresolved_count
         account["order_journal_total_intents"] = len(current_order_journal_replay_summary.intents)
+        account["order_journal_corrupt_count"] = current_order_journal_replay_summary.corrupt_lines
         account["order_journal_unresolved_keys"] = [
             intent.tracking_key for intent in current_order_journal_replay_summary.unresolved_intents[:25]
         ]
@@ -2178,7 +2248,12 @@ def _main_exec():
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                         opened_count += 1
                     else:
-                        details = broker.execute_chase_order(item['code'], shares, side="2", atr=float(item.get('atr', 0.0)))
+                        details = broker.execute_chase_order(
+                            item['code'],
+                            shares,
+                            action=StockOrderAction.MARGIN_NEW_LONG,
+                            atr=float(item.get('atr', 0.0)),
+                        )
                         actual_qty = int(details.get("filled_qty", details.get("Qty", 0)) or 0) if isinstance(details, dict) else 0
                         unresolved_entry = bool(isinstance(details, dict) and details.get("unresolved"))
                         if actual_qty > 0:

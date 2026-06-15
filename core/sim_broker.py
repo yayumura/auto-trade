@@ -6,6 +6,7 @@ from core.broker import BaseBroker
 from core.config import ACCOUNT_FILE, PORTFOLIO_FILE, HISTORY_FILE, EXECUTION_LOG_FILE, EXECUTION_AUDIT_LOG_FILE, INITIAL_CASH
 from core.file_io import atomic_write_json, safe_read_json, append_csv_rows, append_jsonl
 from core.portfolio_state import load_portfolio_positions, write_portfolio_state
+from core.kabucom_order_state import StockOrderAction, resolve_stock_order_action_context
 
 class SimulationBroker(BaseBroker):
     """
@@ -33,11 +34,13 @@ class SimulationBroker(BaseBroker):
         """auto_trade.py との互換性のためのエイリアス（M-3修正）"""
         self.save_positions(portfolio)
 
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> str:
+    def execute_market_order(self, code: str, shares: int, action: StockOrderAction, price: float = 0) -> str:
         """ 
         シミュレーションでは常に即時成功とみなし、ダミーIDを返す。
         V18.1: スリッページを反映した実行価格のシミュレーション。
         """
+        context = resolve_stock_order_action_context(action, allow_short=False)
+        side = context.side
         from core.config import SLIPPAGE_RATE
         exec_price = price
         if price > 0:
@@ -94,16 +97,18 @@ class SimulationBroker(BaseBroker):
             "pnl": gross_pnl
         }
 
-    def execute_chase_order(self, code: str, shares: int, side: str, atr: float = 0) -> str:
+    def execute_chase_order(self, code: str, shares: int, action: StockOrderAction, atr: float = 0) -> str:
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
         # 成行注文としてスリッページを適用
-        return self.execute_market_order(code, shares, side)
+        return self.execute_market_order(code, shares, action)
 
-    def execute_stop_order(self, code: str, shares: int, side: str, trigger_price: float, current_open: float = None) -> dict:
+    def execute_stop_order(self, code: str, shares: int, action: StockOrderAction, trigger_price: float, current_open: float = None) -> dict:
         """ 
         [V18.2 Strictness] 逆指値（ストップロス）のシミュレーション実行。
         - 始値がトリガー価格を下回っている（ギャップダウン）場合、始値で約定させる。
         """
+        context = resolve_stock_order_action_context(action, allow_short=False)
+        side = context.side
         from core.config import SLIPPAGE_RATE
         exec_price = trigger_price
         
