@@ -33,6 +33,14 @@ class StockOrderAction(Enum):
     MARGIN_CLOSE_SHORT = "margin_close_short"
 
 
+@dataclass(frozen=True)
+class StockOrderActionContext:
+    side: str
+    cash_margin: int
+    deliv_type: int
+    requires_close_positions: bool
+
+
 class CancelStatus(Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -273,17 +281,61 @@ def resolve_cancel_terminal_status(parsed_order: ParsedOrder | None) -> CancelTe
     return None
 
 
-def resolve_stock_order_action(side: str, cash_margin: int | None = None) -> StockOrderAction:
+def resolve_stock_order_action(side: str, cash_margin: int | None = None, *, allow_short: bool = False) -> StockOrderAction:
     side_text = str(side or "").strip()
     if side_text == "2":
         if cash_margin == 3:
+            if not allow_short:
+                raise ValueError("Unsupported stock order action: MARGIN_CLOSE_SHORT")
             return StockOrderAction.MARGIN_CLOSE_SHORT
         return StockOrderAction.MARGIN_NEW_LONG
     if side_text == "1":
         if cash_margin == 2:
+            if not allow_short:
+                raise ValueError("Unsupported stock order action: MARGIN_NEW_SHORT")
             return StockOrderAction.MARGIN_NEW_SHORT
         return StockOrderAction.MARGIN_CLOSE_LONG
     raise ValueError(f"Unsupported stock order side: {side!r}")
+
+
+def resolve_stock_order_action_context(
+    action: StockOrderAction,
+    *,
+    allow_short: bool = False,
+) -> StockOrderActionContext:
+    if action == StockOrderAction.MARGIN_NEW_LONG:
+        return StockOrderActionContext(
+            side="2",
+            cash_margin=2,
+            deliv_type=0,
+            requires_close_positions=False,
+        )
+    if action == StockOrderAction.MARGIN_CLOSE_LONG:
+        return StockOrderActionContext(
+            side="1",
+            cash_margin=3,
+            deliv_type=2,
+            requires_close_positions=True,
+        )
+    if action == StockOrderAction.MARGIN_NEW_SHORT:
+        if not allow_short:
+            raise ValueError("Unsupported stock order action: MARGIN_NEW_SHORT")
+        return StockOrderActionContext(
+            side="1",
+            cash_margin=2,
+            deliv_type=0,
+            requires_close_positions=False,
+        )
+    if action == StockOrderAction.MARGIN_CLOSE_SHORT:
+        if not allow_short:
+            raise ValueError("Unsupported stock order action: MARGIN_CLOSE_SHORT")
+        return StockOrderActionContext(
+            side="2",
+            cash_margin=3,
+            deliv_type=2,
+            requires_close_positions=True,
+        )
+    raise ValueError(f"Unsupported stock order action: {action!r}")
 
 
 _ACTIVE_RAW_STATES = {1, 2, 3, 4}

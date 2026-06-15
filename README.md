@@ -284,7 +284,7 @@ pip install -r requirements.txt
 `.env` には少なくとも次の系統の設定が必要です。
 
 - auカブコム証券 API
-- `KABUCOM_API_PASSWORD` と、必要に応じて注文用の `KABUCOM_ORDER_PASSWORD`
+- `KABUCOM_API_PASSWORD` と、LIVE では明示必須の注文用 `KABUCOM_ORDER_PASSWORD`（TEST では API password からの互換 fallback 可）
 - J-Quants
 - AI フィルタ用 API キー
 - 通知先やデバッグ設定
@@ -607,6 +607,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - signal/manual exit 後に partial remainder の protective stop を再 arm すること
   - partial remainder の protective stop rearm が失敗したら unresolved exit として止めること
   - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
+  - `received_at` を使って board quote freshness を判定し、`quote_timestamp` / `current_price_timestamp` 欠損でも落とさないこと
+  - multi-HoldID の protective stop を `ClosePositions` 経路で設定し、空の close route は通さないこと
   - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
   - protective stop が filled-before-cancel だった場合も exit を送らずに止めること
   - shared flatten 経路でも protective stop cancel 未確定なら exit を送らないこと
@@ -622,6 +624,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - unexpected exception が最後の runtime state を使って safe shutdown を試みること
   - board quote freshness helper が stale / cross-day quote を entry 前に落とすこと
 - `tests/test_kabucom_broker.py`
+  - `resolve_stock_order_action()` が long-only の fail-closed になり、short action を拒否すること
   - `core/kabucom_broker.py` の POST 再送抑止
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
   - `OrdersSuccess` 系の注文状態パーサーと `State=1..10` の解釈
@@ -633,7 +636,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `live_approval_manifest` の hash が strategy 定数変更で変わり、`generated_at` では変わらないこと
   - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
-  - live 口座余力の `wallet/cash` / `wallet/margin` 分離
+  - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
   - `BrokerEnvironment` / `BrokerEndpointConfig` の mismatch を constructor / validate で拒否すること
   - live / test endpoint の mutating write が trade mode 不一致では拒否されること
   - 新規注文の `Exchange` 設定参照と返済ルート由来の `Exchange` / `MarginTradeType`
@@ -647,8 +650,14 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `cancelorder` の `OrderID` 送信と cancel 完了確認、unknown order 監視
   - cancel 完了時の terminal reason を保持し、filled-before-cancel / expired を見分けること
   - `KABUCOM_ORDER_PASSWORD` を設定した場合に sendorder / cancelorder が API 認証用パスワードと分離されること
+  - LIVE では `KABUCOM_ORDER_PASSWORD` 未設定の sendorder / cancelorder を送信前に reject すること
   - `POST 401` の再送抑止と `GET 401` の再試行
   - managed position だけを使う売り返済の close position 割り当て
+  - `execution_id` 単位で local metadata を復元し、symbol merge で状態を混ぜないこと
+  - `_build_close_positions_for_symbol()` が execution_id 指定で対象建玉を絞り込むこと
+  - sell side の `ClosePositions` 空配列を fail closed にすること
+  - `StockOrderAction` ベースの public order API が long-only contract を守り、unsupported short action を送信前に reject すること
+  - `execute_chase_order()` が約定完了時に `FILLED` journal event を残すこと
   - 注文一覧取得失敗時の fail closed
   - API health が 401 を成功扱いしないこと
   - launcher の port reachable と authenticated ready を分離し、401 を認証完了扱いしないこと
@@ -663,6 +672,9 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - fixture の内容変更で hash が変わること
   - official `kabucom/kabusapi` の `reference/kabu_STATION_API.yaml` (commit `0119077f1647b7c3ff64460b862c1978142df43d`) と version `1.5` を manifest に記録すること
   - order / cancel の request password policy を検証すること
+- `tests/test_kabucom_contracts_test_fixture.py`
+  - `KABUCOM_TEST` 用の sanitized contract fixture が validators を通ること
+  - `fixture_kind` と `password_policy` が TEST 用 fixture に明記されていること
 - `tests/test_analyze_intraday_logs.py`
   - `analyze_intraday_logs.py` の decision 集計
   - intraday trade path 集計
@@ -677,7 +689,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - order journal に `schema_version` / `event_id` / `sequence` / `process_id` を付けること
   - JSONL append が連番で追記されること
   - journal replay が PLANNED / ACCEPTED / CANCEL_REQUESTED の未解決 intent を拾うこと
-  - journal replay が filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
+  - startup recovery が corrupt journal 行や unresolved active orders を manual review にすること
+  - journal replay が `FILLED` / filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
 - `tests/test_portfolio_state.py`
   - `portfolio.json` を schema-versioned JSON で保存すること
   - legacy CSV を読み込んで migration できること
@@ -712,4 +725,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-12
+Last updated: 2026-06-15

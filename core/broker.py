@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from core.kabucom_order_state import StockOrderAction
+
 class BaseBroker(ABC):
     """
     証券会社（またはシミュレータ）の抽象基底クラス。
@@ -52,7 +54,7 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    def execute_market_order(self, code: str, shares: int, side: str, price: float = 0) -> Any:
+    def execute_market_order(self, code: str, shares: int, action: StockOrderAction, price: float = 0) -> Any:
         """
         現物の成行・指値注文を発注し、注文IDまたは structured result を返します。
         price > 0 の場合は指値（Marketable Limit Order等）として扱います。

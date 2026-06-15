@@ -51,6 +51,10 @@ class BoardQuote:
     best_buy_qty: int | None
     quote_timestamp: datetime | None
     current_price_timestamp: datetime | None
+    bid_timestamp: datetime | None
+    ask_timestamp: datetime | None
+    opening_price_timestamp: datetime | None
+    received_at: datetime | None
     bid_sign_raw: str | None
     ask_sign_raw: str | None
     current_price_status: int | None
@@ -65,6 +69,14 @@ class BoardQuote:
             payload["quote_timestamp"] = payload["quote_timestamp"].isoformat()
         if payload.get("current_price_timestamp") is not None:
             payload["current_price_timestamp"] = payload["current_price_timestamp"].isoformat()
+        if payload.get("bid_timestamp") is not None:
+            payload["bid_timestamp"] = payload["bid_timestamp"].isoformat()
+        if payload.get("ask_timestamp") is not None:
+            payload["ask_timestamp"] = payload["ask_timestamp"].isoformat()
+        if payload.get("opening_price_timestamp") is not None:
+            payload["opening_price_timestamp"] = payload["opening_price_timestamp"].isoformat()
+        if payload.get("received_at") is not None:
+            payload["received_at"] = payload["received_at"].isoformat()
         return payload
 
 
@@ -77,8 +89,14 @@ def parse_board_quote(symbol: str, raw: Mapping[str, Any]) -> BoardQuote:
     current_price_status = _coerce_int(raw.get("CurrentPriceStatus"))
     upper_limit = _coerce_float(raw.get("UpperLimit"))
     lower_limit = _coerce_float(raw.get("LowerLimit"))
-    quote_timestamp = _parse_time_like(raw.get("QuoteTime") or raw.get("CurrentPriceTime"))
     current_price_timestamp = _parse_time_like(raw.get("CurrentPriceTime"))
+    quote_timestamp = _parse_time_like(raw.get("QuoteTime")) or current_price_timestamp
+    received_at = _parse_time_like(raw.get("received_at") or raw.get("ReceivedAt"))
+    if quote_timestamp is None:
+        quote_timestamp = received_at
+    bid_timestamp = _parse_time_like(raw.get("BidTime"))
+    ask_timestamp = _parse_time_like(raw.get("AskTime"))
+    opening_price_timestamp = _parse_time_like(raw.get("OpeningPriceTime"))
     bid_sign_raw = raw.get("BidSign")
     ask_sign_raw = raw.get("AskSign")
 
@@ -103,6 +121,10 @@ def parse_board_quote(symbol: str, raw: Mapping[str, Any]) -> BoardQuote:
         best_buy_qty=best_buy_qty,
         quote_timestamp=quote_timestamp,
         current_price_timestamp=current_price_timestamp,
+        bid_timestamp=bid_timestamp,
+        ask_timestamp=ask_timestamp,
+        opening_price_timestamp=opening_price_timestamp,
+        received_at=received_at,
         bid_sign_raw=str(bid_sign_raw) if bid_sign_raw is not None else None,
         ask_sign_raw=str(ask_sign_raw) if ask_sign_raw is not None else None,
         current_price_status=current_price_status,

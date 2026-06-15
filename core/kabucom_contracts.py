@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-CONTRACT_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "contracts" / "kabucom_contract_fixture.json"
+OFFICIAL_CONTRACT_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "contracts" / "kabucom_contract_fixture.json"
+TEST_CONTRACT_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "contracts" / "kabucom_test_contract_fixture.json"
+CONTRACT_FIXTURE_PATH = OFFICIAL_CONTRACT_FIXTURE_PATH
 
 
 @dataclass(frozen=True)
