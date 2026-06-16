@@ -359,6 +359,57 @@ def test_arm_daytrade_protective_stop_uses_close_positions_route_when_available(
     assert captured["margin_trade_type"] == 3
 
 
+def test_arm_daytrade_protective_stop_refuses_unconfirmed_accepted_stop():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+    )
+
+    class _Broker:
+        def get_positions(self):
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                    "hold_qty": 300,
+                    "available_qty": 300,
+                }
+            ]
+
+        def execute_stop_order(self, *args, **kwargs):
+            return SimpleNamespace(
+                broker_order_id="STOP-1",
+                status="accepted",
+                confirmed=False,
+                confirmation_reason="stop_order_not_found",
+            )
+
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) is None
+    assert record["protective_stop_status"] == "failed"
+    assert record["protective_stop_confirmation_reason"] == "stop_order_not_found"
+    assert record["protective_stop_order_id"] is None
+
+
 def test_arm_daytrade_protective_stop_refuses_when_hold_qty_is_unknown():
     record = build_daytrade_position_record(
         {

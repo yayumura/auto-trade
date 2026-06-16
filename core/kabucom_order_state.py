@@ -122,6 +122,8 @@ class OrderSubmissionResult:
     result_code: int | None = None
     rejection_reason: str | None = None
     response_text: str | None = None
+    confirmed: bool = False
+    confirmation_reason: str | None = None
 
     def __bool__(self) -> bool:
         return self.status == SubmissionStatus.ACCEPTED and bool(self.broker_order_id)
@@ -136,6 +138,8 @@ class OrderSubmissionResult:
         side: str,
         limit_price: float | None = None,
         trigger_price: float | None = None,
+        confirmed: bool = False,
+        confirmation_reason: str | None = None,
     ) -> "OrderSubmissionResult":
         return cls(
             status=submission.status,
@@ -152,6 +156,8 @@ class OrderSubmissionResult:
             result_code=submission.result_code,
             rejection_reason=submission.rejection_reason,
             response_text=submission.response_text,
+            confirmed=bool(confirmed),
+            confirmation_reason=confirmation_reason,
         )
 
 
