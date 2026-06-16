@@ -688,12 +688,40 @@ class TestKabucomBroker(unittest.TestCase):
     def test_execute_stop_order_allows_protective_exit_when_live_gate_blocks_entries(self):
         captured = {}
         journal_events = []
+        stop_details = [
+            {
+                "OrderId": "STOP-1",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 3,
+                "DelivType": 2,
+                "Exchange": 1,
+                "MarginTradeType": 3,
+                "Side": "1",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3000.0,
+                    "UnderOver": 1,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "ClosePositions": [{"HoldID": "HOLD-1", "Qty": 100}],
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
 
         def fake_api_request(method, endpoint, **kwargs):
-            captured["method"] = method
-            captured["endpoint"] = endpoint
-            captured["json"] = kwargs["json"]
-            return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
+            if method == "POST" and endpoint == "sendorder":
+                captured["method"] = method
+                captured["endpoint"] = endpoint
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
+            if method == "GET" and endpoint == "orders?id=STOP-1":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
 
         with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
             patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
@@ -731,6 +759,7 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(result.broker_order_id, "STOP-1")
         self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
         self.assertTrue(result.request_sent)
+        self.assertTrue(result.confirmed)
         self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
         self.assertEqual(result.trigger_price, 3000.0)
         self.assertEqual(captured["method"], "POST")
@@ -821,12 +850,40 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_execute_stop_order_normalizes_trigger_price(self):
         captured = {}
+        stop_details = [
+            {
+                "OrderId": "STOP-1",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 3,
+                "DelivType": 2,
+                "Exchange": 1,
+                "MarginTradeType": 3,
+                "Side": "1",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3000.0,
+                    "UnderOver": 1,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "ClosePositions": [{"HoldID": "HOLD-1", "Qty": 100}],
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
 
         def fake_api_request(method, endpoint, **kwargs):
-            captured["method"] = method
-            captured["endpoint"] = endpoint
-            captured["json"] = kwargs["json"]
-            return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
+            if method == "POST" and endpoint == "sendorder":
+                captured["method"] = method
+                captured["endpoint"] = endpoint
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-1"})
+            if method == "GET" and endpoint == "orders?id=STOP-1":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
 
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
@@ -862,15 +919,44 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["json"]["ReverseLimitOrder"]["TriggerPrice"], 3000.0)
         self.assertEqual(captured["json"]["Exchange"], 1)
         self.assertIn("ClosePositions", captured["json"])
+        self.assertTrue(result.confirmed)
 
     def test_execute_stop_order_accepts_multiple_close_positions_for_multi_hold_protective_stop(self):
         captured = {}
+        stop_details = [
+            {
+                "OrderId": "STOP-MULTI",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 3,
+                "DelivType": 2,
+                "Exchange": 1,
+                "MarginTradeType": 3,
+                "Side": "1",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3000.0,
+                    "UnderOver": 1,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "ClosePositions": [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}],
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
 
         def fake_api_request(method, endpoint, **kwargs):
-            captured["method"] = method
-            captured["endpoint"] = endpoint
-            captured["json"] = kwargs["json"]
-            return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-MULTI"})
+            if method == "POST" and endpoint == "sendorder":
+                captured["method"] = method
+                captured["endpoint"] = endpoint
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-MULTI"})
+            if method == "GET" and endpoint == "orders?id=STOP-MULTI":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
 
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
@@ -887,6 +973,7 @@ class TestKabucomBroker(unittest.TestCase):
 
         self.assertEqual(result.broker_order_id, "STOP-MULTI")
         self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.confirmed)
         self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["endpoint"], "sendorder")
@@ -918,10 +1005,37 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_execute_stop_order_uses_buy_side_reverse_limit_direction(self):
         captured = {}
+        stop_details = [
+            {
+                "OrderId": "STOP-2",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 2,
+                "DelivType": 0,
+                "Exchange": 9,
+                "MarginTradeType": 3,
+                "Side": "2",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3005.0,
+                    "UnderOver": 2,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
 
         def fake_api_request(method, endpoint, **kwargs):
-            captured["json"] = kwargs["json"]
-            return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-2"})
+            if method == "POST" and endpoint == "sendorder":
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-2"})
+            if method == "GET" and endpoint == "orders?id=STOP-2":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
 
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
@@ -930,7 +1044,10 @@ class TestKabucomBroker(unittest.TestCase):
 
         self.assertEqual(result.broker_order_id, "STOP-2")
         self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
+        self.assertTrue(result.confirmed)
         self.assertEqual(result.action, StockOrderAction.MARGIN_NEW_LONG)
+        self.assertEqual(result.trigger_price, 3005.0)
+        self.assertEqual(captured["json"]["ReverseLimitOrder"]["TriggerPrice"], 3005.0)
         self.assertEqual(captured["json"]["ReverseLimitOrder"]["UnderOver"], 2)
 
     def test_execute_stop_order_aborts_without_hold_id_on_sell_side(self):

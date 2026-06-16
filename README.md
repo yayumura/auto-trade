@@ -150,6 +150,7 @@ auto-trade/
     ├── test_jp_jquants_fetcher_v2.py
     ├── test_jp_optimizer.py
     ├── test_jp_walkforward.py
+    ├── test_kabucom_contracts_test_fixture.py
     └── test_logic.py
 ```
 
@@ -715,6 +716,7 @@ python -m pytest tests/test_jp_walkforward.py
 python -m pytest tests/test_auto_trade.py
 python -m pytest tests/test_kabucom_broker.py
 python -m pytest tests/test_kabucom_contracts.py
+python -m pytest tests/test_kabucom_contracts_test_fixture.py
 python -m pytest tests/test_analyze_intraday_logs.py
 ```
 
@@ -725,4 +727,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-15
+Last updated: 2026-06-16

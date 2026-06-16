@@ -1,0 +1,13 @@
+{
+  "api_spec_acquired_at": "2026-06-12",
+  "api_spec_commit_sha": "0119077f1647b7c3ff64460b862c1978142df43d",
+  "api_spec_version": "1.5",
+  "diff_document_hash": "sha256:28983f39c7be5f4300884ef8cd73b4d2d43f001032133c0493750912397ec8d1",
+  "generated_at": null,
+  "official_fixture_hash": "sha256:6a813d0788c20916596c33540e7eafcdf5b4756ee62407cb120aa319437f1328",
+  "official_fixture_kind": "OFFICIAL_OPENAPI",
+  "password_policy": "api_password_fallback_allowed",
+  "schema_version": 1,
+  "test_fixture_hash": "sha256:59cec656bac30705ae83aa2ed0e7d120976502135d7d734a47e78659a861b268",
+  "test_fixture_kind": "KABUCOM_TEST"
+}

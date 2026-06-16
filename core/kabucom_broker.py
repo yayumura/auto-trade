@@ -2,6 +2,7 @@ import os
 import requests
 import json
 import pandas as pd
+from decimal import Decimal
 from datetime import datetime
 import time
 import threading
@@ -548,6 +549,8 @@ class KabucomBroker(BaseBroker):
         request_sent: bool,
         limit_price: float | None = None,
         trigger_price: float | None = None,
+        confirmed: bool = False,
+        confirmation_reason: str | None = None,
     ) -> OrderSubmissionResult:
         return OrderSubmissionResult.from_submission(
             submission,
@@ -556,6 +559,8 @@ class KabucomBroker(BaseBroker):
             side=side,
             limit_price=limit_price,
             trigger_price=trigger_price,
+            confirmed=confirmed,
+            confirmation_reason=confirmation_reason,
         )
 
     def _extract_execution_fills(self, details: dict | None, parsed) -> tuple[ExecutionFill, ...]:
@@ -652,6 +657,132 @@ class KabucomBroker(BaseBroker):
             submission_status=submission_status,
             raw_details=enriched,
         )
+
+    def _normalize_close_positions_payload(self, close_positions: list | None) -> tuple[tuple[str, int], ...] | None:
+        if close_positions is None:
+            return None
+        if not isinstance(close_positions, list):
+            return None
+        normalized: list[tuple[str, int]] = []
+        for item in close_positions:
+            if not isinstance(item, dict):
+                return None
+            hold_id = str(item.get("HoldID") or item.get("hold_id") or "").strip()
+            qty_value = item.get("Qty")
+            try:
+                qty = int(qty_value or 0)
+            except (TypeError, ValueError):
+                return None
+            if not hold_id or qty <= 0:
+                return None
+            normalized.append((hold_id, qty))
+        return tuple(normalized)
+
+    def _confirm_stop_order_submission(
+        self,
+        *,
+        order_id: str,
+        expected_qty: int,
+        expected_trigger_price: float,
+        expected_close_positions: list | None,
+        side: str,
+        exchange: int | None,
+        margin_trade_type: int | None,
+    ) -> tuple[bool, str | None, dict | None]:
+        details = self.get_order_details(order_id)
+        if not isinstance(details, dict) or not details:
+            return False, "stop_order_not_found", None
+
+        parsed = parse_kabucom_order(details)
+        if parsed.process_state == OrderProcessState.UNKNOWN:
+            return False, "stop_order_state_unknown", details
+        if parsed.process_state != OrderProcessState.ACTIVE:
+            return False, f"stop_order_state_{parsed.process_state.value}", details
+        if parsed.order_qty != int(expected_qty):
+            return False, "stop_order_qty_mismatch", details
+        if parsed.cumulative_qty != 0:
+            return False, "stop_order_already_filled", details
+
+        actual_side = str(details.get("Side") or "").strip()
+        if actual_side and actual_side != str(side):
+            return False, "stop_order_side_mismatch", details
+
+        expected_cash_margin = 3 if str(side) == "1" else 2
+        actual_cash_margin = None
+        if "CashMargin" in details:
+            try:
+                actual_cash_margin = int(details.get("CashMargin") or 0)
+            except (TypeError, ValueError):
+                actual_cash_margin = None
+        if actual_cash_margin is not None and actual_cash_margin != expected_cash_margin:
+            return False, "stop_order_cash_margin_mismatch", details
+
+        expected_deliv_type = 0 if expected_cash_margin == 2 else 2
+        actual_deliv_type = None
+        if "DelivType" in details:
+            try:
+                actual_deliv_type = int(details.get("DelivType") or 0)
+            except (TypeError, ValueError):
+                actual_deliv_type = None
+        if actual_deliv_type is not None and actual_deliv_type != expected_deliv_type:
+            return False, "stop_order_deliv_type_mismatch", details
+
+        actual_exchange = None
+        if "Exchange" in details:
+            try:
+                actual_exchange = int(details.get("Exchange") or 0)
+            except (TypeError, ValueError):
+                actual_exchange = None
+        if exchange is not None and actual_exchange is not None and actual_exchange != int(exchange):
+            return False, "stop_order_exchange_mismatch", details
+
+        actual_margin_trade_type = None
+        if "MarginTradeType" in details:
+            try:
+                actual_margin_trade_type = int(details.get("MarginTradeType") or 0)
+            except (TypeError, ValueError):
+                actual_margin_trade_type = None
+        if margin_trade_type is not None and actual_margin_trade_type is not None and actual_margin_trade_type != int(margin_trade_type):
+            return False, "stop_order_margin_trade_type_mismatch", details
+
+        reverse_limit = details.get("ReverseLimitOrder")
+        if not isinstance(reverse_limit, dict):
+            return False, "stop_order_reverse_limit_missing", details
+        actual_trigger_price = reverse_limit.get("TriggerPrice")
+        if actual_trigger_price is None:
+            return False, "stop_order_trigger_price_missing", details
+        try:
+            if Decimal(str(actual_trigger_price)) != Decimal(str(expected_trigger_price)):
+                return False, "stop_order_trigger_price_mismatch", details
+        except Exception:
+            return False, "stop_order_trigger_price_mismatch", details
+
+        actual_under_over = None
+        if "UnderOver" in reverse_limit:
+            try:
+                actual_under_over = int(reverse_limit.get("UnderOver") or 0)
+            except (TypeError, ValueError):
+                actual_under_over = None
+        expected_under_over = 1 if str(side) == "1" else 2
+        if actual_under_over is not None and actual_under_over != expected_under_over:
+            return False, "stop_order_under_over_mismatch", details
+
+        actual_after_hit_order_type = None
+        if "AfterHitOrderType" in reverse_limit:
+            try:
+                actual_after_hit_order_type = int(reverse_limit.get("AfterHitOrderType") or 0)
+            except (TypeError, ValueError):
+                actual_after_hit_order_type = None
+        if actual_after_hit_order_type is not None and actual_after_hit_order_type != 1:
+            return False, "stop_order_after_hit_order_type_mismatch", details
+
+        expected_close_positions_payload = self._normalize_close_positions_payload(expected_close_positions)
+        if expected_close_positions_payload is not None:
+            actual_close_positions_payload = self._normalize_close_positions_payload(details.get("ClosePositions"))
+            if actual_close_positions_payload != expected_close_positions_payload:
+                return False, "stop_order_close_positions_mismatch", details
+
+        return True, None, details
 
     def get_positions(self) -> list:
         """ 
@@ -2579,13 +2710,61 @@ class KabucomBroker(BaseBroker):
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
             })
-            print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
+            confirmed = False
+            confirmation_reason = None
+            confirmation_details = None
+            if order_id:
+                confirmed, confirmation_reason, confirmation_details = self._confirm_stop_order_submission(
+                    order_id=order_id,
+                    expected_qty=int(shares),
+                    expected_trigger_price=float(normalized_trigger_price),
+                    expected_close_positions=close_positions,
+                    side=side,
+                    exchange=exchange,
+                    margin_trade_type=margin_trade_type,
+                )
+            if confirmed:
+                print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
+                return self._wrap_submission_result(
+                    submission,
+                    side=side,
+                    cash_margin=cash_margin,
+                    request_sent=True,
+                    trigger_price=float(normalized_trigger_price),
+                    confirmed=True,
+                )
+
+            confirmation_reason = confirmation_reason or "stop_order_confirmation_unavailable"
+            append_order_journal({
+                "event": "UNKNOWN",
+                "intent_id": intent_id,
+                "kind": "stop",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "trigger_price": float(normalized_trigger_price),
+                "hold_id": hold_id,
+                "order_id": order_id,
+                "http_status": submission.http_status,
+                "result": submission.result_code,
+                "confirmation_reason": confirmation_reason,
+                "confirmation_details": confirmation_details,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
+            print(
+                "⚠️ 逆指値注文は sendorder で受理されましたが、orders API の確認に失敗したため "
+                f"armed にしませんでした: {confirmation_reason}"
+            )
             return self._wrap_submission_result(
                 submission,
                 side=side,
                 cash_margin=cash_margin,
                 request_sent=True,
                 trigger_price=float(normalized_trigger_price),
+                confirmed=False,
+                confirmation_reason=confirmation_reason,
             )
         if submission.status == SubmissionStatus.REJECTED:
             append_order_journal({

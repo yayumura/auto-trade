@@ -1,11 +1,11 @@
 {
   "fixture_version": 1,
+  "fixture_kind": "OFFICIAL_OPENAPI",
   "api_spec_version": "1.5",
   "api_spec_commit_sha": "0119077f1647b7c3ff64460b862c1978142df43d",
   "api_spec_acquired_at": "2026-06-12",
   "requests": {
     "market_order": {
-      "Password": "<redacted>",
       "Symbol": "1234",
       "Exchange": 1,
       "SecurityType": 1,
@@ -20,7 +20,6 @@
       "ExpireDay": 0
     },
     "stop_order": {
-      "Password": "<redacted>",
       "Symbol": "1234",
       "Exchange": 1,
       "SecurityType": 1,
@@ -48,8 +47,7 @@
       }
     },
     "cancel_order": {
-      "OrderID": "ORDER-1",
-      "Password": "<redacted>"
+      "OrderID": "ORDER-1"
     }
   },
   "responses": {

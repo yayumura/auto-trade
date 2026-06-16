@@ -717,7 +717,8 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
     )
     stop_order_id = getattr(stop_result, "broker_order_id", None)
-    if stop_result and stop_order_id:
+    stop_confirmed = bool(getattr(stop_result, "confirmed", True))
+    if stop_result and stop_order_id and stop_confirmed:
         if close_positions and len(close_positions) > 1:
             position["hold_ids"] = tuple(
                 str(item.get("HoldID") or "").strip()
@@ -735,6 +736,14 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         position["protective_stop_trigger_price"] = round(trigger_price, 1)
         position["protective_stop_status"] = "armed"
         return stop_order_id
+
+    if stop_result and stop_order_id and not stop_confirmed:
+        confirmation_reason = str(getattr(stop_result, "confirmation_reason", "") or "stop_order_unconfirmed")
+        print(f"⚠️ {code} の保護逆指値は受理されましたが、orders API で確認できなかったため armed しませんでした: {confirmation_reason}")
+        position["protective_stop_status"] = "failed"
+        position["protective_stop_confirmation_reason"] = confirmation_reason
+        position["protective_stop_unconfirmed_order_id"] = stop_order_id
+        return None
 
     position["protective_stop_status"] = "failed"
     return None
