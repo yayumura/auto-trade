@@ -8415,3 +8415,19 @@
 - 再試行するとしたら:
   - Wednesday の low-breadth / strong-open 近傍に train-supported な別 pocket が増えたときだけ
   - contaminated holdout を見ながら同帯を細かく当て込むことはしない
+
+### 2026-06-17: Daytrade Open-Entry No-Lookahead Correction
+
+- 試したこと:
+  - `run_backtest_v16_production()` の open-entry 分岐で、同日 `breadth_ratio[i]` を参照していた箇所を前営業日基準へ寄せた
+  - `market_allowed` / `fallback` / `catchup` / `inverse` / `bull_etf` / leverage / selector の参照を as-of 整合させ、open-entry の判断が当日クローズ依存にならないようにした
+  - 回帰防止として `tests/test_backtest.py` に no-lookahead テストを追加した
+- 結果:
+  - `python -m pytest tests -q`
+    - `253 passed`
+- 判断:
+  - 採用
+  - これは戦略の当て込みではなく、バックテストの時点整合を本番側に寄せる correctness fix と判断した
+- 再試行するとしたら:
+  - 同種の時点ずれが他の shared strategy 経路にもないか、as-of boundary を軸に再点検する
+  - ただし `holdout` への当て込みとして breadth 閾値を触ることはしない

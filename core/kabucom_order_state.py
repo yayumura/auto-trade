@@ -41,6 +41,20 @@ class StockOrderActionContext:
     requires_close_positions: bool
 
 
+class EntryExecutionStatus(Enum):
+    COMPLETED = "completed"
+    PARTIAL_UNRESOLVED = "partial_unresolved"
+    ZERO_FILL_UNRESOLVED = "zero_fill_unresolved"
+    REJECTED = "rejected"
+
+
+class ExitExecutionStatus(Enum):
+    COMPLETED = "completed"
+    PARTIAL_UNRESOLVED = "partial_unresolved"
+    ZERO_FILL_UNRESOLVED = "zero_fill_unresolved"
+    REJECTED = "rejected"
+
+
 class CancelStatus(Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -125,8 +139,25 @@ class OrderSubmissionResult:
     confirmed: bool = False
     confirmation_reason: str | None = None
 
-    def __bool__(self) -> bool:
+    @property
+    def is_accepted(self) -> bool:
         return self.status == SubmissionStatus.ACCEPTED and bool(self.broker_order_id)
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.is_accepted and self.confirmed
+
+    @property
+    def is_protective_stop_armed(self) -> bool:
+        return self.is_confirmed
+
+    def __bool__(self) -> bool:
+        """Accepted submission with a broker order id.
+
+        This intentionally does not mean the order has been confirmed by the
+        follow-up orders API read.
+        """
+        return self.is_accepted
 
     @classmethod
     def from_submission(
@@ -199,10 +230,32 @@ class ExecutionWaitResult:
     def execution_ids(self) -> tuple[str, ...]:
         return tuple(fill.execution_id for fill in self.fills if fill.execution_id)
 
-    def to_legacy_dict(self, *, symbol: str | None = None, side: str | None = None) -> dict[str, Any]:
+    @property
+    def entry_execution_status(self) -> EntryExecutionStatus:
+        return classify_entry_execution_status(
+            unresolved=self.unresolved,
+            cumulative_qty=self.cumulative_qty,
+            terminal_reason=self.terminal_reason,
+        )
+
+    @property
+    def exit_execution_status(self) -> ExitExecutionStatus:
+        return classify_exit_execution_status(
+            unresolved=self.unresolved,
+            cumulative_qty=self.cumulative_qty,
+            terminal_reason=self.terminal_reason,
+        )
+
+    def to_legacy_dict(self, *, symbol: str | None = None, side: str | None = None, execution_kind: str = "entry") -> dict[str, Any]:
         average_price = self.average_price
         order_qty = self.cumulative_qty + max(0, int(self.remaining_qty))
         detail_state = 10 if self.unresolved else (5 if self.process_state == OrderProcessState.TERMINAL else 3)
+        if str(execution_kind).strip().lower() == "exit":
+            execution_status = self.exit_execution_status.value
+            execution_status_key = "exit_execution_status"
+        else:
+            execution_status = self.entry_execution_status.value
+            execution_status_key = "entry_execution_status"
         details = [
             {
                 "RecType": 8,
@@ -236,6 +289,8 @@ class ExecutionWaitResult:
             "has_partial_fill": self.cumulative_qty > 0 and self.remaining_qty > 0,
             "execution_ids": self.execution_ids,
             "execution_id": self.execution_ids[0] if self.execution_ids else None,
+            "execution_status": execution_status,
+            execution_status_key: execution_status,
             "__parsed_process_state__": self.process_state.value,
             "__parsed_terminal_reason__": None if self.terminal_reason is None else self.terminal_reason.value,
             "__parsed_cumulative_qty__": self.cumulative_qty,
@@ -342,6 +397,50 @@ def resolve_stock_order_action_context(
             requires_close_positions=True,
         )
     raise ValueError(f"Unsupported stock order action: {action!r}")
+
+
+def _classify_execution_status(
+    *,
+    unresolved: bool,
+    cumulative_qty: int,
+    terminal_reason: OrderTerminalReason | None,
+    status_enum: type[EntryExecutionStatus] | type[ExitExecutionStatus],
+):
+    if unresolved:
+        if cumulative_qty > 0:
+            return status_enum.PARTIAL_UNRESOLVED
+        return status_enum.ZERO_FILL_UNRESOLVED
+    if cumulative_qty > 0:
+        return status_enum.COMPLETED
+    return status_enum.REJECTED
+
+
+def classify_entry_execution_status(
+    *,
+    unresolved: bool,
+    cumulative_qty: int,
+    terminal_reason: OrderTerminalReason | None,
+) -> EntryExecutionStatus:
+    return _classify_execution_status(
+        unresolved=bool(unresolved),
+        cumulative_qty=int(cumulative_qty),
+        terminal_reason=terminal_reason,
+        status_enum=EntryExecutionStatus,
+    )
+
+
+def classify_exit_execution_status(
+    *,
+    unresolved: bool,
+    cumulative_qty: int,
+    terminal_reason: OrderTerminalReason | None,
+) -> ExitExecutionStatus:
+    return _classify_execution_status(
+        unresolved=bool(unresolved),
+        cumulative_qty=int(cumulative_qty),
+        terminal_reason=terminal_reason,
+        status_enum=ExitExecutionStatus,
+    )
 
 
 _ACTIVE_RAW_STATES = {1, 2, 3, 4}

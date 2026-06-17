@@ -547,6 +547,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_backtest.py`
   - `backtest.py` から shared logic を参照したときの売買フロー
   - 日中決済、stop/target、inverse 系を含むバックテスト挙動
+  - open エントリーで同日 breadth を見ない no-lookahead 回帰
   - `primary` の intraday failed-runup exit を trade_log の `exit_reason` として記録すること
   - `trade_log` の `exit_reason`、stop/target、OHLC fade 監査列
   - 火曜 low breadth `catchup_rs` の probe 約定フロー
@@ -604,18 +605,24 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - live での unmanaged position を signal flatten / force flatten から除外すること
   - exact `execution_id` でのみ保護逆指値を紐づけること
   - 複数 `execution_id` 既知時は close route 不明の fallback を止めること
+  - `confirmed` 欠損の stop result では protective stop を armed にしないこと
   - `HoldQty` 欠損の建玉を fail closed にして、保護逆指値 / 返済割当で数量を推測しないこと
+  - `protective_stop_unconfirmed_order_id` が残る間は同一建玉への再 armed を止めること
   - signal/manual exit 前に linked protective stop を cancel し、未確定なら exit を止めること
   - signal/manual exit 後に partial remainder の protective stop を再 arm すること
   - partial remainder の protective stop rearm が失敗したら unresolved exit として止めること
   - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
-  - `received_at` を使って board quote freshness を判定し、`quote_timestamp` / `current_price_timestamp` 欠損でも落とさないこと
+  - entry / exit の unresolved partial / zero-fill で `entry_order_execution_status` / `exit_order_execution_status` を残すこと
+  - `received_at` は分離して保持し、`quote_timestamp` / `current_price_timestamp` が無い quote は entry で使わないこと
   - multi-HoldID の protective stop を `ClosePositions` 経路で設定し、空の close route は通さないこと
   - stop journal が `ROUTE_RESOLVED` と route summary を残し、multi-HoldID の `ClosePositions` と `hold_ids` を復元できること
   - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
   - protective stop が filled-before-cancel だった場合も exit を送らずに止めること
   - shared flatten 経路でも protective stop cancel 未確定なら exit を送らないこと
   - unresolved な exit order を持つ建玉では重複する flatten を送らないこと
+  - non-trading day の終了処理でも safe shutdown 経由にすること
+  - safe shutdown が protective stop pending / orphan を検出したら flatten を止めること
+  - armed protective stop が broker 側 snapshot から消えていたら flatten を止めること
   - live entry の unresolved partial / zero-fill を未解決注文として journal に残し、続きの entry を止めること
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
   - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
@@ -637,9 +644,14 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `SubmissionResult` の accepted / rejected / unknown 分岐
   - response text が長すぎる場合の truncation と秘密値 redaction
   - `OrderSubmissionResult` / `ExecutionWaitResult` / `CancelResult` の typed result と、未解決・取消結果の情報落ち防止
+  - `OrderSubmissionResult` の `bool` は accepted 判定であり、confirmed とは別であること
+  - `ExecutionWaitResult` の `execution_status` / `entry_execution_status` / `exit_execution_status` を legacy dict へ残すこと
+  - single HoldID fallback で生成した `ClosePositions` を orders API 確認へ渡すこと
+  - confirmation failure 時の `confirmation_details` が secret を含まない bounded summary であること
   - stop journal が `ROUTE_RESOLVED` を含み、`ClosePositions` / `hold_ids` / route stage を残すこと
   - `live_approval_manifest` の hash が strategy 定数変更で変わり、`generated_at` では変わらないこと
   - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
+  - runtime entry authorization context が protective stop pending / orphan もブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
   - `BrokerEnvironment` / `BrokerEndpointConfig` の mismatch を constructor / validate で拒否すること
@@ -681,6 +693,11 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_kabucom_contracts_test_fixture.py`
   - `KABUCOM_TEST` 用の sanitized contract fixture が validators を通ること
   - `fixture_kind` と `password_policy` が TEST 用 fixture に明記されていること
+  - test fixture の provenance metadata が明記され、`captured_from_kabucom_test` が欠けた fixture を fail closed にすること
+  - 現在の test fixture は手動で sanitization したもので、実 KABUCOM_TEST 取得結果ではないことを明示していること
+- `tests/test_portfolio_state.py`
+  - schema versioned portfolio JSON の write / read
+  - execution_id primary の lot identity と legacy migration backup
 - `tests/test_analyze_intraday_logs.py`
   - `analyze_intraday_logs.py` の decision 集計
   - intraday trade path 集計
@@ -696,6 +713,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - JSONL append が連番で追記されること
   - journal replay が PLANNED / ACCEPTED / CANCEL_REQUESTED の未解決 intent を拾うこと
   - startup recovery が corrupt journal 行や unresolved active orders を manual review にすること
+  - startup recovery が protective stop の pending / orphan 状態も manual review にすること
+  - startup recovery が armed だが broker snapshot に無い protective stop も manual review にすること
   - journal replay が `FILLED` / filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
 - `tests/test_portfolio_state.py`
   - `portfolio.json` を schema-versioned JSON で保存すること
@@ -707,6 +726,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 ```bash
 python -m pytest tests -q
 ```
+
+GitHub Actions でも同じく `python -m pytest tests -q` を Windows runner で実行します。
 
 ファイル単位で実行:
 
@@ -722,7 +743,9 @@ python -m pytest tests/test_auto_trade.py
 python -m pytest tests/test_kabucom_broker.py
 python -m pytest tests/test_kabucom_contracts.py
 python -m pytest tests/test_kabucom_contracts_test_fixture.py
+python -m pytest tests/test_portfolio_state.py
 python -m pytest tests/test_analyze_intraday_logs.py
+python -m pytest tests/test_order_journal.py
 ```
 
 ## 運用メモ
@@ -732,4 +755,4 @@ python -m pytest tests/test_analyze_intraday_logs.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-16
+Last updated: 2026-06-17

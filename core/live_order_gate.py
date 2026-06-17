@@ -38,6 +38,8 @@ class EntryAuthorizationContext:
     session_allows_entry: bool
     clock_healthy: bool
     shutdown_requested: bool
+    protective_stop_pending_count: int = 0
+    protective_stop_orphan_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,10 @@ def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAut
         blocking_reasons.append(f"unresolved_orders:{int(context.unresolved_order_count)}")
     if context.ambiguous_position_count > 0:
         blocking_reasons.append(f"ambiguous_positions:{int(context.ambiguous_position_count)}")
+    if context.protective_stop_pending_count > 0:
+        blocking_reasons.append(f"protective_stop_pending:{int(context.protective_stop_pending_count)}")
+    if context.protective_stop_orphan_count > 0:
+        blocking_reasons.append(f"protective_stop_orphan:{int(context.protective_stop_orphan_count)}")
     if not context.wallet_snapshot_fresh:
         blocking_reasons.append("wallet_snapshot_stale")
     if not context.positions_snapshot_fresh:

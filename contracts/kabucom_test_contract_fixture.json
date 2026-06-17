@@ -1,6 +1,16 @@
 {
   "fixture_version": 1,
   "fixture_kind": "KABUCOM_TEST",
+  "captured_from_kabucom_test": false,
+  "captured_at": "2026-06-12T00:00:00+09:00",
+  "sanitized_fields": [
+    "Password",
+    "OrderID",
+    "Token",
+    "APIPassword"
+  ],
+  "redaction_policy": "manual_sanitized_fixture_v1",
+  "provenance_note": "Handcrafted sanitized contract fixture. Actual KABUCOM_TEST capture is still pending and must be recorded before treating this as live evidence.",
   "password_policy": "api_password_fallback_allowed",
   "api_spec_version": "1.5",
   "api_spec_commit_sha": "0119077f1647b7c3ff64460b862c1978142df43d",

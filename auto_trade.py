@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import psutil
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
-from core.kabucom_order_state import StockOrderAction
+from core.kabucom_order_state import StockOrderAction, SubmissionStatus
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -40,6 +40,25 @@ def get_market_phase(now_time) -> MarketPhase:
         return MarketPhase.AFTERNOON
     else:
         return MarketPhase.CLOSING_TIME
+
+
+def _is_submission_accepted(result) -> bool:
+    status = getattr(result, "status", None)
+    if status is None:
+        return False
+    status_value = getattr(status, "value", status)
+    return str(status_value).strip().lower() == SubmissionStatus.ACCEPTED.value
+
+
+def _is_submission_confirmed(result) -> bool:
+    if result is None:
+        return False
+    if hasattr(result, "is_confirmed"):
+        return bool(getattr(result, "is_confirmed"))
+    confirmed = getattr(result, "confirmed", None)
+    if confirmed is None:
+        return False
+    return bool(confirmed)
 
 
 @dataclass(frozen=True)
@@ -549,6 +568,23 @@ def _collect_protective_stop_order_ids(portfolio):
     return stop_order_ids
 
 
+_UNRESOLVED_EXECUTION_STATUSES = {"partial_unresolved", "zero_fill_unresolved"}
+
+
+def _position_has_unresolved_execution_state(position: dict | None) -> bool:
+    if not isinstance(position, dict):
+        return False
+    if position.get("entry_order_unresolved") or position.get("exit_order_unresolved"):
+        return True
+    entry_status = str(position.get("entry_order_execution_status") or "").strip().lower()
+    exit_status = str(position.get("exit_order_execution_status") or "").strip().lower()
+    return entry_status in _UNRESOLVED_EXECUTION_STATUSES or exit_status in _UNRESOLVED_EXECUTION_STATUSES
+
+
+def _portfolio_has_unresolved_execution_state(portfolio) -> bool:
+    return any(_position_has_unresolved_execution_state(position) for position in portfolio or [])
+
+
 def _coerce_jst_datetime(value):
     if not isinstance(value, datetime.datetime):
         return None
@@ -568,12 +604,9 @@ def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
     for board in boards.values():
         if not isinstance(board, dict):
             return False
-        quote_dt = _coerce_jst_datetime(
-            board.get("quote_timestamp")
-            or board.get("current_price_timestamp")
-            or board.get("received_at")
-        )
+        quote_dt = _coerce_jst_datetime(board.get("quote_timestamp") or board.get("current_price_timestamp"))
         if quote_dt is None:
+            # 受信時刻だけでは価格時刻の freshness を保証できないので、entry では落とす。
             return False
         if quote_dt.date() != reference_dt.date():
             return False
@@ -655,6 +688,13 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         normalized_execution_ids.insert(0, execution_id_text)
     managed_execution_ids = set(normalized_execution_ids)
 
+    pending_stop_order_id = str(position.get("protective_stop_unconfirmed_order_id") or "").strip()
+    if pending_stop_order_id:
+        print(f"⚠️ {code} の保護逆指値は未確認の注文 ID {pending_stop_order_id} が残っているため、新規 armed を止めました。")
+        position["protective_stop_status"] = "failed"
+        position["protective_stop_confirmation_reason"] = "protective_stop_pending_confirmation"
+        return None
+
     close_route = None
     build_close_positions = getattr(broker, "_build_close_positions_for_symbol", None)
     if callable(build_close_positions):
@@ -735,8 +775,9 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
     )
     stop_order_id = getattr(stop_result, "broker_order_id", None)
-    stop_confirmed = bool(getattr(stop_result, "confirmed", True))
-    if stop_result and stop_order_id and stop_confirmed:
+    stop_accepted = _is_submission_accepted(stop_result)
+    stop_confirmed = _is_submission_confirmed(stop_result)
+    if stop_accepted and stop_order_id and stop_confirmed:
         if close_positions and len(close_positions) > 1:
             position["hold_ids"] = tuple(
                 str(item.get("HoldID") or "").strip()
@@ -758,7 +799,7 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         position["protective_stop_status"] = "armed"
         return stop_order_id
 
-    if stop_result and stop_order_id and not stop_confirmed:
+    if stop_accepted and stop_order_id and not stop_confirmed:
         confirmation_reason = str(getattr(stop_result, "confirmation_reason", "") or "stop_order_unconfirmed")
         print(f"⚠️ {code} の保護逆指値は受理されましたが、orders API で確認できなかったため armed しませんでした: {confirmation_reason}")
         position["protective_stop_status"] = "failed"
@@ -827,11 +868,13 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "protective_stop_order_id": None,
         "protective_stop_trigger_price": None,
         "protective_stop_status": None,
+        "entry_order_execution_status": "completed",
         "entry_order_unresolved": False,
         "entry_order_unresolved_reason": None,
         "entry_order_submission_status": None,
         "entry_order_filled_qty": int(shares),
         "entry_order_remaining_qty": 0,
+        "exit_order_execution_status": None,
         "exit_order_unresolved": False,
         "exit_order_unresolved_reason": None,
         "exit_order_submission_status": None,
@@ -1196,6 +1239,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             if isinstance(details, dict) and details.get("unresolved"):
                 unresolved_position = dict(position)
                 unresolved_position["exit_order_unresolved"] = True
+                unresolved_position["exit_order_execution_status"] = details.get("exit_execution_status") or details.get("execution_status") or "zero_fill_unresolved"
                 unresolved_position["exit_order_unresolved_reason"] = details.get("terminal_reason") or details.get("process_state") or "unknown"
                 unresolved_position["exit_order_submission_status"] = details.get("submission_status")
                 unresolved_position["exit_order_remaining_qty"] = int(details.get("remaining_qty", shares) or shares)
@@ -1246,6 +1290,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             remaining_position["last_quote_timestamp"] = exit_time
             if isinstance(details, dict) and details.get("unresolved"):
                 remaining_position["exit_order_unresolved"] = True
+                remaining_position["exit_order_execution_status"] = details.get("exit_execution_status") or details.get("execution_status") or "partial_unresolved"
                 remaining_position["exit_order_unresolved_reason"] = details.get("terminal_reason") or details.get("process_state") or "unknown"
                 remaining_position["exit_order_submission_status"] = details.get("submission_status")
                 remaining_position["exit_order_filled_qty"] = filled_shares
@@ -1355,6 +1400,21 @@ def _classify_shutdown_orders(active_orders_info: dict | None, portfolio: list[d
     return managed_orders, unmanaged_orders, ambiguous_orders, unknown_orders
 
 
+def _collect_active_order_ids(active_orders_info: dict | None) -> set[str]:
+    active_order_ids: set[str] = set()
+    if not isinstance(active_orders_info, dict):
+        return active_order_ids
+    for order in active_orders_info.get("orders", []):
+        if not isinstance(order, dict):
+            continue
+        for key in ("ID", "OrderId", "OrderID"):
+            order_id = str(order.get(key) or "").strip()
+            if order_id:
+                active_order_ids.add(order_id)
+                break
+    return active_order_ids
+
+
 def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, reason: str):
     shutdown_msg = f"[STOP] 安全停止を開始します: {reason}"
     print(f"\n{shutdown_msg}")
@@ -1379,6 +1439,7 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
             if pre_shutdown_active_orders is None:
                 print("⚠️ [STOP] 未約定注文の照会に失敗しました。キャンセルを見送ります。")
                 errors.append("active_orders_snapshot_unavailable")
+                managed_order_cancel_failed = True
             else:
                 (
                     pre_shutdown_managed_orders,
@@ -1415,6 +1476,48 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
         except Exception as exc:
             print(f"⚠️ [STOP] 未約定注文のキャンセル中にエラー: {exc}")
             errors.append(f"cancel_orders_error:{exc}")
+            managed_order_cancel_failed = True
+
+    pending_protective_stop_positions = [
+        position
+        for position in updated_portfolio
+        if str(position.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+        and str(position.get("protective_stop_unconfirmed_order_id") or "").strip()
+    ]
+    orphan_protective_stop_positions = [
+        position
+        for position in updated_portfolio
+        if str(position.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+        and str(position.get("protective_stop_status") or "").lower() == "armed"
+        and not str(position.get("protective_stop_order_id") or "").strip()
+        and not str(position.get("protective_stop_unconfirmed_order_id") or "").strip()
+    ]
+    if pending_protective_stop_positions:
+        pending_codes = ",".join(sorted({str(position.get("code") or "").strip() for position in pending_protective_stop_positions if str(position.get("code") or "").strip()}))
+        print(f"⚠️ [STOP] 未確認の protective stop が残っているため、ポジション解消を保留します: {pending_codes or 'unknown'}")
+        errors.append(f"protective_stop_pending:{len(pending_protective_stop_positions)}")
+        managed_order_cancel_failed = True
+    if orphan_protective_stop_positions:
+        orphan_codes = ",".join(sorted({str(position.get("code") or "").strip() for position in orphan_protective_stop_positions if str(position.get("code") or "").strip()}))
+        print(f"⚠️ [STOP] orphan protective stop が残っているため、ポジション解消を保留します: {orphan_codes or 'unknown'}")
+        errors.append(f"protective_stop_orphan:{len(orphan_protective_stop_positions)}")
+        managed_order_cancel_failed = True
+
+    active_stop_ids = _collect_active_order_ids(pre_shutdown_active_orders)
+    missing_protective_stop_positions = [
+        position
+        for position in updated_portfolio
+        if str(position.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+        and str(position.get("protective_stop_status") or "").lower() == "armed"
+        and str(position.get("protective_stop_order_id") or "").strip()
+        and not str(position.get("protective_stop_unconfirmed_order_id") or "").strip()
+        and str(position.get("protective_stop_order_id") or "").strip() not in active_stop_ids
+    ]
+    if missing_protective_stop_positions:
+        missing_codes = ",".join(sorted({str(position.get("code") or "").strip() for position in missing_protective_stop_positions if str(position.get("code") or "").strip()}))
+        print(f"⚠️ [STOP] armed protective stop が broker 側で見つからないため、ポジション解消を保留します: {missing_codes or 'unknown'}")
+        errors.append(f"protective_stop_missing:{len(missing_protective_stop_positions)}")
+        managed_order_cancel_failed = True
 
     if updated_portfolio and not managed_order_cancel_failed:
         try:
@@ -1484,6 +1587,40 @@ def perform_safe_shutdown(broker, portfolio, account, is_sim, realtime_buffers, 
         updated_portfolio=updated_portfolio,
         updated_account=updated_account,
     )
+
+
+def perform_non_trading_day_shutdown(broker, portfolio, account, is_sim, realtime_buffers, reason: str):
+    shutdown_msg = f"[STOP] 非取引日のため安全停止します: {reason}"
+    print(f"\n{shutdown_msg}")
+
+    if is_sim:
+        return ShutdownResult(
+            success=True,
+            managed_remaining_orders=(),
+            managed_remaining_positions=(),
+            unmanaged_orders=(),
+            unmanaged_positions=(),
+            ambiguous_items=(),
+            unknown_items=(),
+            errors=(),
+            updated_portfolio=list(portfolio or []),
+            updated_account=dict(account or {}),
+        )
+
+    shutdown_result = perform_safe_shutdown(
+        broker=broker,
+        portfolio=portfolio,
+        account=account,
+        is_sim=is_sim,
+        realtime_buffers=realtime_buffers,
+        reason=reason,
+    )
+    if shutdown_result.success:
+        from core.kabu_launcher import terminate_kabu_station
+        terminate_kabu_station()
+    else:
+        print("⚠️ [STOP] 非取引日の安全停止が未解決のため、kabuステーション終了は見送ります。")
+    return shutdown_result
 
 
 def record_intraday_snapshots(snapshot_time, boards, realtime_buffers):
@@ -1796,7 +1933,15 @@ def _main_exec():
             is_weekend = server_datetime.weekday() >= 5
             is_holiday = jpholiday.is_holiday(server_datetime.date())
             if is_weekend or is_holiday:
-                terminate_kabu_station()
+                non_trading_day_reason = "weekend" if is_weekend else "holiday"
+                perform_non_trading_day_shutdown(
+                    broker=broker,
+                    portfolio=portfolio,
+                    account=account,
+                    is_sim=is_sim,
+                    realtime_buffers=realtime_buffers,
+                    reason=non_trading_day_reason,
+                )
                 break
             
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
@@ -2014,7 +2159,7 @@ def _main_exec():
         elif active_orders_block_entry: should_scan = False
         elif not is_sim and account.get("wallet_snapshot_incomplete"): should_scan = False
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
-        elif not is_sim and any(position.get("entry_order_unresolved") or position.get("exit_order_unresolved") for position in portfolio): should_scan = False
+        elif not is_sim and _portfolio_has_unresolved_execution_state(portfolio): should_scan = False
         elif not is_sim and loop_recovery_report.needs_manual_review: should_scan = False
         elif live_order_gate_status is not None and not live_order_gate_status.allowed: should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
@@ -2041,6 +2186,8 @@ def _main_exec():
             ),
             clock_healthy=server_datetime is not None,
             shutdown_requested=SHUTDOWN_REQUESTED,
+            protective_stop_pending_count=loop_recovery_report.protective_stop_pending_count,
+            protective_stop_orphan_count=loop_recovery_report.protective_stop_orphan_count,
         )
         entry_authorization = evaluate_entry_authorization(entry_authorization_context)
         if not entry_authorization.allowed:
@@ -2303,12 +2450,16 @@ def _main_exec():
                                 execution_ids=execution_ids,
                             )
                             if isinstance(details, dict) and details.get("unresolved"):
+                                entry_execution_status = details.get("entry_execution_status") or details.get("execution_status") or details.get("unresolved_reason") or "partial_unresolved"
                                 position_record["entry_order_unresolved"] = True
                                 position_record["entry_order_unresolved_reason"] = details.get("unresolved_reason") or details.get("process_state") or "unknown"
                                 position_record["entry_order_submission_status"] = details.get("submission_status")
                                 position_record["entry_order_filled_qty"] = actual_qty
                                 position_record["entry_order_remaining_qty"] = int(details.get("remaining_qty", max(0, shares - actual_qty)) or max(0, shares - actual_qty))
-                                position_record["entry_order_unresolved_state"] = details.get("unresolved_reason") or "partial_unresolved"
+                                position_record["entry_order_execution_status"] = entry_execution_status
+                                position_record["entry_order_unresolved_state"] = entry_execution_status
+                            else:
+                                position_record["entry_order_execution_status"] = details.get("entry_execution_status") or details.get("execution_status") or "completed"
                             portfolio.append(position_record)
                             broker.save_portfolio(portfolio)
                             broker.save_account(account)

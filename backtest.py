@@ -1001,42 +1001,44 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             monthly_assets[current_month] = float(cash)
             continue
 
+        # Open-entry decisions must only use data available by the prior session close.
+        entry_breadth = float(breadth_ratio[i - 1]) if i > 0 else float(breadth_ratio[i])
         market_open = open_np[i, market_idx] if market_idx >= 0 else np.nan
         prev_market_close = close_np[i - 1, market_idx] if market_idx >= 0 else np.nan
         prev_market_sma_trend = sma_trend_np[i - 1, market_idx] if market_idx >= 0 else np.nan
         primary_market_allowed = is_daytrade_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
         )
         fallback_market_allowed = is_daytrade_fallback_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
         )
         strong_oversold_market_allowed = is_daytrade_strong_oversold_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
         )
         catchup_market_allowed = is_daytrade_catchup_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
         )
         inverse_market_allowed = is_daytrade_inverse_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
             prev_market_close=prev_market_close,
         )
         inverse_pullback_market_allowed = is_daytrade_inverse_pullback_market_allowed(
-            breadth_ratio[i],
+            entry_breadth,
             market_open=market_open,
             prev_market_sma_trend=prev_market_sma_trend,
             prev_market_close=prev_market_close,
         )
-        bull_etf_market_allowed = is_daytrade_bull_etf_rebound_market_allowed(breadth_ratio[i])
+        bull_etf_market_allowed = is_daytrade_bull_etf_rebound_market_allowed(entry_breadth)
         if not (
             primary_market_allowed
             or strong_oversold_market_allowed
@@ -1054,7 +1056,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             monthly_assets[current_month] = float(cash)
             continue
 
-        base_dynamic_lev = calculate_dynamic_leverage(breadth_ratio[i], config_leverage=leverage_rate)
+        base_dynamic_lev = calculate_dynamic_leverage(entry_breadth, config_leverage=leverage_rate)
         market_ratio = np.nan
         if not np.isnan(market_open) and not np.isnan(prev_market_sma_trend) and prev_market_sma_trend > 0:
             market_ratio = float(market_open) / float(prev_market_sma_trend)
@@ -1095,19 +1097,19 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             prev_sma_trend = sma_trend_np[i - 1, s_idx]
 
             raw_values = [
-                t_close, t_open, prev_close, prev_prev_close, prev_open,
+                t_open, prev_close, prev_prev_close, prev_open,
                 prev_low, prev_atr, t_turnover, t_sma_med, prev_rsi2,
                 prev_sma_trend
             ]
             if np.any(np.isnan(raw_values)):
                 continue
-            if prev_atr <= 0 or t_open <= 0 or t_close <= 0 or prev_close <= 0:
+            if prev_atr <= 0 or t_open <= 0 or prev_close <= 0:
                 continue
-            if t_open < MIN_PRICE or not is_daytrade_bull_etf_price_allowed(t_open, ticker, breadth_ratio[i]):
+            if t_open < MIN_PRICE or not is_daytrade_bull_etf_price_allowed(t_open, ticker, entry_breadth):
                 continue
             if t_turnover <= 0:
                 continue
-            if t_turnover < resolve_daytrade_scan_min_turnover(ticker, breadth_ratio[i]):
+            if t_turnover < resolve_daytrade_scan_min_turnover(ticker, entry_breadth):
                 continue
             if liquidity_limit > 0 and (t_open * 100.0) > (t_turnover * liquidity_limit):
                 continue
@@ -1125,7 +1127,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     and prev_day_return <= DAYTRADE_MAX_PREV_DAY_RETURN_PCT
                 ):
                     metrics = evaluate_daytrade_open_setup(
-                        t_open, prev_close, t_sma_med, breadth_ratio[i],
+                        t_open, prev_close, t_sma_med, entry_breadth,
                         prev_open=prev_open, prev_atr=prev_atr, prev_low=prev_low,
                         prev_rsi2=prev_rsi2, rs_alpha=t_rs, prev_prev_close=prev_prev_close,
                         trade_weekday=curr_time.weekday(),
@@ -1142,7 +1144,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         )
                         if np.isfinite(score) and score >= MIN_SETUP_SCORE:
                             primary_equity_notional_pct = resolve_daytrade_primary_equity_notional_pct(
-                                breadth_val=breadth_ratio[i],
+                                breadth_val=entry_breadth,
                                 gap_pct=metrics.get("gap_pct"),
                                 open_vs_sma_atr=metrics.get("open_vs_sma_atr"),
                                 market_ratio=market_ratio,
@@ -1178,7 +1180,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 strong_oversold_metrics = evaluate_daytrade_strong_oversold_open_setup(
                     t_open,
                     prev_close,
-                    breadth_ratio[i],
+                    entry_breadth,
                     prev_atr=prev_atr,
                     prev_rsi2=prev_rsi2,
                     rs_alpha=t_rs,
@@ -1221,7 +1223,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             if fallback_market_allowed and fallback_trend_allowed and t_turnover >= DAYTRADE_MIN_TURNOVER:
                 fallback_metrics = evaluate_daytrade_fallback_open_setup(
-                    t_open, prev_close, t_sma_med, breadth_ratio[i],
+                    t_open, prev_close, t_sma_med, entry_breadth,
                     prev_atr=prev_atr, prev_low=prev_low,
                     prev_rsi2=prev_rsi2, rs_alpha=t_rs,
                     prev_prev_close=prev_prev_close
@@ -1250,7 +1252,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
                     "equity_notional_pct": resolve_daytrade_fallback_equity_notional_pct(
                         gap_pct=fallback_metrics["gap_pct"],
-                        breadth_val=breadth_ratio[i],
+                        breadth_val=entry_breadth,
                         market_ratio=market_ratio,
                         prev_return=fallback_metrics["prev_return"],
                         open_vs_sma_atr=fallback_metrics.get("open_vs_sma_atr"),
@@ -1268,7 +1270,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
             if catchup_market_allowed and t_turnover >= DAYTRADE_CATCHUP_MIN_TURNOVER:
                 catchup_metrics_list = evaluate_daytrade_catchup_open_setups(
-                    t_open, prev_close, t_sma_med, breadth_ratio[i],
+                    t_open, prev_close, t_sma_med, entry_breadth,
                     prev_atr=prev_atr, prev_low=prev_low,
                     prev_rsi2=prev_rsi2, rs_alpha=t_rs,
                     prev_prev_close=prev_prev_close,
@@ -1283,13 +1285,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         target_mult = DAYTRADE_CATCHUP_GAPDOWN_TARGET_MULT
                         notional_pct = resolve_daytrade_catchup_notional_pct(
                             setup_type=catchup_metrics["setup_type"],
-                            breadth_val=breadth_ratio[i],
+                            breadth_val=entry_breadth,
                             market_ratio=market_ratio,
                             default_pct=DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
                         )
                         equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(
                             setup_type=catchup_metrics["setup_type"],
-                            breadth_val=breadth_ratio[i],
+                            breadth_val=entry_breadth,
                             gap_pct=catchup_metrics["gap_pct"],
                             prev_return=catchup_metrics["prev_return"],
                             open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
@@ -1302,13 +1304,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         target_mult = DAYTRADE_CATCHUP_RS_TARGET_MULT
                         notional_pct = resolve_daytrade_catchup_notional_pct(
                             setup_type=catchup_metrics["setup_type"],
-                            breadth_val=breadth_ratio[i],
+                            breadth_val=entry_breadth,
                             market_ratio=market_ratio,
                             default_pct=DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
                         )
                         equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(
                             setup_type=catchup_metrics["setup_type"],
-                            breadth_val=breadth_ratio[i],
+                            breadth_val=entry_breadth,
                             gap_pct=catchup_metrics["gap_pct"],
                             prev_return=catchup_metrics["prev_return"],
                             open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
@@ -1343,12 +1345,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             if (
                 (inverse_market_allowed or inverse_pullback_market_allowed)
                 and ticker in inverse_code_set
-                and t_turnover >= resolve_daytrade_inverse_min_turnover(breadth_ratio[i])
+                and t_turnover >= resolve_daytrade_inverse_min_turnover(entry_breadth)
             ):
                 inverse_metrics = evaluate_daytrade_inverse_open_setup(
                     t_open,
                     prev_close,
-                    breadth_ratio[i],
+                    entry_breadth,
                     prev_atr=prev_atr,
                     prev_prev_close=prev_prev_close,
                     market_open=market_open,
@@ -1397,13 +1399,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             if (
                 bull_etf_market_allowed
                 and ticker in bull_etf_code_set
-                and t_turnover >= resolve_daytrade_scan_min_turnover(ticker, breadth_ratio[i])
+                and t_turnover >= resolve_daytrade_scan_min_turnover(ticker, entry_breadth)
             ):
                 bull_etf_metrics = evaluate_daytrade_bull_etf_open_setup(
                     t_open,
                     prev_close,
                     sma_med_np[i - 1, s_idx],
-                    breadth_ratio[i],
+                    entry_breadth,
                     prev_atr=prev_atr,
                     prev_rsi2=prev_rsi2,
                     prev_prev_close=prev_prev_close,
@@ -1447,7 +1449,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 catchup_candidates,
                 inverse_candidates,
                 bull_etf_candidates,
-                breadth_val=breadth_ratio[i],
+                breadth_val=entry_breadth,
                 market_ratio=market_ratio,
                 trade_weekday=curr_time.weekday(),
                 current_equity=day_start_equity,
@@ -1462,7 +1464,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             selected_base_lev = resolve_daytrade_selected_leverage(
                 base_leverage=base_dynamic_lev,
                 selected_candidates=selected,
-                breadth_val=breadth_ratio[i],
+                breadth_val=entry_breadth,
                 market_ratio=market_ratio,
                 trade_weekday=curr_time.weekday(),
             )
@@ -1472,7 +1474,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 current_equity=cash,
                 current_time=curr_time,
             )
-            selected_dynamic_lev *= resolve_daytrade_breadth_exposure_scale(breadth_ratio[i])
+            selected_dynamic_lev *= resolve_daytrade_breadth_exposure_scale(entry_breadth)
             if selected_dynamic_lev <= 0 and not inverse_only:
                 daily_stats[day_key] = {
                     "equity": float(cash),
@@ -1491,7 +1493,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             if inverse_only:
                 inverse_buying_power_leverage = resolve_daytrade_selected_inverse_buying_power_leverage(
                     selected,
-                    breadth_ratio[i],
+                    entry_breadth,
                 )
                 inverse_buying_power = resolve_daytrade_inverse_buying_power(
                     current_equity=day_start_equity,
@@ -1596,7 +1598,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         "stop_price": float(stop_price),
                         "target_price": float(target_price),
                         "notional": float(trade_notional),
-                        "breadth": float(breadth_ratio[i]) if np.isfinite(breadth_ratio[i]) else np.nan,
+                        "breadth": float(entry_breadth) if np.isfinite(entry_breadth) else np.nan,
                         "market_ratio": float(market_ratio) if not np.isnan(market_ratio) else np.nan,
                         "gap_pct": candidate.get("gap_pct"),
                         "prev_return": candidate.get("prev_return"),

@@ -28,7 +28,15 @@ class SimulationBroker(BaseBroker):
         return load_portfolio_positions(PORTFOLIO_FILE)
 
     def save_positions(self, portfolio: list):
-        write_portfolio_state(PORTFOLIO_FILE, portfolio, metadata={"source": "simulation_broker"})
+        write_portfolio_state(
+            PORTFOLIO_FILE,
+            portfolio,
+            metadata={
+                "source": "simulation_broker",
+                "broker_environment": "simulation",
+                "broker_product": "simulation",
+            },
+        )
 
     def save_portfolio(self, portfolio: list):
         """auto_trade.py との互換性のためのエイリアス（M-3修正）"""

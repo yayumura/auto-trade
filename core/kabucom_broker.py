@@ -690,24 +690,114 @@ class KabucomBroker(BaseBroker):
         margin_trade_type: int | None,
     ) -> tuple[bool, str | None, dict | None]:
         details = self.get_order_details(order_id)
+        expected_close_positions_payload = self._normalize_close_positions_payload(expected_close_positions)
+        expected_cash_margin = 3 if str(side) == "1" else 2
+        expected_deliv_type = 0 if expected_cash_margin == 2 else 2
+
+        def _close_positions_summary(close_positions_payload: list | None) -> list[dict[str, int | str]] | None:
+            normalized = self._normalize_close_positions_payload(close_positions_payload)
+            if normalized is None:
+                return None
+            return [{"HoldID": hold_id, "Qty": qty} for hold_id, qty in normalized]
+
+        def _reverse_limit_summary(details_payload: dict | None) -> dict[str, object] | None:
+            if not isinstance(details_payload, dict):
+                return None
+            reverse_limit = details_payload.get("ReverseLimitOrder")
+            if not isinstance(reverse_limit, dict):
+                return None
+            summary: dict[str, object] = {}
+            for key in ("TriggerSec", "TriggerPrice", "UnderOver", "AfterHitOrderType", "AfterHitPrice"):
+                if key in reverse_limit:
+                    summary[key] = reverse_limit.get(key)
+            return summary or None
+
+        def _limit_summary(summary: dict[str, object]) -> dict[str, object]:
+            serialized = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            if len(serialized) <= 4096:
+                return summary
+            return {
+                "response_shape_version": summary.get("response_shape_version"),
+                "order_id": summary.get("order_id"),
+                "details_present": summary.get("details_present"),
+                "process_state": summary.get("process_state"),
+                "terminal_reason": summary.get("terminal_reason"),
+                "order_qty": summary.get("order_qty"),
+                "cumulative_qty": summary.get("cumulative_qty"),
+                "remaining_qty": summary.get("remaining_qty"),
+                "side": summary.get("side"),
+                "cash_margin": summary.get("cash_margin"),
+                "deliv_type": summary.get("deliv_type"),
+                "exchange": summary.get("exchange"),
+                "margin_trade_type": summary.get("margin_trade_type"),
+                "trigger_price": summary.get("trigger_price"),
+                "expected_qty": summary.get("expected_qty"),
+                "expected_trigger_price": summary.get("expected_trigger_price"),
+                "close_positions_count": summary.get("close_positions_count"),
+                "expected_close_positions_count": summary.get("expected_close_positions_count"),
+                "close_positions_match": summary.get("close_positions_match"),
+                "mismatch_reason": summary.get("mismatch_reason"),
+                "summary_truncated": True,
+                "summary_size_chars": len(serialized),
+            }
+
+        def _build_confirmation_details(mismatch_reason: str, *, details_payload: dict | None = None, parsed_order=None) -> dict[str, object]:
+            close_positions_summary = _close_positions_summary(None if details_payload is None else details_payload.get("ClosePositions"))
+            reverse_limit_summary = _reverse_limit_summary(details_payload)
+            summary = {
+                "response_shape_version": 1,
+                "order_id": order_id,
+                "details_present": bool(details_payload),
+                "process_state": None if parsed_order is None else parsed_order.process_state.value,
+                "terminal_reason": None if parsed_order is None or parsed_order.terminal_reason is None else parsed_order.terminal_reason.value,
+                "order_qty": None if parsed_order is None else parsed_order.order_qty,
+                "cumulative_qty": None if parsed_order is None else parsed_order.cumulative_qty,
+                "remaining_qty": None if parsed_order is None else parsed_order.unfilled_qty,
+                "side": side,
+                "cash_margin": details_payload.get("CashMargin") if isinstance(details_payload, dict) and "CashMargin" in details_payload else expected_cash_margin,
+                "deliv_type": details_payload.get("DelivType") if isinstance(details_payload, dict) and "DelivType" in details_payload else expected_deliv_type,
+                "exchange": details_payload.get("Exchange") if isinstance(details_payload, dict) and "Exchange" in details_payload else exchange,
+                "margin_trade_type": details_payload.get("MarginTradeType") if isinstance(details_payload, dict) and "MarginTradeType" in details_payload else margin_trade_type,
+                "trigger_price": None if reverse_limit_summary is None else reverse_limit_summary.get("TriggerPrice"),
+                "expected_qty": int(expected_qty),
+                "expected_trigger_price": float(expected_trigger_price),
+                "close_positions": close_positions_summary,
+                "close_positions_count": 0 if close_positions_summary is None else len(close_positions_summary),
+                "expected_close_positions": None if expected_close_positions_payload is None else [
+                    {"HoldID": hold_id, "Qty": qty}
+                    for hold_id, qty in expected_close_positions_payload
+                ],
+                "expected_close_positions_count": 0 if expected_close_positions_payload is None else len(expected_close_positions_payload),
+                "close_positions_match": None if expected_close_positions_payload is None else self._normalize_close_positions_payload(None if details_payload is None else details_payload.get("ClosePositions")) == expected_close_positions_payload,
+                "reverse_limit": reverse_limit_summary,
+                "detail_count": None if parsed_order is None else parsed_order.detail_count,
+                "raw_state": None if parsed_order is None else parsed_order.raw_state,
+                "raw_order_state": None if parsed_order is None else parsed_order.raw_order_state,
+                "latest_detail_rec_type": None if parsed_order is None else parsed_order.latest_detail_rec_type,
+                "has_partial_fill": None if parsed_order is None else parsed_order.has_partial_fill,
+                "is_consistent": None if parsed_order is None else parsed_order.is_consistent,
+                "mismatch_reason": mismatch_reason,
+            }
+            return _limit_summary(summary)
+
         if not isinstance(details, dict) or not details:
-            return False, "stop_order_not_found", None
+            return False, "stop_order_not_found", _build_confirmation_details("stop_order_not_found")
 
         parsed = parse_kabucom_order(details)
         if parsed.process_state == OrderProcessState.UNKNOWN:
-            return False, "stop_order_state_unknown", details
+            return False, "stop_order_state_unknown", _build_confirmation_details("stop_order_state_unknown", details_payload=details, parsed_order=parsed)
         if parsed.process_state != OrderProcessState.ACTIVE:
-            return False, f"stop_order_state_{parsed.process_state.value}", details
+            mismatch_reason = f"stop_order_state_{parsed.process_state.value}"
+            return False, mismatch_reason, _build_confirmation_details(mismatch_reason, details_payload=details, parsed_order=parsed)
         if parsed.order_qty != int(expected_qty):
-            return False, "stop_order_qty_mismatch", details
+            return False, "stop_order_qty_mismatch", _build_confirmation_details("stop_order_qty_mismatch", details_payload=details, parsed_order=parsed)
         if parsed.cumulative_qty != 0:
-            return False, "stop_order_already_filled", details
+            return False, "stop_order_already_filled", _build_confirmation_details("stop_order_already_filled", details_payload=details, parsed_order=parsed)
 
         actual_side = str(details.get("Side") or "").strip()
         if actual_side and actual_side != str(side):
-            return False, "stop_order_side_mismatch", details
+            return False, "stop_order_side_mismatch", _build_confirmation_details("stop_order_side_mismatch", details_payload=details, parsed_order=parsed)
 
-        expected_cash_margin = 3 if str(side) == "1" else 2
         actual_cash_margin = None
         if "CashMargin" in details:
             try:
@@ -715,9 +805,8 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_cash_margin = None
         if actual_cash_margin is not None and actual_cash_margin != expected_cash_margin:
-            return False, "stop_order_cash_margin_mismatch", details
+            return False, "stop_order_cash_margin_mismatch", _build_confirmation_details("stop_order_cash_margin_mismatch", details_payload=details, parsed_order=parsed)
 
-        expected_deliv_type = 0 if expected_cash_margin == 2 else 2
         actual_deliv_type = None
         if "DelivType" in details:
             try:
@@ -725,7 +814,7 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_deliv_type = None
         if actual_deliv_type is not None and actual_deliv_type != expected_deliv_type:
-            return False, "stop_order_deliv_type_mismatch", details
+            return False, "stop_order_deliv_type_mismatch", _build_confirmation_details("stop_order_deliv_type_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_exchange = None
         if "Exchange" in details:
@@ -734,7 +823,7 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_exchange = None
         if exchange is not None and actual_exchange is not None and actual_exchange != int(exchange):
-            return False, "stop_order_exchange_mismatch", details
+            return False, "stop_order_exchange_mismatch", _build_confirmation_details("stop_order_exchange_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_margin_trade_type = None
         if "MarginTradeType" in details:
@@ -743,19 +832,19 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_margin_trade_type = None
         if margin_trade_type is not None and actual_margin_trade_type is not None and actual_margin_trade_type != int(margin_trade_type):
-            return False, "stop_order_margin_trade_type_mismatch", details
+            return False, "stop_order_margin_trade_type_mismatch", _build_confirmation_details("stop_order_margin_trade_type_mismatch", details_payload=details, parsed_order=parsed)
 
         reverse_limit = details.get("ReverseLimitOrder")
         if not isinstance(reverse_limit, dict):
-            return False, "stop_order_reverse_limit_missing", details
+            return False, "stop_order_reverse_limit_missing", _build_confirmation_details("stop_order_reverse_limit_missing", details_payload=details, parsed_order=parsed)
         actual_trigger_price = reverse_limit.get("TriggerPrice")
         if actual_trigger_price is None:
-            return False, "stop_order_trigger_price_missing", details
+            return False, "stop_order_trigger_price_missing", _build_confirmation_details("stop_order_trigger_price_missing", details_payload=details, parsed_order=parsed)
         try:
             if Decimal(str(actual_trigger_price)) != Decimal(str(expected_trigger_price)):
-                return False, "stop_order_trigger_price_mismatch", details
+                return False, "stop_order_trigger_price_mismatch", _build_confirmation_details("stop_order_trigger_price_mismatch", details_payload=details, parsed_order=parsed)
         except Exception:
-            return False, "stop_order_trigger_price_mismatch", details
+            return False, "stop_order_trigger_price_mismatch", _build_confirmation_details("stop_order_trigger_price_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_under_over = None
         if "UnderOver" in reverse_limit:
@@ -765,7 +854,7 @@ class KabucomBroker(BaseBroker):
                 actual_under_over = None
         expected_under_over = 1 if str(side) == "1" else 2
         if actual_under_over is not None and actual_under_over != expected_under_over:
-            return False, "stop_order_under_over_mismatch", details
+            return False, "stop_order_under_over_mismatch", _build_confirmation_details("stop_order_under_over_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_after_hit_order_type = None
         if "AfterHitOrderType" in reverse_limit:
@@ -774,15 +863,14 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_after_hit_order_type = None
         if actual_after_hit_order_type is not None and actual_after_hit_order_type != 1:
-            return False, "stop_order_after_hit_order_type_mismatch", details
+            return False, "stop_order_after_hit_order_type_mismatch", _build_confirmation_details("stop_order_after_hit_order_type_mismatch", details_payload=details, parsed_order=parsed)
 
-        expected_close_positions_payload = self._normalize_close_positions_payload(expected_close_positions)
         if expected_close_positions_payload is not None:
             actual_close_positions_payload = self._normalize_close_positions_payload(details.get("ClosePositions"))
             if actual_close_positions_payload != expected_close_positions_payload:
-                return False, "stop_order_close_positions_mismatch", details
+                return False, "stop_order_close_positions_mismatch", _build_confirmation_details("stop_order_close_positions_mismatch", details_payload=details, parsed_order=parsed)
 
-        return True, None, details
+        return True, None, None
 
     def get_positions(self) -> list:
         """ 
@@ -1845,6 +1933,9 @@ class KabucomBroker(BaseBroker):
         last_terminal_reason = None
         last_process_state = OrderProcessState.UNKNOWN
         unresolved_reason = None
+        last_execution_status = None
+        last_entry_execution_status = None
+        last_exit_execution_status = None
 
         def _log_unresolved_order_event(
             *,
@@ -2021,6 +2112,9 @@ class KabucomBroker(BaseBroker):
                                 "has_partial_fill": False,
                                 "rejection_reason": "broker_rejected",
                                 "unresolved": False,
+                                "execution_status": "rejected",
+                                "entry_execution_status": "rejected",
+                                "exit_execution_status": "rejected",
                                 "execution_ids": tuple(total_execution_ids),
                                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
                             }
@@ -2099,6 +2193,9 @@ class KabucomBroker(BaseBroker):
                 "Symbol": code,
                 "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                 "unresolved_reason": unresolved_reason or (None if last_terminal_reason is None else last_terminal_reason.value),
+                "execution_status": last_execution_status,
+                "entry_execution_status": last_entry_execution_status,
+                "exit_execution_status": last_exit_execution_status,
                 "execution_ids": tuple(total_execution_ids),
                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
                 "unresolved": True,
@@ -2144,6 +2241,9 @@ class KabucomBroker(BaseBroker):
                         "rejection_reason": "close_positions_unavailable",
                         "unresolved_reason": "close_route_unavailable",
                         "unresolved": True,
+                        "execution_status": last_execution_status,
+                        "entry_execution_status": last_entry_execution_status,
+                        "exit_execution_status": last_exit_execution_status,
                     }
                 close_pos_list = close_route["close_positions"]
 
@@ -2161,7 +2261,11 @@ class KabucomBroker(BaseBroker):
             last_order_id = order_id or last_order_id
             last_submission = submission
             if order_id:
-                f_details = self.wait_for_execution(order_id, timeout_sec=20).to_legacy_dict(symbol=code, side=side)
+                execution_kind = "exit" if action == StockOrderAction.MARGIN_CLOSE_LONG else "entry"
+                f_details = self.wait_for_execution(order_id, timeout_sec=20).to_legacy_dict(symbol=code, side=side, execution_kind=execution_kind)
+                last_execution_status = f_details.get("execution_status")
+                last_entry_execution_status = f_details.get("entry_execution_status")
+                last_exit_execution_status = f_details.get("exit_execution_status")
                 if f_details:
                     if f_details.get("unresolved"):
                         parsed = parse_kabucom_order(f_details)
@@ -2201,6 +2305,9 @@ class KabucomBroker(BaseBroker):
                             "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                             "unresolved_reason": f_details.get("unresolved_reason") or "wait_for_execution_unresolved",
                             "unresolved": True,
+                            "execution_status": last_execution_status,
+                            "entry_execution_status": last_entry_execution_status,
+                            "exit_execution_status": last_exit_execution_status,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
                         }
@@ -2241,6 +2348,9 @@ class KabucomBroker(BaseBroker):
                             "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                             "unresolved_reason": "force_fill_unknown_state",
                             "unresolved": True,
+                            "execution_status": last_execution_status,
+                            "entry_execution_status": last_entry_execution_status,
+                            "exit_execution_status": last_exit_execution_status,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
                         }
@@ -2288,6 +2398,19 @@ class KabucomBroker(BaseBroker):
                 terminal_reason=last_terminal_reason,
                 submission_status=last_submission.status if last_submission is not None else None,
             )
+        if last_execution_status is None:
+            if total_filled_qty > 0:
+                last_execution_status = "completed"
+                if action == StockOrderAction.MARGIN_CLOSE_LONG:
+                    last_exit_execution_status = "completed"
+                else:
+                    last_entry_execution_status = "completed"
+            elif last_terminal_reason == OrderTerminalReason.REJECTED:
+                last_execution_status = "rejected"
+                if action == StockOrderAction.MARGIN_CLOSE_LONG:
+                    last_exit_execution_status = "rejected"
+                else:
+                    last_entry_execution_status = "rejected"
         return {
             "order_id": last_order_id,
             "submission_status": None if last_submission is None else last_submission.status.value,
@@ -2301,6 +2424,9 @@ class KabucomBroker(BaseBroker):
             "Symbol": code,
             "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
             "unresolved": unresolved,
+            "execution_status": last_execution_status,
+            "entry_execution_status": last_entry_execution_status,
+            "exit_execution_status": last_exit_execution_status,
             "execution_ids": tuple(total_execution_ids),
             "execution_id": total_execution_ids[0] if total_execution_ids else None,
         }
@@ -2624,12 +2750,19 @@ class KabucomBroker(BaseBroker):
             }
         }
 
+        route_resolution_stage_hint = None
+        route_resolution_reason_hint = None
+
         def _build_stop_route_journal_fields(*, route_resolution_stage: str | None = None, route_resolution_reason: str | None = None) -> dict[str, object]:
             resolved_close_positions = data.get("ClosePositions")
             normalized_close_positions = None
             hold_ids: list[str] = []
             if route_resolution_stage is None:
-                route_resolution_stage = "resolved" if context.requires_close_positions else "not_required"
+                route_resolution_stage = route_resolution_stage_hint
+                if route_resolution_stage is None:
+                    route_resolution_stage = "resolved" if context.requires_close_positions else "not_required"
+            if route_resolution_reason is None:
+                route_resolution_reason = route_resolution_reason_hint
             if isinstance(resolved_close_positions, list):
                 normalized_close_positions = []
                 for item in resolved_close_positions:
@@ -2700,6 +2833,8 @@ class KabucomBroker(BaseBroker):
                     )
                 data["ClosePositions"] = close_positions
             elif hold_id:
+                route_resolution_stage_hint = "fallback_single_hold"
+                route_resolution_reason_hint = "single_hold_fallback"
                 data["ClosePositions"] = [{"HoldID": hold_id, "Qty": shares}]
             else:
                 print(f"⚠️ 逆指値の返済建玉IDが取得できないため、発注を中止します: {code}")
@@ -2791,6 +2926,7 @@ class KabucomBroker(BaseBroker):
                 trigger_price=float(normalized_trigger_price),
             )
 
+        expected_close_positions = data.get("ClosePositions")
         res = self._api_request("POST", "sendorder", json=data, timeout=10)
         submission = classify_submission_response(
             intent_id=intent_id,
@@ -2827,7 +2963,7 @@ class KabucomBroker(BaseBroker):
                     order_id=order_id,
                     expected_qty=int(shares),
                     expected_trigger_price=float(normalized_trigger_price),
-                    expected_close_positions=close_positions,
+                    expected_close_positions=expected_close_positions,
                     side=side,
                     exchange=exchange,
                     margin_trade_type=margin_trade_type,
@@ -2993,7 +3129,20 @@ class KabucomBroker(BaseBroker):
     def save_positions(self, portfolio: list):
         """ リアルAPIでは自動でポジションが残るが、ダッシュボード互換性のためにファイルにも書き出す """
         from core.config import PORTFOLIO_FILE
-        write_portfolio_state(PORTFOLIO_FILE, portfolio, metadata={"source": "kabucom_broker"})
+        environment = getattr(self, "environment", None)
+        broker_environment = getattr(environment, "value", None)
+        if not broker_environment:
+            broker_environment = "live" if getattr(self, "is_production", False) else "test"
+        write_portfolio_state(
+            PORTFOLIO_FILE,
+            portfolio,
+            metadata={
+                "source": "kabucom_broker",
+                "broker_environment": broker_environment,
+                "broker_account_type": self._resolve_account_type(),
+                "broker_product": "margin",
+            },
+        )
 
     def save_portfolio(self, portfolio: list):
         """auto_trade.py との互換性のためのエイリアス（M-4修正）"""
