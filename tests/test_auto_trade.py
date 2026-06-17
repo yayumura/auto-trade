@@ -17,7 +17,11 @@ from auto_trade import (
     is_inverse_only_candidate_set,
     sync_daytrade_registry,
 )
-from core.logic import RealtimeBuffer, resolve_daytrade_live_exit_decision
+from core.logic import (
+    RealtimeBuffer,
+    cancel_linked_protective_stop_before_exit,
+    resolve_daytrade_live_exit_decision,
+)
 from core.kabucom_order_state import CancelResult, CancelStatus, CancelTerminalStatus
 from core.kabucom_order_state import StockOrderAction
 
@@ -255,7 +259,7 @@ def test_arm_daytrade_protective_stop_requires_exact_execution_id_match():
     ) is None
 
 
-def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_ids_list():
+def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_ids_are_known():
     record = build_daytrade_position_record(
         {
             "code": "1000",
@@ -274,22 +278,10 @@ def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_id
 
     class _Broker:
         def get_positions(self):
-            return [
-                {
-                    "code": "1000",
-                    "ownership": "MANAGED_BY_BOT",
-                    "execution_id": "EX-2",
-                    "hold_id": "HOLD-1",
-                    "exchange": 1,
-                    "margin_trade_type": 3,
-                    "shares": 300,
-                    "hold_qty": 300,
-                    "available_qty": 300,
-                }
-            ]
+            raise AssertionError("get_positions should not be called when multiple execution_ids have no close route")
 
         def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
-            return SimpleNamespace(broker_order_id="STOP-1", status="accepted")
+            raise AssertionError("execute_stop_order should not be called when fallback is disallowed")
 
     assert record["execution_ids"] == ("EX-1", "EX-2")
     assert auto_trade._arm_daytrade_protective_stop(
@@ -297,7 +289,11 @@ def test_arm_daytrade_protective_stop_accepts_any_execution_id_from_execution_id
         record,
         trigger_price=99.0,
         expected_shares=300,
-    ) == "STOP-1"
+    ) is None
+    assert record["protective_stop_status"] == "failed"
+    assert record["protective_stop_confirmation_reason"] == "multiple_execution_ids_without_close_route"
+    assert record["protective_stop_order_id"] is None
+    assert record["protective_stop_unconfirmed_order_id"] is None
 
 
 def test_arm_daytrade_protective_stop_uses_close_positions_route_when_available():
@@ -408,6 +404,72 @@ def test_arm_daytrade_protective_stop_refuses_unconfirmed_accepted_stop():
     assert record["protective_stop_status"] == "failed"
     assert record["protective_stop_confirmation_reason"] == "stop_order_not_found"
     assert record["protective_stop_order_id"] is None
+    assert record["protective_stop_unconfirmed_order_id"] == "STOP-1"
+
+
+def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_ids_are_known():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+        execution_ids=("EX-1", "EX-2"),
+    )
+
+    class _Broker:
+        def get_positions(self):
+            raise AssertionError("get_positions should not be called when multiple execution_ids have no close route")
+
+        def execute_stop_order(self, *args, **kwargs):
+            raise AssertionError("execute_stop_order should not be called when fallback is disallowed")
+
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) is None
+    assert record["protective_stop_status"] == "failed"
+    assert record["protective_stop_confirmation_reason"] == "multiple_execution_ids_without_close_route"
+    assert record["protective_stop_order_id"] is None
+    assert record["protective_stop_unconfirmed_order_id"] is None
+
+
+def test_cancel_linked_protective_stop_before_exit_uses_unconfirmed_stop_order_id():
+    position = {
+        "code": "1000",
+        "protective_stop_status": "failed",
+        "protective_stop_unconfirmed_order_id": "STOP-1",
+        "protective_stop_trigger_price": 99.0,
+    }
+    captured = {}
+
+    class _Broker:
+        def cancel_order(self, order_id):
+            captured["order_id"] = order_id
+            return True
+
+    cancel_ok, cancel_result = cancel_linked_protective_stop_before_exit(
+        broker=_Broker(),
+        position=position,
+    )
+
+    assert cancel_ok is True
+    assert cancel_result is None
+    assert captured["order_id"] == "STOP-1"
+    assert position["protective_stop_status"] == "cancelled"
+    assert position["protective_stop_cancelled_order_id"] == "STOP-1"
+    assert position["protective_stop_order_id"] is None
+    assert position["protective_stop_unconfirmed_order_id"] is None
+    assert position["protective_stop_trigger_price"] is None
 
 
 def test_arm_daytrade_protective_stop_refuses_when_hold_qty_is_unknown():

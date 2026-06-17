@@ -603,6 +603,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
   - live での unmanaged position を signal flatten / force flatten から除外すること
   - exact `execution_id` でのみ保護逆指値を紐づけること
+  - 複数 `execution_id` 既知時は close route 不明の fallback を止めること
   - `HoldQty` 欠損の建玉を fail closed にして、保護逆指値 / 返済割当で数量を推測しないこと
   - signal/manual exit 前に linked protective stop を cancel し、未確定なら exit を止めること
   - signal/manual exit 後に partial remainder の protective stop を再 arm すること
@@ -610,6 +611,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
   - `received_at` を使って board quote freshness を判定し、`quote_timestamp` / `current_price_timestamp` 欠損でも落とさないこと
   - multi-HoldID の protective stop を `ClosePositions` 経路で設定し、空の close route は通さないこと
+  - stop journal が `ROUTE_RESOLVED` と route summary を残し、multi-HoldID の `ClosePositions` と `hold_ids` を復元できること
   - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
   - protective stop が filled-before-cancel だった場合も exit を送らずに止めること
   - shared flatten 経路でも protective stop cancel 未確定なら exit を送らないこと
@@ -618,6 +620,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - live 側での inverse / `inverse_pullback` / `inverse_rebreak` の扱い
   - watchlist / portfolio / market index の 50 銘柄上限制御と優先順位
   - 監視銘柄 registry 同期の成功 / 失敗を entry gate に反映すること
+  - orders API で未確認だった protective stop の order_id も後続 cancel へ引き継ぐこと
   - SIGINT/SIGTERM が安全停止フラグに変換され、signal handler が I/O を行わないこと
   - safe shutdown の structured result と reconciliation failure の可視化
   - safe shutdown が managed order cancel 未確定なら flatten を見送ること
@@ -634,6 +637,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `SubmissionResult` の accepted / rejected / unknown 分岐
   - response text が長すぎる場合の truncation と秘密値 redaction
   - `OrderSubmissionResult` / `ExecutionWaitResult` / `CancelResult` の typed result と、未解決・取消結果の情報落ち防止
+  - stop journal が `ROUTE_RESOLVED` を含み、`ClosePositions` / `hold_ids` / route stage を残すこと
   - `live_approval_manifest` の hash が strategy 定数変更で変わり、`generated_at` では変わらないこと
   - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
@@ -652,6 +656,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - cancel 完了時の terminal reason を保持し、filled-before-cancel / expired を見分けること
   - `KABUCOM_ORDER_PASSWORD` を設定した場合に sendorder / cancelorder が API 認証用パスワードと分離されること
   - LIVE では `KABUCOM_ORDER_PASSWORD` 未設定の sendorder / cancelorder を送信前に reject すること
+  - stop journal が route summary を保存し、pre-resolution reject と resolved route を区別できること
   - `POST 401` の再送抑止と `GET 401` の再試行
   - managed position だけを使う売り返済の close position 割り当て
   - `execution_id` 単位で local metadata を復元し、symbol merge で状態を混ぜないこと

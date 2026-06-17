@@ -4050,6 +4050,22 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
     
     return tsl_price, target_price
 
+
+def resolve_protective_stop_order_id(position: dict | None = None, stop_order_id: str | None = None) -> str:
+    """Resolve the best known linked protective-stop order id for a position."""
+    explicit_stop_order_id = str(stop_order_id or "").strip()
+    if explicit_stop_order_id:
+        return explicit_stop_order_id
+
+    if not position:
+        return ""
+
+    for key in ("protective_stop_order_id", "protective_stop_unconfirmed_order_id"):
+        value = str(position.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
 def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_buffers=None, sma_med_map=None):
     """
     Day-trade manager:
@@ -4079,7 +4095,7 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             remaining_portfolio.append(dict(p))
             continue
         if not is_simulation:
-            stop_order_id = str(p.get("protective_stop_order_id") or "").strip()
+            stop_order_id = resolve_protective_stop_order_id(p)
             if stop_order_id:
                 stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
                     broker=broker,
@@ -4162,7 +4178,7 @@ def cancel_linked_protective_stop_before_exit(
     """返済前に linked protective stop を停止し、確定しないなら fail closed で止める。"""
     if position is None:
         position = {}
-    stop_order_id = str(stop_order_id or position.get("protective_stop_order_id") or "").strip()
+    stop_order_id = resolve_protective_stop_order_id(position, stop_order_id)
     if not stop_order_id:
         return True, None
     if broker is None or not hasattr(broker, "cancel_order"):
@@ -4179,6 +4195,10 @@ def cancel_linked_protective_stop_before_exit(
         if bool(cancel_result):
             position["protective_stop_status"] = "cancelled"
             position["protective_stop_cancelled_order_id"] = stop_order_id
+            position["protective_stop_order_id"] = None
+            position["protective_stop_unconfirmed_order_id"] = None
+            position["protective_stop_trigger_price"] = None
+            position["protective_stop_confirmation_reason"] = None
             return True, cancel_result
         reason = cancel_result.rejection_reason or getattr(cancel_result.terminal_status, "value", None) or cancel_result.status.value
         print(f"⚠️ protective stop {stop_order_id} の解除が未確定です: {reason}")
@@ -4187,6 +4207,10 @@ def cancel_linked_protective_stop_before_exit(
     if bool(cancel_result):
         position["protective_stop_status"] = "cancelled"
         position["protective_stop_cancelled_order_id"] = stop_order_id
+        position["protective_stop_order_id"] = None
+        position["protective_stop_unconfirmed_order_id"] = None
+        position["protective_stop_trigger_price"] = None
+        position["protective_stop_confirmation_reason"] = None
         return True, None
 
     print(f"⚠️ protective stop {stop_order_id} の解除に失敗しました。")
