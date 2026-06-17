@@ -1764,7 +1764,9 @@ def _main_exec():
             f"allowed={live_financial_write_gate_status.allowed} "
             f"reason={live_financial_write_gate_status.reason} "
             f"test_fixture={live_financial_write_gate_status.test_fixture_captured_from_kabucom_test} "
-            f"ci_green={live_financial_write_gate_status.ci_green_attested}"
+            f"ci_green={live_financial_write_gate_status.ci_green_attested} "
+            f"attestation={live_financial_write_gate_status.live_write_attestation_present}/"
+            f"{live_financial_write_gate_status.live_write_attestation_valid}"
         )
         send_discord_notify(
             "🔐 [LIVE-GATE] "
@@ -1772,7 +1774,9 @@ def _main_exec():
             f"reason={live_order_gate_status.reason} | "
             "[LIVE-WRITE-GATE] "
             f"allowed={live_financial_write_gate_status.allowed} "
-            f"reason={live_financial_write_gate_status.reason}"
+            f"reason={live_financial_write_gate_status.reason} "
+            f"attestation={live_financial_write_gate_status.live_write_attestation_present}/"
+            f"{live_financial_write_gate_status.live_write_attestation_valid}"
         )
         if not live_financial_write_gate_status.allowed:
             print("🛑 [LIVE-GATE] 新規エントリーはコード側で停止しています。監視と決済だけ継続します。")
