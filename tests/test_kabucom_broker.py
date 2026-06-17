@@ -1,7 +1,9 @@
 import unittest
 import json
+import tempfile
 from unittest.mock import patch
 import os
+from pathlib import Path
 import pandas as pd
 from types import SimpleNamespace
 
@@ -27,7 +29,13 @@ from core.kabucom_order_state import (
     resolve_stock_order_action_context,
 )
 from core.kabucom_quote import parse_board_quote
-from core.live_order_gate import EntryAuthorizationContext, evaluate_entry_authorization, get_live_order_gate_status
+from core.kabucom_contracts import TEST_CONTRACT_FIXTURE_PATH, load_contract_fixture
+from core.live_order_gate import (
+    EntryAuthorizationContext,
+    evaluate_entry_authorization,
+    get_kabucom_live_financial_write_gate_status,
+    get_live_order_gate_status,
+)
 from core.sim_broker import SimulationBroker
 
 
@@ -490,6 +498,30 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertIsNotNone(response)
         self.assertEqual(response.status_code, 500)
 
+    def test_api_request_retries_get_on_rate_limit(self):
+        session = _FakeSession([
+            _FakeResponse(429, text="rate limited"),
+            _FakeResponse(200, {"ok": True}),
+        ])
+        broker = _make_broker(session)
+
+        with patch("core.kabucom_broker.time.sleep", return_value=None):
+            response = broker._api_request("GET", "orders")
+
+        self.assertEqual(len(session.calls), 2)
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 200)
+
+    def test_api_request_does_not_retry_post_on_rate_limit(self):
+        session = _FakeSession([_FakeResponse(429, text="rate limited")])
+        broker = _make_broker(session)
+
+        response = broker._api_request("POST", "sendorder", json={"foo": "bar"})
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 429)
+
     def test_live_endpoint_blocks_write_when_trade_mode_is_not_live(self):
         with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
              patch("core.kabucom_broker.TRADE_MODE", "SIM"):
@@ -638,6 +670,53 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(cancel_result.rejection_reason, "missing_order_password")
         self.assertFalse(cancel_result.request_sent)
 
+    def test_live_financial_write_gate_blocks_without_actual_kabucom_test_capture(self):
+        status = get_kabucom_live_financial_write_gate_status(
+            base_gate_status=SimpleNamespace(allowed=True, reason="ready"),
+            ci_green_attested=True,
+        )
+
+        self.assertFalse(status.allowed)
+        self.assertEqual(status.reason, "test_contract_fixture_not_captured_from_kabucom_test")
+        self.assertTrue(status.test_fixture_present)
+        self.assertTrue(status.test_fixture_valid)
+        self.assertFalse(status.test_fixture_captured_from_kabucom_test)
+        self.assertTrue(status.ci_green_attested)
+
+    def test_live_financial_write_gate_preserves_base_gate_rejection_reason(self):
+        status = get_kabucom_live_financial_write_gate_status(
+            base_gate_status=SimpleNamespace(allowed=False, reason="approval_missing"),
+            ci_green_attested=True,
+        )
+
+        self.assertFalse(status.allowed)
+        self.assertEqual(status.reason, "approval_missing")
+        self.assertFalse(status.test_fixture_present)
+        self.assertTrue(status.ci_green_attested)
+
+    def test_live_financial_write_gate_allows_only_with_actual_capture_and_ci_attestation(self):
+        fixture = load_contract_fixture(TEST_CONTRACT_FIXTURE_PATH)
+        self.assertIsInstance(fixture, dict)
+        mutated = json.loads(json.dumps(fixture))
+        mutated["captured_from_kabucom_test"] = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path = Path(tmpdir) / "kabucom_test_contract_fixture.json"
+            fixture_path.write_text(json.dumps(mutated, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            status = get_kabucom_live_financial_write_gate_status(
+                base_gate_status=SimpleNamespace(allowed=True, reason="ready"),
+                test_fixture_path=fixture_path,
+                ci_green_attested=True,
+            )
+
+        self.assertTrue(status.allowed)
+        self.assertEqual(status.reason, "ready")
+        self.assertTrue(status.test_fixture_present)
+        self.assertTrue(status.test_fixture_valid)
+        self.assertTrue(status.test_fixture_captured_from_kabucom_test)
+        self.assertTrue(status.ci_green_attested)
+
     def test_execute_market_order_sell_side_uses_close_positions_and_daytrade_margin(self):
         captured = {}
 
@@ -703,6 +782,7 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_submit_market_order_rejects_live_new_buy_when_live_gate_blocks(self):
         with patch("core.kabucom_broker.KABUCOM_API_PASSWORD", ""), \
+            patch("core.kabucom_broker.KABUCOM_ORDER_PASSWORD", "order-secret"), \
             patch("core.kabucom_broker.TRADE_MODE", "KABUCOM_LIVE"), \
             patch("core.kabucom_broker.DEBUG_MODE", False), \
             patch(

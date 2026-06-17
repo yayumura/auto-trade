@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from core.kabucom_contracts import (
+    TEST_CONTRACT_FIXTURE_PATH,
+    load_contract_fixture,
+    validate_test_contract_fixture,
+)
 
 from core.config import (
     APPROVED_CONFIG_HASH,
@@ -20,6 +28,18 @@ class LiveOrderGateStatus:
     enable_live_order: bool
     approved_config_hash: str
     runtime_config_hash: str
+
+
+@dataclass(frozen=True)
+class LiveFinancialWriteGateStatus:
+    allowed: bool
+    reason: str
+    base_gate_status: LiveOrderGateStatus
+    test_fixture_path: str
+    test_fixture_present: bool
+    test_fixture_valid: bool
+    test_fixture_captured_from_kabucom_test: bool
+    ci_green_attested: bool
 
 
 @dataclass(frozen=True)
@@ -53,6 +73,19 @@ def _coerce_bool(value: bool | str | None) -> bool:
     if isinstance(value, str):
         return value.strip().lower() == "true"
     return bool(value)
+
+
+def _coerce_env_bool(*names: str) -> bool | None:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        text = raw.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return None
 
 
 def get_live_order_gate_status(
@@ -135,6 +168,124 @@ def get_live_order_gate_status(
     )
 
 
+def get_kabucom_live_financial_write_gate_status(
+    *,
+    base_gate_status: LiveOrderGateStatus | None = None,
+    test_fixture_path: str | Path | None = None,
+    ci_green_attested: bool | None = None,
+) -> LiveFinancialWriteGateStatus:
+    """KABUCOM_LIVE の financial write を開けてよいかを総合判定する。
+
+    既存の live order gate に加えて、KABUCOM_TEST fixture の provenance と
+    CI green attestation も fail closed で要求する。
+    """
+    base_gate_status = get_live_order_gate_status() if base_gate_status is None else base_gate_status
+    fixture_path = TEST_CONTRACT_FIXTURE_PATH if test_fixture_path is None else Path(test_fixture_path)
+    fixture_path_text = str(fixture_path)
+    if ci_green_attested is None:
+        ci_green_attested = _coerce_env_bool("KABUCOM_LIVE_CI_GREEN", "CI_GREEN") is True
+    resolved_ci_green_attested = bool(ci_green_attested)
+
+    if not bool(getattr(base_gate_status, "allowed", False)):
+        return LiveFinancialWriteGateStatus(
+            allowed=False,
+            reason=str(getattr(base_gate_status, "reason", "live_order_gate_blocked")),
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=False,
+            test_fixture_valid=False,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    if str(getattr(base_gate_status, "reason", "")) == "non_live_mode":
+        return LiveFinancialWriteGateStatus(
+            allowed=True,
+            reason="non_live_mode",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=False,
+            test_fixture_valid=False,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    fixture = load_contract_fixture(fixture_path)
+    if fixture is None:
+        return LiveFinancialWriteGateStatus(
+            allowed=False,
+            reason="test_contract_fixture_missing",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=False,
+            test_fixture_valid=False,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    validation = validate_test_contract_fixture(fixture)
+    if not validation.valid:
+        return LiveFinancialWriteGateStatus(
+            allowed=False,
+            reason=f"test_contract_fixture_invalid:{validation.reason}",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=True,
+            test_fixture_valid=False,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    captured_from_test = bool(fixture.get("captured_from_kabucom_test"))
+    if not captured_from_test:
+        return LiveFinancialWriteGateStatus(
+            allowed=False,
+            reason="test_contract_fixture_not_captured_from_kabucom_test",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=True,
+            test_fixture_valid=True,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    if not resolved_ci_green_attested:
+        return LiveFinancialWriteGateStatus(
+            allowed=False,
+            reason="ci_green_attestation_missing",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=True,
+            test_fixture_valid=True,
+            test_fixture_captured_from_kabucom_test=True,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
+    return LiveFinancialWriteGateStatus(
+        allowed=True,
+        reason="ready",
+        base_gate_status=base_gate_status,
+        test_fixture_path=fixture_path_text,
+        test_fixture_present=True,
+        test_fixture_valid=True,
+        test_fixture_captured_from_kabucom_test=True,
+        ci_green_attested=resolved_ci_green_attested,
+    )
+
+
+def can_enable_kabucom_live_financial_write(
+    *,
+    base_gate_status: LiveOrderGateStatus | None = None,
+    test_fixture_path: str | Path | None = None,
+    ci_green_attested: bool | None = None,
+) -> bool:
+    return get_kabucom_live_financial_write_gate_status(
+        base_gate_status=base_gate_status,
+        test_fixture_path=test_fixture_path,
+        ci_green_attested=ci_green_attested,
+    ).allowed
+
+
 def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAuthorizationStatus:
     """ライブ新規 entry の実行時認可を判定する。"""
     if not context.production_endpoint:
@@ -192,4 +343,4 @@ def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAut
 
 def is_live_new_entry_allowed() -> bool:
     """KABUCOM_LIVE の新規 entry が許可されるかだけを返す。"""
-    return get_live_order_gate_status().allowed
+    return can_enable_kabucom_live_financial_write()

@@ -409,6 +409,7 @@ from core.ai_filter import ai_qualitative_filter, get_recent_news
 from core.live_order_gate import (
     EntryAuthorizationContext,
     evaluate_entry_authorization,
+    get_kabucom_live_financial_write_gate_status,
     get_live_order_gate_status,
 )
 from core.order_journal import build_order_journal_replay_summary
@@ -1746,15 +1747,34 @@ def _main_exec():
     _set_active_runtime_state(broker=broker, is_sim=is_sim)
 
     live_order_gate_status = None
+    live_financial_write_gate_status = None
     if TRADE_MODE == "KABUCOM_LIVE":
         live_order_gate_status = get_live_order_gate_status()
+        live_financial_write_gate_status = get_kabucom_live_financial_write_gate_status(
+            base_gate_status=live_order_gate_status,
+        )
         print(
             "🔐 [LIVE-GATE] "
             f"allowed={live_order_gate_status.allowed} "
             f"reason={live_order_gate_status.reason} "
             f"runtime_hash={live_order_gate_status.runtime_config_hash}"
         )
-        if not live_order_gate_status.allowed:
+        print(
+            "🔐 [LIVE-WRITE-GATE] "
+            f"allowed={live_financial_write_gate_status.allowed} "
+            f"reason={live_financial_write_gate_status.reason} "
+            f"test_fixture={live_financial_write_gate_status.test_fixture_captured_from_kabucom_test} "
+            f"ci_green={live_financial_write_gate_status.ci_green_attested}"
+        )
+        send_discord_notify(
+            "🔐 [LIVE-GATE] "
+            f"allowed={live_order_gate_status.allowed} "
+            f"reason={live_order_gate_status.reason} | "
+            "[LIVE-WRITE-GATE] "
+            f"allowed={live_financial_write_gate_status.allowed} "
+            f"reason={live_financial_write_gate_status.reason}"
+        )
+        if not live_financial_write_gate_status.allowed:
             print("🛑 [LIVE-GATE] 新規エントリーはコード側で停止しています。監視と決済だけ継続します。")
 
     try:
@@ -2161,13 +2181,20 @@ def _main_exec():
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
         elif not is_sim and _portfolio_has_unresolved_execution_state(portfolio): should_scan = False
         elif not is_sim and loop_recovery_report.needs_manual_review: should_scan = False
-        elif live_order_gate_status is not None and not live_order_gate_status.allowed: should_scan = False
+        elif (
+            live_financial_write_gate_status is not None
+            and not live_financial_write_gate_status.allowed
+        ): should_scan = False
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
 
         entry_authorization_context = EntryAuthorizationContext(
             production_endpoint=TRADE_MODE == "KABUCOM_LIVE",
-            approved_manifest_valid=bool(live_order_gate_status.allowed) if live_order_gate_status is not None else True,
+            approved_manifest_valid=(
+                bool(live_financial_write_gate_status.allowed)
+                if live_financial_write_gate_status is not None
+                else True
+            ),
             reconciliation_clean=not loop_recovery_report.needs_manual_review,
             unresolved_order_count=loop_recovery_report.active_orders_unknown_count,
             ambiguous_position_count=loop_recovery_report.ambiguous_position_count,
