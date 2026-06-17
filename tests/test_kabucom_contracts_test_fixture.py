@@ -20,6 +20,12 @@ class TestKabucomTestContractFixture(unittest.TestCase):
         fixture = load_contract_fixture(TEST_CONTRACT_FIXTURE_PATH)
         self.assertIsInstance(fixture, dict)
         self.assertEqual(fixture["fixture_kind"], "KABUCOM_TEST")
+        self.assertFalse(fixture["captured_from_kabucom_test"])
+        self.assertEqual(fixture["captured_at"], "2026-06-12T00:00:00+09:00")
+        self.assertEqual(fixture["redaction_policy"], "manual_sanitized_fixture_v1")
+        self.assertIn("Password", fixture["sanitized_fields"])
+        self.assertIn("Token", fixture["sanitized_fields"])
+        self.assertIn("Actual KABUCOM_TEST capture is still pending", fixture["provenance_note"])
         self.assertEqual(fixture["password_policy"], "api_password_fallback_allowed")
         self.assertEqual(fixture["api_spec_version"], "1.5")
         self.assertEqual(fixture["api_spec_commit_sha"], "0119077f1647b7c3ff64460b862c1978142df43d")
@@ -50,6 +56,14 @@ class TestKabucomTestContractFixture(unittest.TestCase):
         self.assertIsInstance(fixture, dict)
         mutated = dict(fixture)
         mutated.pop("password_policy", None)
+
+        self.assertFalse(validate_test_contract_fixture(mutated).valid)
+
+    def test_test_fixture_rejects_missing_provenance_metadata(self):
+        fixture = load_contract_fixture(TEST_CONTRACT_FIXTURE_PATH)
+        self.assertIsInstance(fixture, dict)
+        mutated = dict(fixture)
+        mutated.pop("captured_from_kabucom_test", None)
 
         self.assertFalse(validate_test_contract_fixture(mutated).valid)
 

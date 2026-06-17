@@ -10,8 +10,20 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
-import jquantsapi
+try:
+    import jquantsapi
+except ModuleNotFoundError as exc:
+    _JQUANTSAPI_IMPORT_ERROR = exc
+
+    def _missing_jquants_client(*args, **kwargs):
+        raise ModuleNotFoundError(
+            "jquantsapi is required to refresh J-Quants caches. Install the dependency "
+            "before calling jp_jquants_fetcher_v2.py."
+        ) from _JQUANTSAPI_IMPORT_ERROR
+
+    jquantsapi = SimpleNamespace(ClientV2=_missing_jquants_client)
 import pandas as pd
 import requests
 from dotenv import load_dotenv

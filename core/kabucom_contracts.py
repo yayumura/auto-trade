@@ -289,6 +289,36 @@ def _validate_fixture_password_policy(mapping: Mapping[str, Any], *, expected_ki
     return _validation_success("contract_fixture_policy_ok", dict(mapping))
 
 
+def _validate_test_fixture_provenance(mapping: Mapping[str, Any]) -> ContractValidationResult:
+    required_keys = ("captured_from_kabucom_test", "captured_at", "sanitized_fields", "redaction_policy", "provenance_note")
+    missing = [key for key in required_keys if key not in mapping]
+    if missing:
+        return _validation_failure(f"test_contract_fixture_provenance_missing:{','.join(missing)}")
+
+    if not isinstance(mapping.get("captured_from_kabucom_test"), bool):
+        return _validation_failure("test_contract_fixture_provenance_capture_flag_invalid")
+
+    captured_at = str(mapping.get("captured_at") or "").strip()
+    if not captured_at:
+        return _validation_failure("test_contract_fixture_provenance_captured_at_missing")
+
+    sanitized_fields = mapping.get("sanitized_fields")
+    if not isinstance(sanitized_fields, list) or not sanitized_fields:
+        return _validation_failure("test_contract_fixture_provenance_sanitized_fields_invalid")
+    if any(not str(item or "").strip() for item in sanitized_fields):
+        return _validation_failure("test_contract_fixture_provenance_sanitized_fields_invalid")
+
+    redaction_policy = str(mapping.get("redaction_policy") or "").strip()
+    if not redaction_policy:
+        return _validation_failure("test_contract_fixture_provenance_redaction_policy_missing")
+
+    provenance_note = str(mapping.get("provenance_note") or "").strip()
+    if not provenance_note:
+        return _validation_failure("test_contract_fixture_provenance_note_missing")
+
+    return _validation_success("test_contract_fixture_provenance_ok", dict(mapping))
+
+
 def validate_official_contract_fixture(fixture: Any) -> ContractValidationResult:
     mapping = _require_mapping(fixture, "official_contract_fixture")
     if mapping is None:
@@ -338,6 +368,10 @@ def validate_test_contract_fixture(fixture: Any) -> ContractValidationResult:
     policy = _validate_fixture_password_policy(mapping, expected_kind=TEST_CONTRACT_FIXTURE_KIND, expected_password_policy=TEST_CONTRACT_PASSWORD_POLICY)
     if not policy.valid:
         return policy
+
+    provenance = _validate_test_fixture_provenance(mapping)
+    if not provenance.valid:
+        return provenance
 
     requests = mapping.get("requests")
     if not isinstance(requests, Mapping):

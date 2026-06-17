@@ -256,6 +256,30 @@ def test_daytrade_can_return_daily_stats():
     assert daily_stats["2024-04-18"]["trade_count"] == 1
 
 
+def test_daytrade_open_entry_does_not_use_same_day_breadth():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    breadth_ratio = np.full(len(dates), 0.20)
+    breadth_ratio[102] = 0.80
+
+    final_assets, trade_count, monthly, results = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=breadth_ratio,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+    )
+
+    assert trade_count == 0
+    assert len(results) == 0
+    assert final_assets == 10_000_000
+
+
 def test_daytrade_allows_low_breadth_tuesday_catchup_rs_probe():
     dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle()
     final_assets, trade_count, monthly, results = run_backtest_v16_production(

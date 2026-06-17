@@ -2,8 +2,20 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
-import jquantsapi
+try:
+    import jquantsapi
+except ModuleNotFoundError as exc:
+    _JQUANTSAPI_IMPORT_ERROR = exc
+
+    def _missing_jquants_client(*args, **kwargs):
+        raise ModuleNotFoundError(
+            "jquantsapi is required to fetch J-Quants margin data. Install the dependency "
+            "before calling jp_jquants_margin_fetcher.py."
+        ) from _JQUANTSAPI_IMPORT_ERROR
+
+    jquantsapi = SimpleNamespace(ClientV2=_missing_jquants_client)
 import pandas as pd
 from dotenv import load_dotenv
 

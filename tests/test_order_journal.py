@@ -105,6 +105,75 @@ def test_build_startup_recovery_report_blocks_on_unresolved_active_orders():
     assert "active_orders_unknown:2" in report.blocking_reasons
 
 
+def test_build_startup_recovery_report_blocks_on_unconfirmed_protective_stop_and_orphaned_stop():
+    report = build_startup_recovery_report(
+        portfolio=[
+            {
+                "code": "1000",
+                "ownership": "MANAGED_BY_BOT",
+                "protective_stop_status": "armed",
+                "protective_stop_unconfirmed_order_id": "STOP-1",
+            },
+            {
+                "code": "2000",
+                "ownership": "MANAGED_BY_BOT",
+                "protective_stop_status": "armed",
+            },
+        ],
+        active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+        order_journal_summary=None,
+        wallet_snapshot_incomplete=False,
+    )
+
+    assert report.protective_stop_pending_count == 1
+    assert report.protective_stop_orphan_count == 1
+    assert report.needs_manual_review is True
+    assert "protective_stop_pending:1" in report.blocking_reasons
+    assert "protective_stop_orphan:1" in report.blocking_reasons
+
+
+def test_build_startup_recovery_report_blocks_on_missing_armed_protective_stop():
+    report = build_startup_recovery_report(
+        portfolio=[
+            {
+                "code": "1000",
+                "ownership": "MANAGED_BY_BOT",
+                "protective_stop_status": "armed",
+                "protective_stop_order_id": "STOP-1",
+            }
+        ],
+        active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+        order_journal_summary=None,
+        wallet_snapshot_incomplete=False,
+    )
+
+    assert report.protective_stop_missing_count == 1
+    assert report.needs_manual_review is True
+    assert "protective_stop_missing:1" in report.blocking_reasons
+
+
+def test_build_startup_recovery_report_blocks_on_status_only_partial_entry_and_exit():
+    report = build_startup_recovery_report(
+        portfolio=[
+            {
+                "code": "1000",
+                "ownership": "MANAGED_BY_BOT",
+                "entry_order_execution_status": "partial_unresolved",
+                "exit_order_execution_status": "zero_fill_unresolved",
+            }
+        ],
+        active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+        order_journal_summary=None,
+        wallet_snapshot_incomplete=False,
+    )
+
+    assert report.entry_unresolved_count == 1
+    assert report.exit_unresolved_count == 1
+    assert report.needs_manual_review is True
+    assert "entry_unresolved:1" in report.blocking_reasons
+    assert "exit_unresolved:1" in report.blocking_reasons
+
+
 def test_append_order_journal_raises_when_fsync_fails(tmp_path: Path):
     journal_path = tmp_path / "order_journal.jsonl"
 

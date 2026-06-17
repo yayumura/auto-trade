@@ -92,8 +92,6 @@ def parse_board_quote(symbol: str, raw: Mapping[str, Any]) -> BoardQuote:
     current_price_timestamp = _parse_time_like(raw.get("CurrentPriceTime"))
     quote_timestamp = _parse_time_like(raw.get("QuoteTime")) or current_price_timestamp
     received_at = _parse_time_like(raw.get("received_at") or raw.get("ReceivedAt"))
-    if quote_timestamp is None:
-        quote_timestamp = received_at
     bid_timestamp = _parse_time_like(raw.get("BidTime"))
     ask_timestamp = _parse_time_like(raw.get("AskTime"))
     opening_price_timestamp = _parse_time_like(raw.get("OpeningPriceTime"))

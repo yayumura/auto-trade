@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 import shutil
@@ -11,13 +12,18 @@ import pandas as pd
 from core.config import JST
 from core.file_io import atomic_write_json, ensure_absolute_path, safe_read_csv, safe_read_json
 
-PORTFOLIO_STATE_SCHEMA_VERSION = 1
+PORTFOLIO_STATE_SCHEMA_VERSION = 2
 PORTFOLIO_STATE_FORMAT = "schema_versioned_json"
 PORTFOLIO_STRING_FIELDS = {
     "code",
     "symbol",
     "execution_id",
     "hold_id",
+    "broker_environment",
+    "broker_product",
+    "broker_trade_mode",
+    "position_lot_key",
+    "position_lot_key_source",
     "ownership",
     "ownership_reason",
     "setup_type",
@@ -56,7 +62,111 @@ def _normalize_json_value(value: Any) -> Any:
     return value
 
 
-def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_execution_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    for item in raw_values:
+        text = _first_text(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _build_position_lot_identity(record: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    context = dict(context or {})
+    execution_ids = _normalize_execution_ids(record.get("execution_ids"))
+    direct_execution_id = _first_text(record.get("execution_id"))
+    primary_execution_id = direct_execution_id or (execution_ids[0] if execution_ids else None)
+    entry_order_id = _first_text(
+        record.get("entry_order_id"),
+        record.get("order_id"),
+        context.get("entry_order_id"),
+        context.get("order_id"),
+    )
+    hold_id = _first_text(record.get("hold_id"))
+    symbol = _first_text(record.get("symbol"), record.get("code"))
+    buy_time = _first_text(record.get("buy_time"))
+    sell_time = _first_text(record.get("sell_time"))
+    broker_environment = _first_text(
+        record.get("broker_environment"),
+        context.get("broker_environment"),
+        context.get("source"),
+    )
+    broker_account_type = _first_text(
+        record.get("broker_account_type"),
+        context.get("broker_account_type"),
+        context.get("account_type"),
+    )
+    broker_product = _first_text(
+        record.get("broker_product"),
+        context.get("broker_product"),
+        context.get("product"),
+    )
+    broker_trade_mode = _first_text(
+        record.get("broker_trade_mode"),
+        context.get("broker_trade_mode"),
+    )
+
+    if direct_execution_id:
+        source = "execution_id"
+    elif execution_ids:
+        source = "execution_ids"
+    elif entry_order_id:
+        source = "entry_order_id"
+    elif hold_id:
+        source = "hold_id"
+    elif buy_time:
+        source = "buy_time"
+    else:
+        source = "unkeyed"
+
+    components = {
+        "broker_environment": broker_environment,
+        "broker_account_type": broker_account_type,
+        "broker_product": broker_product,
+        "broker_trade_mode": broker_trade_mode,
+        "symbol": symbol,
+        "execution_id": primary_execution_id,
+        "execution_ids": execution_ids or None,
+        "entry_order_id": entry_order_id,
+        "hold_id": hold_id,
+        "buy_time": buy_time,
+        "sell_time": sell_time,
+    }
+    filtered_components = {key: value for key, value in components.items() if value not in (None, "", [], ())}
+    position_lot_key = json.dumps(filtered_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "position_lot_key": position_lot_key,
+        "position_lot_key_source": source,
+        "position_lot_key_needs_review": source not in {"execution_id", "execution_ids"},
+        "position_lot_key_components": filtered_components,
+    }
+
+
+def _normalize_record(
+    record: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+    add_lot_identity: bool = True,
+) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for key, value in dict(record or {}).items():
         normalized_key = str(key)
@@ -64,14 +174,23 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         if normalized_key in PORTFOLIO_STRING_FIELDS and normalized_value is not None:
             normalized_value = str(normalized_value)
         normalized[normalized_key] = normalized_value
+
+    context = dict(context or {})
+    for key in ("broker_environment", "broker_account_type", "broker_product", "broker_trade_mode"):
+        context_value = _normalize_json_value(context.get(key))
+        if normalized.get(key) in (None, "") and context_value not in (None, ""):
+            normalized[key] = context_value
+
+    if add_lot_identity:
+        normalized.update(_build_position_lot_identity(normalized, context))
     return normalized
 
 
-def _normalize_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _normalize_positions(portfolio: list[dict[str, Any]] | None, *, context: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     positions = []
     for record in portfolio or []:
         if isinstance(record, Mapping):
-            positions.append(_normalize_record(record))
+            positions.append(_normalize_record(record, context=context))
     return positions
 
 
@@ -98,8 +217,8 @@ def build_portfolio_state_payload(
     *,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_positions = _normalize_positions(portfolio)
-    normalized_metadata = _normalize_record(metadata or {})
+    normalized_metadata = _normalize_record(metadata or {}, add_lot_identity=False)
+    normalized_positions = _normalize_positions(portfolio, context=normalized_metadata)
     normalized_metadata.setdefault("position_count", len(normalized_positions))
     normalized_metadata.setdefault("updated_at", datetime.now(JST).isoformat())
     return {
@@ -112,10 +231,6 @@ def build_portfolio_state_payload(
 
 def load_portfolio_state(path: str) -> PortfolioState | None:
     absolute_path = ensure_absolute_path(path)
-    path_obj = Path(absolute_path)
-    if not path_obj.exists() or path_obj.stat().st_size == 0:
-        return None
-
     raw_json = safe_read_json(absolute_path, default=None)
     if isinstance(raw_json, dict) and "positions" in raw_json:
         positions = raw_json.get("positions") or []
@@ -124,8 +239,8 @@ def load_portfolio_state(path: str) -> PortfolioState | None:
         needs_migration = schema_version != PORTFOLIO_STATE_SCHEMA_VERSION or raw_json.get("format") != PORTFOLIO_STATE_FORMAT
         return PortfolioState(
             schema_version=schema_version,
-            positions=_normalize_positions(positions),
-            metadata=_normalize_record(metadata),
+            positions=_normalize_positions(positions, context=metadata),
+            metadata=_normalize_record(metadata, add_lot_identity=False),
             source_format=str(raw_json.get("format") or "json"),
             needs_migration=needs_migration,
         )

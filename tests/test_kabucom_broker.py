@@ -1,4 +1,5 @@
 import unittest
+import json
 from unittest.mock import patch
 import os
 import pandas as pd
@@ -287,6 +288,20 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertFalse(special.is_valid)
         self.assertEqual(special.rejection_reason, "special_quote_status_3")
 
+    def test_parse_board_quote_keeps_received_at_separate_from_quote_timestamp(self):
+        quote = parse_board_quote(
+            "1234",
+            {
+                "CurrentPrice": 1000,
+                "BidPrice": 1001,
+                "AskPrice": 1000,
+                "CurrentPriceStatus": 0,
+                "ReceivedAt": "2026-04-21T09:01:01",
+            },
+        )
+        self.assertIsNone(quote.quote_timestamp)
+        self.assertEqual(quote.received_at.isoformat(), "2026-04-21T09:01:01")
+
     def test_classify_submission_response_distinguishes_accepted_rejected_and_unknown(self):
         accepted = classify_submission_response(
             intent_id="intent-1",
@@ -415,6 +430,32 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertIn("quote_stale", status.blocking_reasons)
         self.assertIn("registry_not_ready", status.blocking_reasons)
         self.assertIn("shutdown_requested", status.blocking_reasons)
+
+    def test_entry_authorization_blocks_on_pending_orphaned_protective_stop(self):
+        status = evaluate_entry_authorization(
+            EntryAuthorizationContext(
+                production_endpoint=True,
+                approved_manifest_valid=True,
+                reconciliation_clean=True,
+                unresolved_order_count=0,
+                ambiguous_position_count=0,
+                wallet_snapshot_fresh=True,
+                positions_snapshot_fresh=True,
+                orders_snapshot_fresh=True,
+                quote_fresh=True,
+                registry_ready=True,
+                critical_state_valid=True,
+                session_allows_entry=True,
+                clock_healthy=True,
+                shutdown_requested=False,
+                protective_stop_pending_count=1,
+                protective_stop_orphan_count=1,
+            )
+        )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("protective_stop_pending:1", status.blocking_reasons)
+        self.assertIn("protective_stop_orphan:1", status.blocking_reasons)
 
     def test_entry_authorization_allows_non_production_endpoints(self):
         status = evaluate_entry_authorization(
@@ -771,7 +812,7 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(journal_events[1]["close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
         self.assertEqual(journal_events[1]["hold_ids"], ["HOLD-1"])
         self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
-        self.assertEqual(journal_events[2]["route_resolution_stage"], "resolved")
+        self.assertEqual(journal_events[2]["route_resolution_stage"], "fallback_single_hold")
 
     def test_execute_market_order_writes_order_journal(self):
         journal_events = []
@@ -993,6 +1034,158 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}])
         self.assertEqual(journal_events[2]["route_resolution_stage"], "resolved")
 
+    def test_order_submission_result_bool_is_accepted_only_and_exposes_confirmation_helpers(self):
+        result = OrderSubmissionResult(
+            status=SubmissionStatus.ACCEPTED,
+            intent_id="intent-1",
+            broker_order_id="ORDER-1",
+            request_sent=True,
+            action=StockOrderAction.MARGIN_CLOSE_LONG,
+            symbol="1234",
+            qty=100,
+            side="1",
+            confirmed=False,
+        )
+
+        self.assertTrue(bool(result))
+        self.assertTrue(result.is_accepted)
+        self.assertFalse(result.is_confirmed)
+        self.assertFalse(result.is_protective_stop_armed)
+
+    def test_execute_stop_order_uses_generated_close_positions_for_single_hold_fallback_confirmation(self):
+        captured = {}
+        journal_events = []
+        stop_details = [
+            {
+                "OrderId": "STOP-FALLBACK",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 3,
+                "DelivType": 2,
+                "Exchange": 1,
+                "MarginTradeType": 3,
+                "Side": "1",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3000.0,
+                    "UnderOver": 1,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "ClosePositions": [{"HoldID": "HOLD-1", "Qty": 100}],
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
+
+        def fake_api_request(method, endpoint, **kwargs):
+            if method == "POST" and endpoint == "sendorder":
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-FALLBACK"})
+            if method == "GET" and endpoint == "orders?id=STOP-FALLBACK":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
+
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = fake_api_request
+        broker.get_positions = lambda: [
+            {
+                "hold_id": "HOLD-1",
+                "exchange": 1,
+                "margin_trade_type": 3,
+                "available_qty": 100,
+                "hold_qty": 100,
+                "code": "1234",
+                "ownership": "MANAGED_BY_BOT",
+            }
+        ]
+
+        with patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+            result = broker.execute_stop_order("1234", 100, action=StockOrderAction.MARGIN_CLOSE_LONG, trigger_price=3001.2, hold_id="HOLD-1")
+
+        self.assertIsInstance(result, OrderSubmissionResult)
+        self.assertTrue(result.confirmed)
+        self.assertTrue(result.is_confirmed)
+        self.assertEqual(captured["json"]["ClosePositions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        self.assertEqual(journal_events[1]["route_resolution_stage"], "fallback_single_hold")
+        self.assertEqual(journal_events[1]["route_resolution_reason"], "single_hold_fallback")
+        self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+
+    def test_execute_stop_order_records_redacted_confirmation_summary_when_single_hold_fallback_confirmation_fails(self):
+        captured = {}
+        journal_events = []
+        stop_details = [
+            {
+                "OrderId": "STOP-FALLBACK",
+                "State": 3,
+                "OrderQty": 100,
+                "CumQty": 0,
+                "CashMargin": 3,
+                "DelivType": 2,
+                "Exchange": 1,
+                "MarginTradeType": 3,
+                "Side": "1",
+                "ReverseLimitOrder": {
+                    "TriggerSec": 1,
+                    "TriggerPrice": 3000.0,
+                    "UnderOver": 1,
+                    "AfterHitOrderType": 1,
+                    "AfterHitPrice": 0,
+                },
+                "ClosePositions": [{"HoldID": "HOLD-1", "Qty": 50}],
+                "Password": "super-secret",
+                "Token": "session-token",
+                "OpaqueField": {"nested": "private"},
+                "Details": [
+                    {"RecType": 4, "SeqNum": 1, "State": 3, "Qty": 100, "Price": 0, "ExecutionID": "EX-STOP"},
+                ],
+            }
+        ]
+
+        def fake_api_request(method, endpoint, **kwargs):
+            if method == "POST" and endpoint == "sendorder":
+                captured["json"] = kwargs["json"]
+                return _FakeResponse(200, {"Result": 0, "OrderId": "STOP-FALLBACK"})
+            if method == "GET" and endpoint == "orders?id=STOP-FALLBACK":
+                return _FakeResponse(200, stop_details)
+            raise AssertionError(f"unexpected request: {method} {endpoint}")
+
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = fake_api_request
+        broker.get_positions = lambda: [
+            {
+                "hold_id": "HOLD-1",
+                "exchange": 1,
+                "margin_trade_type": 3,
+                "available_qty": 100,
+                "hold_qty": 100,
+                "code": "1234",
+                "ownership": "MANAGED_BY_BOT",
+            }
+        ]
+
+        with patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+            result = broker.execute_stop_order("1234", 100, action=StockOrderAction.MARGIN_CLOSE_LONG, trigger_price=3001.2, hold_id="HOLD-1")
+
+        self.assertIsInstance(result, OrderSubmissionResult)
+        self.assertFalse(result.confirmed)
+        self.assertFalse(result.is_confirmed)
+        self.assertEqual(result.confirmation_reason, "stop_order_close_positions_mismatch")
+        self.assertEqual(captured["json"]["ClosePositions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        summary = journal_events[-1]["confirmation_details"]
+        self.assertIsInstance(summary, dict)
+        self.assertEqual(summary["response_shape_version"], 1)
+        self.assertEqual(summary["mismatch_reason"], "stop_order_close_positions_mismatch")
+        self.assertEqual(summary["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        self.assertEqual(summary["close_positions"], [{"HoldID": "HOLD-1", "Qty": 50}])
+        self.assertFalse(summary["close_positions_match"])
+        self.assertNotIn("Password", summary)
+        self.assertNotIn("Token", summary)
+        self.assertNotIn("OpaqueField", summary)
+        self.assertLess(len(json.dumps(summary, ensure_ascii=False)), 4096)
+
     def test_execute_stop_order_rejects_empty_close_positions_list_even_when_hold_id_is_available(self):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API should not be called"))
@@ -1208,6 +1401,8 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(result["process_state"], OrderProcessState.TERMINAL.value)
         self.assertEqual(result["terminal_reason"], OrderTerminalReason.FILLED.value)
         self.assertFalse(result["unresolved"])
+        self.assertEqual(result["execution_status"], "completed")
+        self.assertEqual(result["exit_execution_status"], "completed")
         self.assertTrue(any(event.get("event") == "FILLED" for event in journal_events))
 
     def test_wait_for_execution_returns_unresolved_partial_fill_after_timeout(self):
@@ -1246,6 +1441,8 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(legacy["__parsed_cumulative_qty__"], 40)
         self.assertEqual(legacy["Qty"], 40)
         self.assertAlmostEqual(legacy["Price"], (25 * 1000.0 + 15 * 1010.0) / 40)
+        self.assertEqual(legacy["execution_status"], "partial_unresolved")
+        self.assertEqual(legacy["entry_execution_status"], "partial_unresolved")
 
     def test_wait_for_execution_marks_unknown_state_as_unresolved(self):
         details_iter = iter([
@@ -1279,6 +1476,8 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(legacy["__parsed_process_state__"], OrderProcessState.UNKNOWN.value)
         self.assertEqual(legacy["__parsed_cumulative_qty__"], 40)
         self.assertEqual(legacy["Qty"], 40)
+        self.assertEqual(legacy["execution_status"], "partial_unresolved")
+        self.assertEqual(legacy["entry_execution_status"], "partial_unresolved")
 
     def test_get_account_balance_live_separates_wallet_cash_and_margin(self):
         responses = iter([
@@ -1667,6 +1866,25 @@ class TestKabucomBroker(unittest.TestCase):
 
         mocked_append.assert_called_once()
 
+    def test_save_positions_includes_broker_context_metadata(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._environment = BrokerEnvironment.LIVE
+        captured = {}
+
+        def fake_write(path, portfolio, metadata=None):
+            captured["path"] = path
+            captured["portfolio"] = portfolio
+            captured["metadata"] = metadata
+
+        with patch("core.kabucom_broker.write_portfolio_state", side_effect=fake_write):
+            broker.save_positions([{"code": "1234", "execution_id": "EX-1"}])
+
+        self.assertIn("metadata", captured)
+        self.assertEqual(captured["metadata"]["source"], "kabucom_broker")
+        self.assertEqual(captured["metadata"]["broker_environment"], "live")
+        self.assertEqual(captured["metadata"]["broker_account_type"], 4)
+        self.assertEqual(captured["metadata"]["broker_product"], "margin")
+
     def test_simulation_broker_log_trade_appends_rows(self):
         broker = SimulationBroker()
         trade_record = {"code": "1234", "shares": 100, "pnl": 123.0}
@@ -1675,6 +1893,23 @@ class TestKabucomBroker(unittest.TestCase):
             broker.log_trade(trade_record)
 
         mocked_append.assert_called_once()
+
+    def test_simulation_broker_save_positions_includes_simulation_metadata(self):
+        broker = SimulationBroker()
+        captured = {}
+
+        def fake_write(path, portfolio, metadata=None):
+            captured["path"] = path
+            captured["portfolio"] = portfolio
+            captured["metadata"] = metadata
+
+        with patch("core.sim_broker.write_portfolio_state", side_effect=fake_write):
+            broker.save_positions([{"code": "1234", "execution_id": "EX-1"}])
+
+        self.assertIn("metadata", captured)
+        self.assertEqual(captured["metadata"]["source"], "simulation_broker")
+        self.assertEqual(captured["metadata"]["broker_environment"], "simulation")
+        self.assertEqual(captured["metadata"]["broker_product"], "simulation")
 
 
 if __name__ == "__main__":

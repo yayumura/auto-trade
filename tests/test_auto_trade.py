@@ -190,7 +190,7 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
                 "exchange": exchange,
                 "margin_trade_type": margin_trade_type,
             })
-            return SimpleNamespace(broker_order_id="STOP-1", status="accepted")
+            return SimpleNamespace(broker_order_id="STOP-1", status="accepted", confirmed=True)
 
     stop_order_id = auto_trade._arm_daytrade_protective_stop(
         _Broker(),
@@ -259,7 +259,7 @@ def test_arm_daytrade_protective_stop_requires_exact_execution_id_match():
     ) is None
 
 
-def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_ids_are_known():
+def test_arm_daytrade_protective_stop_refuses_accepted_stop_without_confirmed_flag():
     record = build_daytrade_position_record(
         {
             "code": "1000",
@@ -338,7 +338,7 @@ def test_arm_daytrade_protective_stop_uses_close_positions_route_when_available(
                 "exchange": exchange,
                 "margin_trade_type": margin_trade_type,
             })
-            return SimpleNamespace(broker_order_id="STOP-MULTI", status="accepted")
+            return SimpleNamespace(broker_order_id="STOP-MULTI", status="accepted", confirmed=True)
 
     stop_order_id = auto_trade._arm_daytrade_protective_stop(
         _Broker(),
@@ -407,6 +407,42 @@ def test_arm_daytrade_protective_stop_refuses_unconfirmed_accepted_stop():
     assert record["protective_stop_unconfirmed_order_id"] == "STOP-1"
 
 
+def test_arm_daytrade_protective_stop_refuses_to_double_send_when_unconfirmed_stop_is_pending():
+    record = build_daytrade_position_record(
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "atr": 2.0,
+            "stop_mult": 1.0,
+            "target_mult": 1.5,
+        },
+        executed_price=105.0,
+        shares=300,
+        buy_time="2026-04-21 09:03:00",
+        execution_id="EX-1",
+    )
+    record["protective_stop_unconfirmed_order_id"] = "STOP-PENDING"
+    record["protective_stop_status"] = "failed"
+
+    class _Broker:
+        def get_positions(self):
+            raise AssertionError("get_positions should not be called while a protective stop is pending confirmation")
+
+        def execute_stop_order(self, *args, **kwargs):
+            raise AssertionError("execute_stop_order should not be called while a protective stop is pending confirmation")
+
+    assert auto_trade._arm_daytrade_protective_stop(
+        _Broker(),
+        record,
+        trigger_price=99.0,
+        expected_shares=300,
+    ) is None
+    assert record["protective_stop_status"] == "failed"
+    assert record["protective_stop_confirmation_reason"] == "protective_stop_pending_confirmation"
+    assert record["protective_stop_unconfirmed_order_id"] == "STOP-PENDING"
+
+
 def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_ids_are_known():
     record = build_daytrade_position_record(
         {
@@ -421,15 +457,29 @@ def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_i
         shares=300,
         buy_time="2026-04-21 09:03:00",
         execution_id="EX-1",
-        execution_ids=("EX-1", "EX-2"),
     )
 
     class _Broker:
         def get_positions(self):
-            raise AssertionError("get_positions should not be called when multiple execution_ids have no close route")
+            return [
+                {
+                    "code": "1000",
+                    "ownership": "MANAGED_BY_BOT",
+                    "execution_id": "EX-1",
+                    "hold_id": "HOLD-1",
+                    "exchange": 1,
+                    "margin_trade_type": 3,
+                    "shares": 300,
+                    "hold_qty": 300,
+                    "available_qty": 300,
+                }
+            ]
 
         def execute_stop_order(self, *args, **kwargs):
-            raise AssertionError("execute_stop_order should not be called when fallback is disallowed")
+            return SimpleNamespace(
+                broker_order_id="STOP-1",
+                status="accepted",
+            )
 
     assert auto_trade._arm_daytrade_protective_stop(
         _Broker(),
@@ -438,9 +488,9 @@ def test_arm_daytrade_protective_stop_refuses_fallback_when_multiple_execution_i
         expected_shares=300,
     ) is None
     assert record["protective_stop_status"] == "failed"
-    assert record["protective_stop_confirmation_reason"] == "multiple_execution_ids_without_close_route"
+    assert record["protective_stop_confirmation_reason"] == "stop_order_unconfirmed"
     assert record["protective_stop_order_id"] is None
-    assert record["protective_stop_unconfirmed_order_id"] is None
+    assert record["protective_stop_unconfirmed_order_id"] == "STOP-1"
 
 
 def test_cancel_linked_protective_stop_before_exit_uses_unconfirmed_stop_order_id():
@@ -602,7 +652,7 @@ def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_
 
         def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
             call_order.append(("execute_stop_order", code, shares, _side_from_action(action), trigger_price, hold_id, close_positions, exchange, margin_trade_type))
-            return SimpleNamespace(broker_order_id="STOP-2", status="accepted")
+            return SimpleNamespace(broker_order_id="STOP-2", status="accepted", confirmed=True)
 
         def log_trade(self, trade_record):
             call_order.append(("log_trade", trade_record["side"], trade_record["shares"]))
@@ -1257,8 +1307,14 @@ def test_perform_safe_shutdown_reports_reconciliation_failure_when_active_orders
         def get_active_orders(self):
             return None
 
+    def _fail_if_called_close_daytrade_positions(*args, **kwargs):
+        raise AssertionError("close_daytrade_positions should not run when active orders snapshot is missing")
+
     broker = _Broker()
-    with patch("auto_trade.send_discord_notify", return_value=None):
+    with patch("auto_trade.close_daytrade_positions", side_effect=_fail_if_called_close_daytrade_positions), patch(
+        "auto_trade.send_discord_notify",
+        return_value=None,
+    ):
         result = auto_trade.perform_safe_shutdown(
             broker=broker,
             portfolio=[],
@@ -1270,6 +1326,60 @@ def test_perform_safe_shutdown_reports_reconciliation_failure_when_active_orders
 
     assert result.success is False
     assert "active_orders_snapshot_unavailable" in result.errors
+
+
+def test_perform_safe_shutdown_blocks_flatten_when_armed_protective_stop_is_missing_from_broker_snapshot():
+    class _Broker:
+        def __init__(self):
+            self.cancelled = []
+            self.saved_account = None
+            self.saved_portfolio = None
+
+        def get_active_orders(self):
+            return {
+                "orders": [],
+                "has_unknown": False,
+                "unresolved_order_ids": [],
+            }
+
+        def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return True
+
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+    def _fail_if_called_close_daytrade_positions(*args, **kwargs):
+        raise AssertionError("close_daytrade_positions should not run when the protective stop is missing")
+
+    broker = _Broker()
+    portfolio = [
+        {
+            "code": "1000",
+            "ownership": "MANAGED_BY_BOT",
+            "protective_stop_status": "armed",
+            "protective_stop_order_id": "STOP-1",
+        },
+    ]
+
+    with patch("auto_trade.close_daytrade_positions", side_effect=_fail_if_called_close_daytrade_positions), patch(
+        "auto_trade.send_discord_notify",
+        return_value=None,
+    ):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=portfolio,
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert result.success is False
+    assert any(entry.startswith("protective_stop_missing:1") for entry in result.errors)
 
 
 def test_perform_safe_shutdown_cancels_only_managed_orders():
@@ -1398,6 +1508,55 @@ def test_perform_safe_shutdown_blocks_flatten_when_managed_cancel_is_unconfirmed
     assert any(entry.startswith("managed_cancel_unconfirmed:STOP-M") for entry in result.errors)
 
 
+def test_perform_safe_shutdown_blocks_flatten_when_protective_stop_is_pending():
+    class _Broker:
+        def __init__(self):
+            self.cancelled = []
+            self.saved_account = None
+            self.saved_portfolio = None
+
+        def get_active_orders(self):
+            return {"orders": [], "has_unknown": False, "unresolved_order_ids": []}
+
+        def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return True
+
+        def save_account(self, account):
+            self.saved_account = account
+
+        def save_portfolio(self, portfolio):
+            self.saved_portfolio = portfolio
+
+    def _fail_if_called_close_daytrade_positions(*args, **kwargs):
+        raise AssertionError("close_daytrade_positions should not run while a protective stop is pending")
+
+    broker = _Broker()
+    portfolio = [
+        {
+            "code": "1000",
+            "ownership": "MANAGED_BY_BOT",
+            "protective_stop_unconfirmed_order_id": "STOP-PENDING",
+        },
+    ]
+
+    with patch("auto_trade.close_daytrade_positions", side_effect=_fail_if_called_close_daytrade_positions), patch(
+        "auto_trade.send_discord_notify",
+        return_value=None,
+    ):
+        result = auto_trade.perform_safe_shutdown(
+            broker=broker,
+            portfolio=portfolio,
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="unit-test",
+        )
+
+    assert result.success is False
+    assert any(entry.startswith("protective_stop_pending:1") for entry in result.errors)
+
+
 def test_main_attempts_safe_shutdown_when_main_exec_raises():
     class _Broker:
         pass
@@ -1457,6 +1616,51 @@ def test_main_attempts_safe_shutdown_when_main_exec_raises():
         auto_trade.ACTIVE_RUNTIME_STATE.update(original_state)
 
 
+def test_perform_non_trading_day_shutdown_uses_safe_shutdown_before_terminating():
+    class _Broker:
+        pass
+
+    fake_broker = _Broker()
+    fake_result = auto_trade.ShutdownResult(
+        success=True,
+        managed_remaining_orders=(),
+        managed_remaining_positions=(),
+        unmanaged_orders=(),
+        unmanaged_positions=(),
+        ambiguous_items=(),
+        unknown_items=(),
+        errors=(),
+        updated_portfolio=[],
+        updated_account={},
+    )
+    performed = []
+    terminated = []
+
+    def _fake_safe_shutdown(**kwargs):
+        performed.append(kwargs)
+        return fake_result
+
+    def _fake_terminate():
+        terminated.append(True)
+
+    with patch("auto_trade.perform_safe_shutdown", side_effect=_fake_safe_shutdown), \
+        patch("auto_trade.send_discord_notify", return_value=None), \
+        patch("core.kabu_launcher.terminate_kabu_station", side_effect=_fake_terminate):
+        result = auto_trade.perform_non_trading_day_shutdown(
+            broker=fake_broker,
+            portfolio=[{"code": "1000", "ownership": "MANAGED_BY_BOT"}],
+            account={"cash": 1_000_000.0},
+            is_sim=False,
+            realtime_buffers={},
+            reason="weekend",
+        )
+
+    assert result.success is True
+    assert performed and performed[0]["broker"] is fake_broker
+    assert performed[0]["reason"] == "weekend"
+    assert terminated
+
+
 def test_is_board_quote_snapshot_fresh_accepts_recent_same_day_quotes():
     boards = {
         "1000": {
@@ -1485,7 +1689,19 @@ def test_is_board_quote_snapshot_fresh_rejects_stale_or_cross_day_quotes():
     assert not auto_trade._is_board_quote_snapshot_fresh(cross_day_boards, reference_time, max_age_seconds=600)
 
 
-def test_is_board_quote_snapshot_fresh_falls_back_to_received_at_when_quote_timestamps_are_missing():
+def test_portfolio_has_unresolved_execution_state_detects_status_only_partial_fill():
+    portfolio = [
+        {
+            "code": "1000",
+            "entry_order_execution_status": "partial_unresolved",
+        }
+    ]
+
+    assert auto_trade._portfolio_has_unresolved_execution_state(portfolio)
+    assert auto_trade._position_has_unresolved_execution_state(portfolio[0])
+
+
+def test_is_board_quote_snapshot_fresh_rejects_received_at_only_quotes():
     boards = {
         "1000": {
             "received_at": pd.Timestamp("2026-04-21 09:14:00", tz="Asia/Tokyo"),
@@ -1493,7 +1709,7 @@ def test_is_board_quote_snapshot_fresh_falls_back_to_received_at_when_quote_time
     }
     reference_time = pd.Timestamp("2026-04-21 09:15:00", tz="Asia/Tokyo")
 
-    assert auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
+    assert not auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
 
 
 def test_acquire_lock_writes_metadata_and_release_removes_owned_lock():
