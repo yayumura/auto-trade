@@ -767,7 +767,11 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["json"]["FrontOrderType"], 30)
         self.assertEqual(captured["json"]["CashMargin"], 3)
         self.assertEqual(captured["json"]["ReverseLimitOrder"]["UnderOver"], 1)
-        self.assertGreaterEqual(len(journal_events), 2)
+        self.assertEqual([event["event"] for event in journal_events[:3]], ["PLANNED", "ROUTE_RESOLVED", "ACCEPTED"])
+        self.assertEqual(journal_events[1]["close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        self.assertEqual(journal_events[1]["hold_ids"], ["HOLD-1"])
+        self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        self.assertEqual(journal_events[2]["route_resolution_stage"], "resolved")
 
     def test_execute_market_order_writes_order_journal(self):
         journal_events = []
@@ -923,6 +927,7 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_execute_stop_order_accepts_multiple_close_positions_for_multi_hold_protective_stop(self):
         captured = {}
+        journal_events = []
         stop_details = [
             {
                 "OrderId": "STOP-MULTI",
@@ -961,15 +966,16 @@ class TestKabucomBroker(unittest.TestCase):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = fake_api_request
 
-        result = broker.execute_stop_order(
-            "1234",
-            100,
-            action=StockOrderAction.MARGIN_CLOSE_LONG,
-            trigger_price=3001.2,
-            close_positions=[{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}],
-            exchange=1,
-            margin_trade_type=3,
-        )
+        with patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+            result = broker.execute_stop_order(
+                "1234",
+                100,
+                action=StockOrderAction.MARGIN_CLOSE_LONG,
+                trigger_price=3001.2,
+                close_positions=[{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}],
+                exchange=1,
+                margin_trade_type=3,
+            )
 
         self.assertEqual(result.broker_order_id, "STOP-MULTI")
         self.assertEqual(result.status, SubmissionStatus.ACCEPTED)
@@ -981,6 +987,11 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["json"]["Exchange"], 1)
         self.assertEqual(captured["json"]["MarginTradeType"], 3)
         self.assertEqual(captured["json"]["ClosePositions"], [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}])
+        self.assertEqual([event["event"] for event in journal_events[:3]], ["PLANNED", "ROUTE_RESOLVED", "ACCEPTED"])
+        self.assertEqual(journal_events[1]["close_positions"], [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}])
+        self.assertEqual(journal_events[1]["hold_ids"], ["HOLD-1", "HOLD-2"])
+        self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 60}, {"HoldID": "HOLD-2", "Qty": 40}])
+        self.assertEqual(journal_events[2]["route_resolution_stage"], "resolved")
 
     def test_execute_stop_order_rejects_empty_close_positions_list_even_when_hold_id_is_available(self):
         broker = _make_broker(_FakeSession([]))
@@ -1053,14 +1064,20 @@ class TestKabucomBroker(unittest.TestCase):
     def test_execute_stop_order_aborts_without_hold_id_on_sell_side(self):
         broker = _make_broker(_FakeSession([]))
         broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {"Result": 0, "OrderId": "STOP-FAIL"})
+        journal_events = []
 
-        result = broker.execute_stop_order("1234", 100, action=StockOrderAction.MARGIN_CLOSE_LONG, trigger_price=3001.2)
+        with patch("core.kabucom_broker.append_order_journal", side_effect=lambda event, path=None: journal_events.append(event)):
+            result = broker.execute_stop_order("1234", 100, action=StockOrderAction.MARGIN_CLOSE_LONG, trigger_price=3001.2)
 
         self.assertEqual(result.status, SubmissionStatus.REJECTED)
         self.assertFalse(result.request_sent)
         self.assertEqual(result.rejection_reason, "missing_close_route")
         self.assertIsNone(result.broker_order_id)
         self.assertEqual(result.action, StockOrderAction.MARGIN_CLOSE_LONG)
+        self.assertEqual(journal_events[0]["event"], "REJECTED")
+        self.assertEqual(journal_events[0]["route_resolution_stage"], "pre_resolution")
+        self.assertEqual(journal_events[0]["route_resolution_reason"], "missing_close_route")
+        self.assertIsNone(journal_events[0]["close_positions"])
 
     def test_execute_chase_order_stops_after_unknown_submission_without_forcing_second_order(self):
         call_args = []

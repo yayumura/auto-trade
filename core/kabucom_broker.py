@@ -2441,6 +2441,31 @@ class KabucomBroker(BaseBroker):
                 http_status=None,
                 rejection_reason="missing_close_route",
             )
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "stop",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "trigger_price": float(normalized_trigger_price),
+                "hold_id": hold_id,
+                "close_positions": None,
+                "expected_close_positions": None,
+                "hold_ids": [],
+                "trigger_price_normalized": float(normalized_trigger_price),
+                "order_action": getattr(action, "value", str(action)),
+                "cash_margin": int(cash_margin),
+                "deliv_type": 0 if cash_margin == 2 else 2,
+                "route_resolution_stage": "pre_resolution",
+                "route_resolution_reason": "missing_close_route",
+                "http_status": None,
+                "result": None,
+                "rejection_reason": "missing_close_route",
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "is_production": bool(self.is_production),
+            })
             return self._wrap_submission_result(
                 submission,
                 side=side,
@@ -2599,6 +2624,41 @@ class KabucomBroker(BaseBroker):
             }
         }
 
+        def _build_stop_route_journal_fields(*, route_resolution_stage: str | None = None, route_resolution_reason: str | None = None) -> dict[str, object]:
+            resolved_close_positions = data.get("ClosePositions")
+            normalized_close_positions = None
+            hold_ids: list[str] = []
+            if route_resolution_stage is None:
+                route_resolution_stage = "resolved" if context.requires_close_positions else "not_required"
+            if isinstance(resolved_close_positions, list):
+                normalized_close_positions = []
+                for item in resolved_close_positions:
+                    if not isinstance(item, dict):
+                        normalized_close_positions = None
+                        hold_ids = []
+                        break
+                    copied_item = dict(item)
+                    normalized_close_positions.append(copied_item)
+                    hold_id_text = str(copied_item.get("HoldID") or copied_item.get("hold_id") or "").strip()
+                    if hold_id_text:
+                        hold_ids.append(hold_id_text)
+            if route_resolution_stage == "pre_resolution":
+                normalized_close_positions = None
+                hold_ids = []
+            return {
+                "close_positions": normalized_close_positions,
+                "expected_close_positions": normalized_close_positions,
+                "hold_ids": hold_ids,
+                "trigger_price_normalized": float(normalized_trigger_price),
+                "order_action": getattr(action, "value", str(action)),
+                "cash_margin": int(cash_margin),
+                "deliv_type": int(data["DelivType"]),
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                "route_resolution_stage": route_resolution_stage,
+                "route_resolution_reason": route_resolution_reason,
+            }
+
         if context.requires_close_positions:
             if close_positions is not None:
                 if not isinstance(close_positions, list) or not close_positions:
@@ -2614,6 +2674,23 @@ class KabucomBroker(BaseBroker):
                         http_status=None,
                         rejection_reason="close_positions_invalid",
                     )
+                    append_order_journal({
+                        "event": "REJECTED",
+                        "intent_id": intent_id,
+                        "kind": "stop",
+                        "symbol": str(code),
+                        "side": side,
+                        "qty": int(shares),
+                        "trigger_price": float(normalized_trigger_price),
+                        "hold_id": hold_id,
+                        **_build_stop_route_journal_fields(route_resolution_stage="pre_resolution", route_resolution_reason="close_positions_invalid"),
+                        "http_status": None,
+                        "result": None,
+                        "rejection_reason": "close_positions_invalid",
+                        "exchange": None if exchange is None else int(exchange),
+                        "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                        "is_production": bool(self.is_production),
+                    })
                     return self._wrap_submission_result(
                         submission,
                         side=side,
@@ -2637,6 +2714,23 @@ class KabucomBroker(BaseBroker):
                     http_status=None,
                     rejection_reason="hold_id_missing",
                 )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "hold_id": hold_id,
+                    **_build_stop_route_journal_fields(route_resolution_stage="pre_resolution", route_resolution_reason="hold_id_missing"),
+                    "http_status": None,
+                    "result": None,
+                    "rejection_reason": "hold_id_missing",
+                    "exchange": None if exchange is None else int(exchange),
+                    "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
+                    "is_production": bool(self.is_production),
+                })
                 return self._wrap_submission_result(
                     submission,
                     side=side,
@@ -2644,6 +2738,19 @@ class KabucomBroker(BaseBroker):
                     request_sent=False,
                     trigger_price=float(normalized_trigger_price),
                 )
+
+        append_order_journal({
+            "event": "ROUTE_RESOLVED",
+            "intent_id": intent_id,
+            "kind": "stop",
+            "symbol": str(code),
+            "side": side,
+            "qty": int(shares),
+            "trigger_price": float(normalized_trigger_price),
+            "hold_id": hold_id,
+            **_build_stop_route_journal_fields(),
+            "is_production": bool(self.is_production),
+        })
 
         payload_validation = validate_stop_order_request_payload(data)
         if not payload_validation.valid:
@@ -2671,6 +2778,7 @@ class KabucomBroker(BaseBroker):
                 "http_status": None,
                 "result": None,
                 "rejection_reason": payload_validation.reason,
+                **_build_stop_route_journal_fields(),
                 "exchange": None if exchange is None else int(exchange),
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
@@ -2706,6 +2814,7 @@ class KabucomBroker(BaseBroker):
                 "order_id": order_id,
                 "http_status": submission.http_status,
                 "result": submission.result_code,
+                **_build_stop_route_journal_fields(),
                 "exchange": None if exchange is None else int(exchange),
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
@@ -2749,6 +2858,7 @@ class KabucomBroker(BaseBroker):
                 "result": submission.result_code,
                 "confirmation_reason": confirmation_reason,
                 "confirmation_details": confirmation_details,
+                **_build_stop_route_journal_fields(),
                 "exchange": None if exchange is None else int(exchange),
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
@@ -2779,6 +2889,7 @@ class KabucomBroker(BaseBroker):
                 "http_status": submission.http_status,
                 "rejection_reason": submission.rejection_reason,
                 "result": submission.result_code,
+                **_build_stop_route_journal_fields(),
                 "exchange": None if exchange is None else int(exchange),
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
@@ -2803,6 +2914,7 @@ class KabucomBroker(BaseBroker):
             "http_status": submission.http_status,
             "response_text": submission.response_text,
             "rejection_reason": submission.rejection_reason,
+            **_build_stop_route_journal_fields(),
             "exchange": None if exchange is None else int(exchange),
             "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
             "is_production": bool(self.is_production),

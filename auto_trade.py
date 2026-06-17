@@ -383,6 +383,7 @@ from core.logic import (
     resolve_daytrade_live_exit_decision,
     calculate_position_stops,
     cancel_linked_protective_stop_before_exit,
+    resolve_protective_stop_order_id,
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
@@ -542,7 +543,7 @@ def _apply_live_realized_pnl(account, position, fill_price, filled_shares):
 def _collect_protective_stop_order_ids(portfolio):
     stop_order_ids = set()
     for position in portfolio or []:
-        stop_order_id = str(position.get("protective_stop_order_id") or "").strip()
+        stop_order_id = resolve_protective_stop_order_id(position)
         if stop_order_id:
             stop_order_ids.add(stop_order_id)
     return stop_order_ids
@@ -683,6 +684,13 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         if len(hold_ids) == 1:
             hold_id = hold_ids[0]
     else:
+        if len(managed_execution_ids) != 1:
+            print(f"⚠️ {code} の保護逆指値は複数 execution_id のため close route を解決できず、fallback を中止しました。execution_ids={normalized_execution_ids}")
+            position["protective_stop_status"] = "failed"
+            position["protective_stop_confirmation_reason"] = "multiple_execution_ids_without_close_route"
+            position["protective_stop_cancelled_order_id"] = None
+            position["protective_stop_unconfirmed_order_id"] = None
+            return None
         live_position = _find_live_managed_position_for_entry(
             broker=broker,
             code=code,
@@ -701,6 +709,16 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
 
         if live_position.get("hold_qty") is None or live_position.get("available_qty") is None:
             print(f"⚠️ {code} の保護逆指値に必要な建玉数量が不明です。")
+            return None
+
+        live_hold_qty = int(live_position.get("hold_qty") or 0)
+        live_available_qty = int(live_position.get("available_qty") or 0)
+        if live_hold_qty != shares or live_available_qty != shares:
+            print(f"⚠️ {code} の保護逆指値は建玉数量が一致しないため fallback を中止しました。hold_qty={live_hold_qty}, available_qty={live_available_qty}, requested_shares={shares}")
+            position["protective_stop_status"] = "failed"
+            position["protective_stop_confirmation_reason"] = "protective_stop_fallback_qty_mismatch"
+            position["protective_stop_cancelled_order_id"] = None
+            position["protective_stop_unconfirmed_order_id"] = None
             return None
 
         exchange = live_position.get("exchange")
@@ -733,6 +751,9 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         if margin_trade_type is not None:
             position["margin_trade_type"] = margin_trade_type
         position["protective_stop_order_id"] = stop_order_id
+        position["protective_stop_cancelled_order_id"] = None
+        position["protective_stop_unconfirmed_order_id"] = None
+        position["protective_stop_confirmation_reason"] = None
         position["protective_stop_trigger_price"] = round(trigger_price, 1)
         position["protective_stop_status"] = "armed"
         return stop_order_id
@@ -742,6 +763,7 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         print(f"⚠️ {code} の保護逆指値は受理されましたが、orders API で確認できなかったため armed しませんでした: {confirmation_reason}")
         position["protective_stop_status"] = "failed"
         position["protective_stop_confirmation_reason"] = confirmation_reason
+        position["protective_stop_cancelled_order_id"] = None
         position["protective_stop_unconfirmed_order_id"] = stop_order_id
         return None
 
@@ -1106,7 +1128,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             continue
 
         shares = int(position["shares"])
-        stop_order_id = str(position.get("protective_stop_order_id") or "").strip()
+        stop_order_id = resolve_protective_stop_order_id(position)
         if not is_sim and stop_order_id:
             stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
                 broker=broker,
@@ -1230,6 +1252,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
                 remaining_position["exit_order_remaining_qty"] = remaining_shares
             elif not is_sim and stop_order_id:
                 remaining_position["protective_stop_order_id"] = None
+                remaining_position["protective_stop_unconfirmed_order_id"] = None
                 remaining_position["protective_stop_trigger_price"] = None
                 remaining_position["protective_stop_status"] = None
                 rearmed_stop_order_id = _arm_daytrade_protective_stop(
