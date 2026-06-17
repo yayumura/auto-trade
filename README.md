@@ -159,7 +159,7 @@ auto-trade/
 - `auto_trade.py`
   本番の自動売買実行エントリです。
   `KABUCOM_LIVE` では新規エントリーはデフォルト無効で、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` の一致がそろうまで監視と決済のみを行います。
-  さらに、LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance と CI green attestation (`KABUCOM_LIVE_CI_GREEN=true` など) を満たす総合 gate でも判定し、起動時ログと Discord 通知で状態を出します。
+  さらに、LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance と、CI artifact 由来の structured attestation (`contracts/kabucom_live_write_attestation.json`) を満たす総合 gate でも判定し、起動時ログと Discord 通知で状態を出します。`KABUCOM_LIVE_CI_GREEN=true` だけでは開きません。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
@@ -642,7 +642,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `resolve_stock_order_action()` が long-only の fail-closed になり、short action を拒否すること
   - `core/kabucom_broker.py` の POST 再送抑止
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
-  - LIVE financial write gate が `KABUCOM_TEST` fixture provenance と CI attestation を要求すること
+  - LIVE financial write gate が `KABUCOM_TEST` fixture provenance と structured CI attestation artifact を要求すること
   - `OrdersSuccess` 系の注文状態パーサーと `State=1..10` の解釈
   - `SeqNum` 順の detail 並べ替え、`RecType=8` のみを fill / ExecutionID に使うこと、`State=4` detail を reject 扱いにすること
   - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject
@@ -699,6 +699,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `KABUCOM_TEST` 用の sanitized contract fixture が validators を通ること
   - `fixture_kind` と `password_policy` が TEST 用 fixture に明記されていること
   - test fixture の provenance metadata が明記され、`captured_from_kabucom_test` が欠けた fixture を fail closed にすること
+  - structured CI attestation artifact が fixture hash / approval manifest hash / commit sha / repo / test command / run URL の整合を要求すること
   - 現在の test fixture は手動で sanitization したもので、実 KABUCOM_TEST 取得結果ではないことを明示していること
 - `tests/test_portfolio_state.py`
   - schema versioned portfolio JSON の write / read
@@ -733,7 +734,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 python -m pytest tests -q
 ```
 
-GitHub Actions でも同じく `python -m pytest tests -q` を Windows runner で実行します。
+GitHub Actions でも同じく `python -m pytest tests -q` を Windows runner で実行し、fixture が actual `KABUCOM_TEST` capture になった段階で `contracts/kabucom_live_write_attestation.json` を生成して artifact としてアップロードします。現状の手動 fixture では build step はスキップされます。
 
 ファイル単位で実行:
 

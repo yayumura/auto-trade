@@ -545,7 +545,7 @@ class KabucomBroker(BaseBroker):
             if DEBUG_MODE:
                 return False, "debug_mode_enabled"
             if not self.order_password:
-                return True, "order_password_missing"
+                return False, "order_password_missing"
             gate_status = get_kabucom_live_financial_write_gate_status(
                 base_gate_status=get_live_order_gate_status(),
             )
@@ -562,6 +562,12 @@ class KabucomBroker(BaseBroker):
 
         return False, "unsupported_operation_class"
 
+    @staticmethod
+    def _normalize_submission_rejection_reason(reason: str) -> str:
+        if reason == "order_password_missing":
+            return "missing_order_password"
+        return reason
+
     def _infer_request_sent(self, submission: SubmissionResult) -> bool:
         preflight_reasons = {
             "no_token",
@@ -570,6 +576,7 @@ class KabucomBroker(BaseBroker):
             "missing_buy_exchange",
             "missing_account_type",
             "missing_order_password",
+            "order_password_missing",
             "live_endpoint_write_blocked_by_trade_mode",
             "debug_mode_enabled",
             "test_endpoint_requires_kabucom_test_mode",
@@ -1290,6 +1297,7 @@ class KabucomBroker(BaseBroker):
         )
         allowed, reason = self._authorize_operation(operation_class)
         if not allowed:
+            normalized_reason = self._normalize_submission_rejection_reason(reason)
             print(f"🛑 {code} の注文をコード側で停止しました。reason={reason}")
             submission = SubmissionResult(
                 status=SubmissionStatus.REJECTED,
@@ -1300,7 +1308,7 @@ class KabucomBroker(BaseBroker):
                 qty=int(shares),
                 price=float(price) if price is not None else None,
                 http_status=None,
-                rejection_reason=reason,
+                rejection_reason=normalized_reason,
             )
             append_order_journal({
                 "event": "REJECTED",
@@ -1312,7 +1320,7 @@ class KabucomBroker(BaseBroker):
                 "price": float(price) if price > 0 else 0.0,
                 "http_status": None,
                 "result": None,
-                "rejection_reason": reason,
+                "rejection_reason": normalized_reason,
                 "is_production": bool(self.is_production),
             })
             return submission
@@ -2752,6 +2760,7 @@ class KabucomBroker(BaseBroker):
         operation_class = self._resolve_operation_class_for_action(action)
         allowed, reason = self._authorize_operation(operation_class)
         if not allowed:
+            normalized_reason = self._normalize_submission_rejection_reason(reason)
             print(f"🛑 逆指値注文をコード側で停止しました。reason={reason}")
             submission = SubmissionResult(
                 status=SubmissionStatus.REJECTED,
@@ -2762,7 +2771,7 @@ class KabucomBroker(BaseBroker):
                 qty=int(shares),
                 price=float(normalized_trigger_price),
                 http_status=None,
-                rejection_reason=reason,
+                rejection_reason=normalized_reason,
             )
             append_order_journal({
                 "event": "REJECTED",
@@ -2775,7 +2784,7 @@ class KabucomBroker(BaseBroker):
                 "hold_id": hold_id,
                 "http_status": None,
                 "result": None,
-                "rejection_reason": reason,
+                "rejection_reason": normalized_reason,
                 "exchange": None if exchange is None else int(exchange),
                 "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),

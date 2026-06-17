@@ -27,3 +27,13 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests -q
+
+      - name: Build live write attestation
+        run: python scripts/build_live_write_attestation.py
+
+      - name: Upload live write attestation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-write-attestation
+          path: contracts/kabucom_live_write_attestation.json
+          if-no-files-found: ignore
