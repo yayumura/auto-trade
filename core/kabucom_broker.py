@@ -544,6 +544,8 @@ class KabucomBroker(BaseBroker):
         if operation_class == BrokerOperationClass.NEW_EXPOSURE:
             if DEBUG_MODE:
                 return False, "debug_mode_enabled"
+            if not self.order_password:
+                return True, "order_password_missing"
             gate_status = get_kabucom_live_financial_write_gate_status(
                 base_gate_status=get_live_order_gate_status(),
             )
@@ -1234,78 +1236,55 @@ class KabucomBroker(BaseBroker):
                 "is_production": bool(self.is_production),
             })
             return submission
-        if self.environment == BrokerEnvironment.LIVE and TRADE_MODE != "KABUCOM_LIVE":
-            submission = SubmissionResult(
-                status=SubmissionStatus.REJECTED,
-                intent_id=intent_id,
-                broker_order_id=None,
-                symbol=str(code),
-                side=side,
-                qty=int(shares),
-                price=float(price) if price is not None else None,
-                http_status=None,
-                rejection_reason="live_endpoint_write_blocked_by_trade_mode",
-            )
-            append_order_journal({
-                "event": "REJECTED",
-                "intent_id": intent_id,
-                "kind": "market",
-                "symbol": str(code),
-                "side": side,
-                "qty": int(shares),
-                "price": float(price) if price is not None and price > 0 else 0.0,
-                "rejection_reason": submission.rejection_reason,
-                "is_production": bool(self.is_production),
-            })
-            return submission
-        if self.environment == BrokerEnvironment.TEST and TRADE_MODE != "KABUCOM_TEST":
-            submission = SubmissionResult(
-                status=SubmissionStatus.REJECTED,
-                intent_id=intent_id,
-                broker_order_id=None,
-                symbol=str(code),
-                side=side,
-                qty=int(shares),
-                price=float(price) if price is not None else None,
-                http_status=None,
-                rejection_reason="test_endpoint_requires_kabucom_test_mode",
-            )
-            append_order_journal({
-                "event": "REJECTED",
-                "intent_id": intent_id,
-                "kind": "market",
-                "symbol": str(code),
-                "side": side,
-                "qty": int(shares),
-                "price": float(price) if price is not None and price > 0 else 0.0,
-                "rejection_reason": submission.rejection_reason,
-                "is_production": bool(self.is_production),
-            })
-            return submission
-        if not self.order_password:
-            submission = SubmissionResult(
-                status=SubmissionStatus.REJECTED,
-                intent_id=intent_id,
-                broker_order_id=None,
-                symbol=str(code),
-                side=side,
-                qty=int(shares),
-                price=float(price) if price is not None else None,
-                http_status=None,
-                rejection_reason="missing_order_password",
-            )
-            append_order_journal({
-                "event": "REJECTED",
-                "intent_id": intent_id,
-                "kind": "market",
-                "symbol": str(code),
-                "side": side,
-                "qty": int(shares),
-                "price": float(price) if price is not None and price > 0 else 0.0,
-                "rejection_reason": submission.rejection_reason,
-                "is_production": bool(self.is_production),
-            })
-            return submission
+        if hasattr(self, "endpoint_config"):
+            if self.environment == BrokerEnvironment.LIVE and TRADE_MODE != "KABUCOM_LIVE":
+                submission = SubmissionResult(
+                    status=SubmissionStatus.REJECTED,
+                    intent_id=intent_id,
+                    broker_order_id=None,
+                    symbol=str(code),
+                    side=side,
+                    qty=int(shares),
+                    price=float(price) if price is not None else None,
+                    http_status=None,
+                    rejection_reason="live_endpoint_write_blocked_by_trade_mode",
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "price": float(price) if price is not None and price > 0 else 0.0,
+                    "rejection_reason": submission.rejection_reason,
+                    "is_production": bool(self.is_production),
+                })
+                return submission
+            if self.environment == BrokerEnvironment.TEST and TRADE_MODE != "KABUCOM_TEST":
+                submission = SubmissionResult(
+                    status=SubmissionStatus.REJECTED,
+                    intent_id=intent_id,
+                    broker_order_id=None,
+                    symbol=str(code),
+                    side=side,
+                    qty=int(shares),
+                    price=float(price) if price is not None else None,
+                    http_status=None,
+                    rejection_reason="test_endpoint_requires_kabucom_test_mode",
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "price": float(price) if price is not None and price > 0 else 0.0,
+                    "rejection_reason": submission.rejection_reason,
+                    "is_production": bool(self.is_production),
+                })
+                return submission
         operation_class = operation_class or (
             BrokerOperationClass.NEW_EXPOSURE if side == "2" else BrokerOperationClass.REDUCE_EXPOSURE
         )
@@ -1334,6 +1313,30 @@ class KabucomBroker(BaseBroker):
                 "http_status": None,
                 "result": None,
                 "rejection_reason": reason,
+                "is_production": bool(self.is_production),
+            })
+            return submission
+        if not self.order_password:
+            submission = SubmissionResult(
+                status=SubmissionStatus.REJECTED,
+                intent_id=intent_id,
+                broker_order_id=None,
+                symbol=str(code),
+                side=side,
+                qty=int(shares),
+                price=float(price) if price is not None else None,
+                http_status=None,
+                rejection_reason="missing_order_password",
+            )
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": intent_id,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": int(shares),
+                "price": float(price) if price is not None and price > 0 else 0.0,
+                "rejection_reason": submission.rejection_reason,
                 "is_production": bool(self.is_production),
             })
             return submission
@@ -1650,22 +1653,6 @@ class KabucomBroker(BaseBroker):
                 request_sent=False,
                 rejection_reason="no_token",
             )
-        if not self.order_password:
-            append_order_journal({
-                "event": "REJECTED",
-                "order_id": order_id,
-                "rejection_reason": "missing_order_password",
-                "is_production": bool(self.is_production),
-            })
-            return CancelResult(
-                status=CancelStatus.REJECTED,
-                order_id=order_id,
-                parsed_order=None,
-                cumulative_qty=0,
-                remaining_qty=0,
-                request_sent=False,
-                rejection_reason="missing_order_password",
-            )
         allowed, reason = self._authorize_operation(BrokerOperationClass.CANCEL_MANAGED_ORDER)
         if not allowed:
             print(f"🛑 cancelorder をコード側で停止しました。reason={reason}")
@@ -1683,6 +1670,22 @@ class KabucomBroker(BaseBroker):
                 remaining_qty=0,
                 request_sent=False,
                 rejection_reason=reason,
+            )
+        if not self.order_password:
+            append_order_journal({
+                "event": "REJECTED",
+                "order_id": order_id,
+                "rejection_reason": "missing_order_password",
+                "is_production": bool(self.is_production),
+            })
+            return CancelResult(
+                status=CancelStatus.REJECTED,
+                order_id=order_id,
+                parsed_order=None,
+                cumulative_qty=0,
+                remaining_qty=0,
+                request_sent=False,
+                rejection_reason="missing_order_password",
             )
         cancel_data = {"OrderID": order_id, "Password": self.order_password}
         cancel_validation = validate_cancel_order_request_payload(cancel_data)
@@ -2685,7 +2688,71 @@ class KabucomBroker(BaseBroker):
                 request_sent=False,
                 trigger_price=float(normalized_trigger_price),
             )
-        if self.environment == BrokerEnvironment.LIVE and TRADE_MODE != "KABUCOM_LIVE":
+        if hasattr(self, "endpoint_config"):
+            if self.environment == BrokerEnvironment.LIVE and TRADE_MODE != "KABUCOM_LIVE":
+                submission = SubmissionResult(
+                    status=SubmissionStatus.REJECTED,
+                    intent_id=intent_id,
+                    broker_order_id=None,
+                    symbol=str(code),
+                    side=side,
+                    qty=int(shares),
+                    price=float(normalized_trigger_price),
+                    http_status=None,
+                    rejection_reason="live_endpoint_write_blocked_by_trade_mode",
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "rejection_reason": submission.rejection_reason,
+                    "is_production": bool(self.is_production),
+                })
+                return self._wrap_submission_result(
+                    submission,
+                    side=side,
+                    cash_margin=cash_margin,
+                    request_sent=False,
+                    trigger_price=float(normalized_trigger_price),
+                )
+            if self.environment == BrokerEnvironment.TEST and TRADE_MODE != "KABUCOM_TEST":
+                submission = SubmissionResult(
+                    status=SubmissionStatus.REJECTED,
+                    intent_id=intent_id,
+                    broker_order_id=None,
+                    symbol=str(code),
+                    side=side,
+                    qty=int(shares),
+                    price=float(normalized_trigger_price),
+                    http_status=None,
+                    rejection_reason="test_endpoint_requires_kabucom_test_mode",
+                )
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "rejection_reason": submission.rejection_reason,
+                    "is_production": bool(self.is_production),
+                })
+                return self._wrap_submission_result(
+                    submission,
+                    side=side,
+                    cash_margin=cash_margin,
+                    request_sent=False,
+                    trigger_price=float(normalized_trigger_price),
+                )
+        operation_class = self._resolve_operation_class_for_action(action)
+        allowed, reason = self._authorize_operation(operation_class)
+        if not allowed:
+            print(f"🛑 逆指値注文をコード側で停止しました。reason={reason}")
             submission = SubmissionResult(
                 status=SubmissionStatus.REJECTED,
                 intent_id=intent_id,
@@ -2695,7 +2762,7 @@ class KabucomBroker(BaseBroker):
                 qty=int(shares),
                 price=float(normalized_trigger_price),
                 http_status=None,
-                rejection_reason="live_endpoint_write_blocked_by_trade_mode",
+                rejection_reason=reason,
             )
             append_order_journal({
                 "event": "REJECTED",
@@ -2705,37 +2772,12 @@ class KabucomBroker(BaseBroker):
                 "side": side,
                 "qty": int(shares),
                 "trigger_price": float(normalized_trigger_price),
-                "rejection_reason": submission.rejection_reason,
-                "is_production": bool(self.is_production),
-            })
-            return self._wrap_submission_result(
-                submission,
-                side=side,
-                cash_margin=cash_margin,
-                request_sent=False,
-                trigger_price=float(normalized_trigger_price),
-            )
-        if self.environment == BrokerEnvironment.TEST and TRADE_MODE != "KABUCOM_TEST":
-            submission = SubmissionResult(
-                status=SubmissionStatus.REJECTED,
-                intent_id=intent_id,
-                broker_order_id=None,
-                symbol=str(code),
-                side=side,
-                qty=int(shares),
-                price=float(normalized_trigger_price),
-                http_status=None,
-                rejection_reason="test_endpoint_requires_kabucom_test_mode",
-            )
-            append_order_journal({
-                "event": "REJECTED",
-                "intent_id": intent_id,
-                "kind": "stop",
-                "symbol": str(code),
-                "side": side,
-                "qty": int(shares),
-                "trigger_price": float(normalized_trigger_price),
-                "rejection_reason": submission.rejection_reason,
+                "hold_id": hold_id,
+                "http_status": None,
+                "result": None,
+                "rejection_reason": reason,
+                "exchange": None if exchange is None else int(exchange),
+                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
             })
             return self._wrap_submission_result(
@@ -2766,44 +2808,6 @@ class KabucomBroker(BaseBroker):
                 "qty": int(shares),
                 "trigger_price": float(normalized_trigger_price),
                 "rejection_reason": submission.rejection_reason,
-                "is_production": bool(self.is_production),
-            })
-            return self._wrap_submission_result(
-                submission,
-                side=side,
-                cash_margin=cash_margin,
-                request_sent=False,
-                trigger_price=float(normalized_trigger_price),
-            )
-        operation_class = self._resolve_operation_class_for_action(action)
-        allowed, reason = self._authorize_operation(operation_class)
-        if not allowed:
-            print(f"🛑 逆指値注文をコード側で停止しました。reason={reason}")
-            submission = SubmissionResult(
-                status=SubmissionStatus.REJECTED,
-                intent_id=intent_id,
-                broker_order_id=None,
-                symbol=str(code),
-                side=side,
-                qty=int(shares),
-                price=float(normalized_trigger_price),
-                http_status=None,
-                rejection_reason=reason,
-            )
-            append_order_journal({
-                "event": "REJECTED",
-                "intent_id": intent_id,
-                "kind": "stop",
-                "symbol": str(code),
-                "side": side,
-                "qty": int(shares),
-                "trigger_price": float(normalized_trigger_price),
-                "hold_id": hold_id,
-                "http_status": None,
-                "result": None,
-                "rejection_reason": reason,
-                "exchange": None if exchange is None else int(exchange),
-                "margin_trade_type": None if margin_trade_type is None else int(margin_trade_type),
                 "is_production": bool(self.is_production),
             })
             return self._wrap_submission_result(

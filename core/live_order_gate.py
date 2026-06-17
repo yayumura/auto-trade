@@ -198,6 +198,18 @@ def get_kabucom_live_financial_write_gate_status(
             ci_green_attested=resolved_ci_green_attested,
         )
 
+    if str(getattr(base_gate_status, "reason", "")) == "non_live_mode":
+        return LiveFinancialWriteGateStatus(
+            allowed=True,
+            reason="non_live_mode",
+            base_gate_status=base_gate_status,
+            test_fixture_path=fixture_path_text,
+            test_fixture_present=False,
+            test_fixture_valid=False,
+            test_fixture_captured_from_kabucom_test=False,
+            ci_green_attested=resolved_ci_green_attested,
+        )
+
     fixture = load_contract_fixture(fixture_path)
     if fixture is None:
         return LiveFinancialWriteGateStatus(
