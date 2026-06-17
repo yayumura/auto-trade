@@ -231,10 +231,6 @@ def build_portfolio_state_payload(
 
 def load_portfolio_state(path: str) -> PortfolioState | None:
     absolute_path = ensure_absolute_path(path)
-    path_obj = Path(absolute_path)
-    if not path_obj.exists() or path_obj.stat().st_size == 0:
-        return None
-
     raw_json = safe_read_json(absolute_path, default=None)
     if isinstance(raw_json, dict) and "positions" in raw_json:
         positions = raw_json.get("positions") or []

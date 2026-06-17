@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -91,3 +92,26 @@ def test_load_portfolio_positions_migrates_legacy_csv_and_backs_it_up(tmp_path: 
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["schema_version"] == 2
     assert raw["positions"][0]["code"] == "1000"
+
+
+def test_load_portfolio_positions_uses_csv_fallback_even_when_json_file_is_empty(tmp_path: Path):
+    path = tmp_path / "portfolio.json"
+    path.write_text("", encoding="utf-8")
+
+    with patch(
+        "core.portfolio_state.safe_read_csv",
+        return_value=pd.DataFrame([
+            {
+                "code": "1000",
+                "execution_id": "EX-1",
+                "buy_time": "2026-04-21 09:00:00",
+                "highest_price": 105.0,
+            }
+        ]),
+    ):
+        positions = load_portfolio_positions(str(path))
+
+    assert positions[0]["code"] == "1000"
+    assert positions[0]["execution_id"] == "EX-1"
+    assert positions[0]["buy_time"] == "2026-04-21 09:00:00"
+    assert positions[0]["position_lot_key_source"] == "execution_id"

@@ -722,6 +722,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_portfolio_state.py`
   - `portfolio.json` を schema-versioned JSON で保存すること
   - legacy CSV を読み込んで migration できること
+  - 空の `portfolio.json` でも CSV フォールバックで読み込めること
   - migration 時に archive backup を残すこと
 
 全件実行:
