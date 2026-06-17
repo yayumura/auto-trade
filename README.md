@@ -290,6 +290,9 @@ pip install -r requirements.txt
 - AI フィルタ用 API キー
 - 通知先やデバッグ設定
 
+`jp_jquants_fetcher_v2.py` と `jp_jquants_margin_fetcher.py` を実行する場合は、J-Quants 用の `jquantsapi` 依存も必要です。  
+ただし、pytest の収集や通常のバックテストだけなら、この依存が未導入でも落ちないようにしています。
+
 ### Codex hooks での完了通知（任意）
 
 Codex でこのリポジトリを操作するときに、セッション終了時の通知を Discord へ飛ばす設定を入れています。
