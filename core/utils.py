@@ -1,16 +1,10 @@
-import jpholiday
 from datetime import datetime, time, timedelta
+
+from core.jpx_calendar import is_jpx_business_day
 
 def is_business_day(dt):
     """土日・祝日・年末年始(12/31-1/3)を判定"""
-    if dt.weekday() >= 5: # 土日
-        return False
-    if jpholiday.is_holiday(dt.date()): # 祝日
-        return False
-    # 年末年始休暇 (12/31 - 1/3)
-    if (dt.month == 12 and dt.day == 31) or (dt.month == 1 and dt.day in [1, 2, 3]):
-        return False
-    return True
+    return is_jpx_business_day(dt)
 
 def get_previous_business_day(dt):
     """前営業日を取得する"""

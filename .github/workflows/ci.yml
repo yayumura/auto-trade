@@ -12,6 +12,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
+      APPROVED_CONFIG_HASH: ${{ vars.APPROVED_CONFIG_HASH }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,5 +36,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: live-write-attestation
-          path: contracts/kabucom_live_write_attestation.json
+          path: |
+            contracts/kabucom_live_write_attestation.json
+            contracts/kabucom_live_write_attestation.json.sha256
           if-no-files-found: ignore

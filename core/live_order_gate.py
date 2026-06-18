@@ -21,9 +21,12 @@ from core.config import (
 )
 from core.live_approval_manifest import compute_live_approval_manifest_hash
 from core.live_approval_manifest import read_git_commit_sha
+from core.jpx_calendar import get_jpx_trading_day_status
 from core.live_write_attestation import (
+    compute_live_write_attestation_hash,
     LIVE_WRITE_ATTESTATION_TEST_COMMAND,
     load_live_write_attestation,
+    load_live_write_attestation_digest,
     read_git_remote_repository_full_name,
     validate_live_write_attestation,
 )
@@ -53,11 +56,17 @@ class LiveFinancialWriteGateStatus:
     test_fixture_present: bool
     test_fixture_valid: bool
     test_fixture_captured_from_kabucom_test: bool
-    ci_green_attested: bool
+    ci_artifact_attested: bool
+    operator_acknowledged: bool
     live_write_attestation_path: str
     live_write_attestation_present: bool
     live_write_attestation_valid: bool
     live_write_attestation_captured_from_kabucom_test: bool
+    live_write_attestation_digest_present: bool
+    live_write_attestation_digest_valid: bool
+    jpx_calendar_ready: bool
+    jpx_calendar_trading_day: bool
+    jpx_calendar_reason: str
 
 
 @dataclass(frozen=True)
@@ -116,11 +125,17 @@ def _build_live_financial_write_gate_status(
     test_fixture_present: bool,
     test_fixture_valid: bool,
     test_fixture_captured_from_kabucom_test: bool,
-    ci_green_attested: bool,
+    ci_artifact_attested: bool,
+    operator_acknowledged: bool,
     live_write_attestation_path: str,
     live_write_attestation_present: bool,
     live_write_attestation_valid: bool,
     live_write_attestation_captured_from_kabucom_test: bool,
+    live_write_attestation_digest_present: bool,
+    live_write_attestation_digest_valid: bool,
+    jpx_calendar_ready: bool,
+    jpx_calendar_trading_day: bool,
+    jpx_calendar_reason: str,
 ) -> LiveFinancialWriteGateStatus:
     return LiveFinancialWriteGateStatus(
         allowed=allowed,
@@ -131,11 +146,17 @@ def _build_live_financial_write_gate_status(
         test_fixture_present=test_fixture_present,
         test_fixture_valid=test_fixture_valid,
         test_fixture_captured_from_kabucom_test=test_fixture_captured_from_kabucom_test,
-        ci_green_attested=ci_green_attested,
+        ci_artifact_attested=ci_artifact_attested,
+        operator_acknowledged=operator_acknowledged,
         live_write_attestation_path=live_write_attestation_path,
         live_write_attestation_present=live_write_attestation_present,
         live_write_attestation_valid=live_write_attestation_valid,
         live_write_attestation_captured_from_kabucom_test=live_write_attestation_captured_from_kabucom_test,
+        live_write_attestation_digest_present=live_write_attestation_digest_present,
+        live_write_attestation_digest_valid=live_write_attestation_digest_valid,
+        jpx_calendar_ready=jpx_calendar_ready,
+        jpx_calendar_trading_day=jpx_calendar_trading_day,
+        jpx_calendar_reason=jpx_calendar_reason,
     )
 
 
@@ -224,21 +245,22 @@ def get_kabucom_live_financial_write_gate_status(
     base_gate_status: LiveOrderGateStatus | None = None,
     test_fixture_path: str | Path | None = None,
     live_write_attestation_path: str | Path | None = None,
-    ci_green_attested: bool | None = None,
+    operator_acknowledged: bool | None = None,
 ) -> LiveFinancialWriteGateStatus:
     """KABUCOM_LIVE の financial write を開けてよいかを総合判定する。
 
-    既存の live order gate に加えて、KABUCOM_TEST fixture の provenance と
-    CI green attestation も fail closed で要求する。
+    既存の live order gate に加えて、KABUCOM_TEST fixture の provenance、
+    CI artifact attestation bundle、digest sidecar、JPX calendar source、
+    operator acknowledgement も fail closed で要求する。
     """
     base_gate_status = get_live_order_gate_status() if base_gate_status is None else base_gate_status
     fixture_path = TEST_CONTRACT_FIXTURE_PATH if test_fixture_path is None else Path(test_fixture_path)
     fixture_path_text = str(fixture_path)
     attestation_path = LIVE_WRITE_ATTESTATION_PATH if live_write_attestation_path is None else Path(live_write_attestation_path)
     attestation_path_text = str(attestation_path)
-    if ci_green_attested is None:
-        ci_green_attested = _coerce_env_bool("KABUCOM_LIVE_CI_GREEN", "CI_GREEN") is True
-    resolved_ci_green_attested = bool(ci_green_attested)
+    if operator_acknowledged is None:
+        operator_acknowledged = _coerce_env_bool("KABUCOM_LIVE_OPERATOR_ACK", "LIVE_WRITE_OPERATOR_ACK") is True
+    resolved_operator_acknowledged = bool(operator_acknowledged)
 
     if not bool(getattr(base_gate_status, "allowed", False)):
         reason = str(getattr(base_gate_status, "reason", "live_order_gate_blocked"))
@@ -251,11 +273,17 @@ def get_kabucom_live_financial_write_gate_status(
             test_fixture_present=False,
             test_fixture_valid=False,
             test_fixture_captured_from_kabucom_test=False,
-            ci_green_attested=resolved_ci_green_attested,
+            ci_artifact_attested=False,
+            operator_acknowledged=resolved_operator_acknowledged,
             live_write_attestation_path=attestation_path_text,
             live_write_attestation_present=False,
             live_write_attestation_valid=False,
             live_write_attestation_captured_from_kabucom_test=False,
+            live_write_attestation_digest_present=False,
+            live_write_attestation_digest_valid=False,
+            jpx_calendar_ready=False,
+            jpx_calendar_trading_day=False,
+            jpx_calendar_reason="not_checked",
         )
 
     if str(getattr(base_gate_status, "reason", "")) == "non_live_mode":
@@ -268,11 +296,17 @@ def get_kabucom_live_financial_write_gate_status(
             test_fixture_present=False,
             test_fixture_valid=False,
             test_fixture_captured_from_kabucom_test=False,
-            ci_green_attested=resolved_ci_green_attested,
+            ci_artifact_attested=False,
+            operator_acknowledged=resolved_operator_acknowledged,
             live_write_attestation_path=attestation_path_text,
             live_write_attestation_present=False,
             live_write_attestation_valid=False,
             live_write_attestation_captured_from_kabucom_test=False,
+            live_write_attestation_digest_present=False,
+            live_write_attestation_digest_valid=False,
+            jpx_calendar_ready=False,
+            jpx_calendar_trading_day=False,
+            jpx_calendar_reason="not_checked",
         )
 
     blocking_reasons: list[str] = []
@@ -291,6 +325,14 @@ def get_kabucom_live_financial_write_gate_status(
     attestation_present = False
     attestation_valid = False
     attestation_captured_from_test = False
+    attestation_digest_present = False
+    attestation_digest_valid = False
+    ci_artifact_attested = False
+    trade_mode = str(TRADE_MODE).strip().upper()
+    jpx_calendar_status = get_jpx_trading_day_status(require_source=trade_mode == "KABUCOM_LIVE")
+    jpx_calendar_ready = bool(jpx_calendar_status.source_ready)
+    jpx_calendar_trading_day = bool(jpx_calendar_status.trading_day)
+    jpx_calendar_reason = str(jpx_calendar_status.source_reason)
 
     if code_commit_sha is None:
         blocking_reasons.append("code_commit_sha_unavailable")
@@ -319,6 +361,16 @@ def get_kabucom_live_financial_write_gate_status(
         blocking_reasons.append("live_write_attestation_missing")
     else:
         attestation_present = True
+        attestation_digest = load_live_write_attestation_digest(attestation_path)
+        if attestation_digest is None:
+            blocking_reasons.append("live_write_attestation_digest_missing")
+        else:
+            attestation_digest_present = True
+            expected_attestation_hash = compute_live_write_attestation_hash(attestation)
+            if attestation_digest != expected_attestation_hash:
+                blocking_reasons.append("live_write_attestation_digest_mismatch")
+            else:
+                attestation_digest_valid = True
         expected_runtime_config_hash = str(getattr(base_gate_status, "runtime_config_hash", "") or "").strip() or None
         expected_approved_config_hash = str(getattr(base_gate_status, "approved_config_hash", "") or "").strip() or None
         expected_approval_manifest_hash = compute_live_approval_manifest_hash()
@@ -344,11 +396,19 @@ def get_kabucom_live_financial_write_gate_status(
             blocking_reasons.append(f"live_write_attestation_invalid:{attestation_validation.reason}")
         else:
             attestation_captured_from_test = bool(attestation.get("test_fixture_captured_from_kabucom_test"))
-            if not attestation_captured_from_test:
-                blocking_reasons.append("live_write_attestation_not_captured_from_kabucom_test")
+            ci_artifact_attested = bool(fixture_captured_from_test and attestation_captured_from_test)
 
-    if not resolved_ci_green_attested:
-        blocking_reasons.append("ci_green_attestation_missing")
+    if fixture_captured_from_test and not ci_artifact_attested:
+        blocking_reasons.append("ci_artifact_attestation_missing")
+
+    if trade_mode == "KABUCOM_LIVE":
+        if not jpx_calendar_ready:
+            blocking_reasons.append(jpx_calendar_reason)
+        elif not jpx_calendar_trading_day:
+            blocking_reasons.append("jpx_calendar_non_trading_day")
+
+    if not resolved_operator_acknowledged:
+        blocking_reasons.append("operator_ack_missing")
 
     allowed = not blocking_reasons
     reason = "ready" if allowed else " | ".join(blocking_reasons)
@@ -361,11 +421,17 @@ def get_kabucom_live_financial_write_gate_status(
         test_fixture_present=fixture_present,
         test_fixture_valid=fixture_valid,
         test_fixture_captured_from_kabucom_test=fixture_captured_from_test,
-        ci_green_attested=resolved_ci_green_attested,
+        ci_artifact_attested=ci_artifact_attested,
+        operator_acknowledged=resolved_operator_acknowledged,
         live_write_attestation_path=attestation_path_text,
         live_write_attestation_present=attestation_present,
         live_write_attestation_valid=attestation_valid,
         live_write_attestation_captured_from_kabucom_test=attestation_captured_from_test,
+        live_write_attestation_digest_present=attestation_digest_present,
+        live_write_attestation_digest_valid=attestation_digest_valid,
+        jpx_calendar_ready=jpx_calendar_ready,
+        jpx_calendar_trading_day=jpx_calendar_trading_day,
+        jpx_calendar_reason=jpx_calendar_reason,
     )
 
 
@@ -374,13 +440,13 @@ def can_enable_kabucom_live_financial_write(
     base_gate_status: LiveOrderGateStatus | None = None,
     test_fixture_path: str | Path | None = None,
     live_write_attestation_path: str | Path | None = None,
-    ci_green_attested: bool | None = None,
+    operator_acknowledged: bool | None = None,
 ) -> bool:
     return get_kabucom_live_financial_write_gate_status(
         base_gate_status=base_gate_status,
         test_fixture_path=test_fixture_path,
         live_write_attestation_path=live_write_attestation_path,
-        ci_green_attested=ci_green_attested,
+        operator_acknowledged=operator_acknowledged,
     ).allowed
 
 

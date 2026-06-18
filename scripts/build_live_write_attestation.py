@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-command",
         default=LIVE_WRITE_ATTESTATION_TEST_COMMAND,
-        help="Command that produced the CI green evidence.",
+        help="Command that produced the CI artifact evidence.",
     )
     parser.add_argument(
         "--ci-run-id",
@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--approved-config-hash",
-        default=os.getenv("APPROVED_CONFIG_HASH", RUNTIME_LIVE_ORDER_CONFIG_HASH),
-        help="Approved config hash to record in the attestation.",
+        default=os.getenv("APPROVED_CONFIG_HASH", "").strip(),
+        help="Approved config hash to record in the attestation. Required for actual KABUCOM_TEST captures.",
     )
     parser.add_argument(
         "--runtime-config-hash",
@@ -106,16 +106,20 @@ def _validate_required_inputs(args: argparse.Namespace) -> None:
         raise SystemExit(f"Missing required CI context: {', '.join(missing)}")
 
 
+def _require_approved_config_hash(args: argparse.Namespace) -> str:
+    approved_config_hash = str(args.approved_config_hash or "").strip()
+    if not approved_config_hash:
+        raise SystemExit(
+            "Missing required APPROVED_CONFIG_HASH. Set it before building a live write attestation from an actual "
+            "KABUCOM_TEST capture."
+        )
+    return approved_config_hash
+
+
 def main() -> int:
     args = parse_args()
-    _validate_required_inputs(args)
-
     fixture_path = Path(args.fixture_path)
     output_path = Path(args.output)
-    ci_run_url = _resolve_ci_run_url(args)
-    if not ci_run_url:
-        raise SystemExit("Unable to resolve CI run URL.")
-
     fixture = load_contract_fixture(fixture_path)
     if not isinstance(fixture, dict):
         print(f"Skipping live write attestation build because fixture is missing: {fixture_path}")
@@ -127,11 +131,17 @@ def main() -> int:
         )
         return 0
 
+    _validate_required_inputs(args)
+    ci_run_url = _resolve_ci_run_url(args)
+    if not ci_run_url:
+        raise SystemExit("Unable to resolve CI run URL.")
+    approved_config_hash = _require_approved_config_hash(args)
+
     attestation = build_live_write_attestation(
         fixture_path=fixture_path,
         code_commit_sha=str(args.ci_head_sha).strip() or None,
         approval_manifest_hash=str(args.approval_manifest_hash).strip() or None,
-        approved_config_hash=str(args.approved_config_hash).strip() or None,
+        approved_config_hash=approved_config_hash,
         runtime_config_hash=str(args.runtime_config_hash).strip() or None,
         contract_fixture_manifest_hash=compute_contract_fixture_manifest_hash(),
         ci_run_id=str(args.ci_run_id).strip() or None,
@@ -145,7 +155,7 @@ def main() -> int:
     validation = validate_live_write_attestation(
         attestation,
         expected_runtime_config_hash=str(args.runtime_config_hash).strip() or None,
-        expected_approved_config_hash=str(args.approved_config_hash).strip() or None,
+        expected_approved_config_hash=approved_config_hash,
         expected_approval_manifest_hash=str(args.approval_manifest_hash).strip() or None,
         expected_code_commit_sha=str(args.ci_head_sha).strip() or None,
         expected_contract_fixture_manifest_hash=compute_contract_fixture_manifest_hash(),
@@ -160,7 +170,8 @@ def main() -> int:
     if not validation.valid:
         raise SystemExit(f"Generated attestation failed validation: {validation.reason}")
 
-    print(f"Wrote live write attestation: {output_path}")
+    digest_path = output_path.with_name(output_path.name + ".sha256")
+    print(f"Wrote live write attestation bundle: {output_path} and {digest_path}")
     return 0
 
 
