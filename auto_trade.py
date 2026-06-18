@@ -8,13 +8,13 @@ import time
 import pickle
 import signal
 import socket
-import jpholiday
 from enum import Enum
 from dataclasses import dataclass
 import psutil
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
 from core.kabucom_order_state import StockOrderAction, SubmissionStatus
+from core.jpx_calendar import get_jpx_trading_day_status
 
 class MarketPhase(Enum):
     PRE_MARKET = "寄り前"
@@ -1764,7 +1764,12 @@ def _main_exec():
             f"allowed={live_financial_write_gate_status.allowed} "
             f"reason={live_financial_write_gate_status.reason} "
             f"test_fixture={live_financial_write_gate_status.test_fixture_captured_from_kabucom_test} "
-            f"ci_green={live_financial_write_gate_status.ci_green_attested} "
+            f"ci_artifact={live_financial_write_gate_status.ci_artifact_attested} "
+            f"operator_ack={live_financial_write_gate_status.operator_acknowledged} "
+            f"digest={live_financial_write_gate_status.live_write_attestation_digest_present}/"
+            f"{live_financial_write_gate_status.live_write_attestation_digest_valid} "
+            f"calendar={live_financial_write_gate_status.jpx_calendar_ready}/"
+            f"{live_financial_write_gate_status.jpx_calendar_trading_day} "
             f"attestation={live_financial_write_gate_status.live_write_attestation_present}/"
             f"{live_financial_write_gate_status.live_write_attestation_valid}"
         )
@@ -1775,6 +1780,12 @@ def _main_exec():
             "[LIVE-WRITE-GATE] "
             f"allowed={live_financial_write_gate_status.allowed} "
             f"reason={live_financial_write_gate_status.reason} "
+            f"ci_artifact={live_financial_write_gate_status.ci_artifact_attested} "
+            f"operator_ack={live_financial_write_gate_status.operator_acknowledged} "
+            f"digest={live_financial_write_gate_status.live_write_attestation_digest_present}/"
+            f"{live_financial_write_gate_status.live_write_attestation_digest_valid} "
+            f"calendar={live_financial_write_gate_status.jpx_calendar_ready}/"
+            f"{live_financial_write_gate_status.jpx_calendar_trading_day} "
             f"attestation={live_financial_write_gate_status.live_write_attestation_present}/"
             f"{live_financial_write_gate_status.live_write_attestation_valid}"
         )
@@ -1954,10 +1965,12 @@ def _main_exec():
 
         phase_entry_blocked = False
         if not DEBUG_MODE:
-            is_weekend = server_datetime.weekday() >= 5
-            is_holiday = jpholiday.is_holiday(server_datetime.date())
-            if is_weekend or is_holiday:
-                non_trading_day_reason = "weekend" if is_weekend else "holiday"
+            jpx_day_status = get_jpx_trading_day_status(
+                server_datetime,
+                require_source=TRADE_MODE == "KABUCOM_LIVE",
+            )
+            if not jpx_day_status.trading_day:
+                non_trading_day_reason = jpx_day_status.source_reason
                 perform_non_trading_day_shutdown(
                     broker=broker,
                     portfolio=portfolio,

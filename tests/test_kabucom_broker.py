@@ -38,12 +38,15 @@ from core.live_order_gate import (
     get_live_order_gate_status,
 )
 from core.live_write_attestation import (
+    LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX,
     LIVE_WRITE_ATTESTATION_TEST_COMMAND,
+    compute_live_write_attestation_hash,
     build_live_write_attestation,
     write_live_write_attestation,
 )
 from core.live_approval_manifest import compute_live_approval_manifest_hash
 from core.sim_broker import SimulationBroker
+from scripts import build_live_write_attestation as build_live_write_attestation_script
 
 
 class _FakeResponse:
@@ -767,7 +770,7 @@ class TestKabucomBroker(unittest.TestCase):
                 runtime_config_hash="sha256:runtime",
                 approved_config_hash="sha256:runtime",
             ),
-            ci_green_attested=True,
+            operator_acknowledged=True,
         )
 
         self.assertFalse(status.allowed)
@@ -776,37 +779,39 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(status.test_fixture_present)
         self.assertTrue(status.test_fixture_valid)
         self.assertFalse(status.test_fixture_captured_from_kabucom_test)
-        self.assertTrue(status.ci_green_attested)
+        self.assertFalse(status.ci_artifact_attested)
+        self.assertTrue(status.operator_acknowledged)
         self.assertFalse(status.live_write_attestation_present)
         self.assertFalse(status.live_write_attestation_valid)
 
     def test_live_financial_write_gate_preserves_base_gate_rejection_reason(self):
         status = get_kabucom_live_financial_write_gate_status(
             base_gate_status=SimpleNamespace(allowed=False, reason="approval_missing"),
-            ci_green_attested=True,
+            operator_acknowledged=True,
         )
 
         self.assertFalse(status.allowed)
         self.assertEqual(status.reason, "approval_missing")
         self.assertEqual(status.blocking_reasons, ("approval_missing",))
         self.assertFalse(status.test_fixture_present)
-        self.assertTrue(status.ci_green_attested)
+        self.assertFalse(status.ci_artifact_attested)
+        self.assertTrue(status.operator_acknowledged)
         self.assertFalse(status.live_write_attestation_present)
 
     def test_live_financial_write_gate_allows_only_with_matching_attestation_artifact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
-            status = get_kabucom_live_financial_write_gate_status(
-                base_gate_status=SimpleNamespace(
-                    allowed=True,
-                    reason="ready",
-                    runtime_config_hash="sha256:runtime",
-                    approved_config_hash="sha256:runtime",
-                ),
-                test_fixture_path=fixture_path,
-                live_write_attestation_path=attestation_path,
-                ci_green_attested=True,
-            )
+            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, clear=False):
+                status = get_kabucom_live_financial_write_gate_status(
+                    base_gate_status=SimpleNamespace(
+                        allowed=True,
+                        reason="ready",
+                        runtime_config_hash="sha256:runtime",
+                        approved_config_hash="sha256:runtime",
+                    ),
+                    test_fixture_path=fixture_path,
+                    live_write_attestation_path=attestation_path,
+                )
 
         self.assertTrue(status.allowed)
         self.assertEqual(status.reason, "ready")
@@ -814,10 +819,82 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(status.test_fixture_present)
         self.assertTrue(status.test_fixture_valid)
         self.assertTrue(status.test_fixture_captured_from_kabucom_test)
+        self.assertTrue(status.ci_artifact_attested)
+        self.assertTrue(status.operator_acknowledged)
         self.assertTrue(status.live_write_attestation_present)
         self.assertTrue(status.live_write_attestation_valid)
         self.assertTrue(status.live_write_attestation_captured_from_kabucom_test)
-        self.assertTrue(status.ci_green_attested)
+
+    def test_live_financial_write_gate_blocks_when_operator_ack_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "false"}, clear=False):
+                status = get_kabucom_live_financial_write_gate_status(
+                    base_gate_status=SimpleNamespace(
+                        allowed=True,
+                        reason="ready",
+                        runtime_config_hash="sha256:runtime",
+                        approved_config_hash="sha256:runtime",
+                    ),
+                    test_fixture_path=fixture_path,
+                    live_write_attestation_path=attestation_path,
+                )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("operator_ack_missing", status.reason)
+        self.assertTrue(status.ci_artifact_attested)
+        self.assertFalse(status.operator_acknowledged)
+
+    def test_write_live_write_attestation_emits_digest_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, attestation = _write_live_write_attestation_artifact(tmpdir)
+            digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+            self.assertTrue(digest_path.exists())
+            self.assertEqual(
+                digest_path.read_text(encoding="utf-8").strip(),
+                compute_live_write_attestation_hash(attestation),
+            )
+
+    def test_live_financial_write_gate_blocks_when_attestation_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+            digest_path.write_text("sha256:bogus\n", encoding="utf-8")
+            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, clear=False):
+                status = get_kabucom_live_financial_write_gate_status(
+                    base_gate_status=SimpleNamespace(
+                        allowed=True,
+                        reason="ready",
+                        runtime_config_hash="sha256:runtime",
+                        approved_config_hash="sha256:runtime",
+                    ),
+                    test_fixture_path=fixture_path,
+                    live_write_attestation_path=attestation_path,
+                )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("live_write_attestation_digest_mismatch", status.reason)
+        self.assertFalse(status.live_write_attestation_digest_valid)
+
+    def test_live_financial_write_gate_blocks_when_jpx_calendar_source_is_missing_in_live_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, clear=False), \
+                patch("core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"):
+                status = get_kabucom_live_financial_write_gate_status(
+                    base_gate_status=SimpleNamespace(
+                        allowed=True,
+                        reason="ready",
+                        runtime_config_hash="sha256:runtime",
+                        approved_config_hash="sha256:runtime",
+                    ),
+                    test_fixture_path=fixture_path,
+                    live_write_attestation_path=attestation_path,
+                )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("jpx_calendar_missing", status.reason)
+        self.assertFalse(status.jpx_calendar_ready)
 
     def test_live_financial_write_gate_blocks_on_attestation_mismatches(self):
         base_gate_status = SimpleNamespace(
@@ -855,11 +932,71 @@ class TestKabucomBroker(unittest.TestCase):
                         base_gate_status=base_gate_status,
                         test_fixture_path=fixture_path,
                         live_write_attestation_path=attestation_path,
-                        ci_green_attested=True,
+                        operator_acknowledged=True,
                     )
 
                 self.assertFalse(status.allowed)
                 self.assertIn(expected_reason, status.reason)
+
+    def test_build_live_write_attestation_skips_manual_fixture_without_approved_config_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = load_contract_fixture(TEST_CONTRACT_FIXTURE_PATH)
+            assert isinstance(fixture, dict)
+            manual_fixture = json.loads(json.dumps(fixture))
+            manual_fixture["captured_from_kabucom_test"] = False
+
+            fixture_path = Path(tmpdir) / "kabucom_test_contract_fixture.json"
+            fixture_path.write_text(json.dumps(manual_fixture, ensure_ascii=False, indent=2), encoding="utf-8")
+            output_path = Path(tmpdir) / "live_write_attestation.json"
+
+            with patch.object(
+                build_live_write_attestation_script.sys,
+                "argv",
+                [
+                    "build_live_write_attestation.py",
+                    "--fixture-path",
+                    str(fixture_path),
+                    "--output",
+                    str(output_path),
+                ],
+            ):
+                self.assertEqual(build_live_write_attestation_script.main(), 0)
+
+            self.assertFalse(output_path.exists())
+
+    def test_build_live_write_attestation_requires_approved_config_hash_for_actual_fixture(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = load_contract_fixture(TEST_CONTRACT_FIXTURE_PATH)
+            assert isinstance(fixture, dict)
+            actual_fixture = json.loads(json.dumps(fixture))
+            actual_fixture["captured_from_kabucom_test"] = True
+
+            fixture_path = Path(tmpdir) / "kabucom_test_contract_fixture.json"
+            fixture_path.write_text(json.dumps(actual_fixture, ensure_ascii=False, indent=2), encoding="utf-8")
+            output_path = Path(tmpdir) / "live_write_attestation.json"
+
+            with patch.object(
+                build_live_write_attestation_script.sys,
+                "argv",
+                [
+                    "build_live_write_attestation.py",
+                    "--fixture-path",
+                    str(fixture_path),
+                    "--output",
+                    str(output_path),
+                    "--ci-run-id",
+                    "12345",
+                    "--ci-head-sha",
+                    "sha256:head",
+                    "--repository-full-name",
+                    "yayumura/auto-trade",
+                ],
+            ):
+                with self.assertRaises(SystemExit) as exc:
+                    build_live_write_attestation_script.main()
+
+            self.assertIn("APPROVED_CONFIG_HASH", str(exc.exception))
+            self.assertFalse(output_path.exists())
 
     def test_execute_market_order_sell_side_uses_close_positions_and_daytrade_margin(self):
         captured = {}

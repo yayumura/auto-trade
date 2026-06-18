@@ -21,6 +21,7 @@ from core.live_approval_manifest import compute_live_approval_manifest_hash, rea
 
 LIVE_WRITE_ATTESTATION_SCHEMA_VERSION = 1
 LIVE_WRITE_ATTESTATION_TEST_COMMAND = "python -m pytest tests -q"
+LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX = ".sha256"
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,39 @@ def load_live_write_attestation(path: str | Path) -> dict[str, Any] | None:
     return raw
 
 
+def _live_write_attestation_digest_path(path: str | Path) -> Path:
+    attestation_path = Path(path)
+    return attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+
+
+def load_live_write_attestation_digest(path: str | Path) -> str | None:
+    digest_path = _live_write_attestation_digest_path(path)
+    if not digest_path.exists():
+        return None
+    try:
+        digest_text = digest_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    digest = digest_text.strip().splitlines()[0].strip() if digest_text.strip() else ""
+    return digest or None
+
+
+def write_live_write_attestation_digest(
+    path: str | Path,
+    *,
+    hash_value: str | None = None,
+    attestation: LiveWriteAttestation | Mapping[str, Any] | None = None,
+) -> Path:
+    if hash_value is None:
+        if attestation is None:
+            raise ValueError("Either hash_value or attestation is required to write the digest sidecar")
+        hash_value = compute_live_write_attestation_hash(attestation)
+    digest_path = _live_write_attestation_digest_path(path)
+    digest_path.parent.mkdir(parents=True, exist_ok=True)
+    digest_path.write_text(f"{str(hash_value).strip()}\n", encoding="utf-8")
+    return digest_path
+
+
 def build_live_write_attestation(
     *,
     fixture_path: str | Path = TEST_CONTRACT_FIXTURE_PATH,
@@ -164,7 +198,7 @@ def build_live_write_attestation(
         read_git_remote_repository_full_name() if repository_full_name is None else str(repository_full_name).strip() or None
     )
     runtime_config_hash = RUNTIME_LIVE_ORDER_CONFIG_HASH if runtime_config_hash is None else str(runtime_config_hash).strip() or None
-    approved_config_hash = runtime_config_hash if approved_config_hash is None else str(approved_config_hash).strip() or None
+    approved_config_hash = None if approved_config_hash is None else str(approved_config_hash).strip() or None
     approval_manifest_hash = (
         compute_live_approval_manifest_hash() if approval_manifest_hash is None else str(approval_manifest_hash).strip() or None
     )
@@ -208,13 +242,19 @@ def build_live_write_attestation(
 
 
 def write_live_write_attestation(path: str | Path, attestation: LiveWriteAttestation | None = None) -> Path:
-    attestation = build_live_write_attestation() if attestation is None else attestation
+    if attestation is None:
+        raise ValueError("live write attestation is required")
+    payload = asdict(attestation) if isinstance(attestation, LiveWriteAttestation) else dict(attestation)
+    approved_config_hash = str(payload.get("approved_config_hash") or "").strip()
+    if not approved_config_hash:
+        raise ValueError("Cannot write live write attestation without approved_config_hash")
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        json.dumps(_normalize_json_value(asdict(attestation)), sort_keys=True, ensure_ascii=False, indent=2),
+        json.dumps(_normalize_json_value(payload), sort_keys=True, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    write_live_write_attestation_digest(target, hash_value=compute_live_write_attestation_hash(payload))
     return target
 
 
