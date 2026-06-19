@@ -182,7 +182,7 @@ auto-trade/
 - `auto_trade.py`
   本番の自動売買実行エントリです。
   `KABUCOM_LIVE` では新規エントリーはデフォルト無効で、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` の一致がそろうまで監視と決済のみを行います。
-  さらに、LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance と、CI artifact 由来の structured attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`) を満たす総合 gate でも判定し、起動時ログと Discord 通知で状態を出します。`KABUCOM_LIVE` では operator 確認に `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context が必須で、`KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean や explicit 引数だけでは開きません。`GITHUB_TOKEN` / `GH_TOKEN` がある live 実行では GitHub Actions の run と artifact を API で照合し、artifact digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、期限切れ後は再検証します。`TRADE_MODE=KABUCOM_LIVE` では JPX calendar source が無い場合だけでなく、coverage gap や fallback に落ちる場合も live financial write を開けません。`half_day_dates` は午前立会として扱い、11:30 以降はその日の運用を終了します。
+  LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance、CI artifact 由来の structured attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、structured operator ACK、JPX calendar source、GitHub artifact verification がそろったときだけ開きます。`KABUCOM_LIVE` では `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` が必須で、`KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean や explicit 引数だけでは開きません。`GITHUB_TOKEN` / `GH_TOKEN` がある live 実行では GitHub Actions の run と artifact を API で照合し、artifact digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、期限切れ後は再検証します。`TRADE_MODE=KABUCOM_LIVE` では JPX calendar source が無い場合だけでなく、coverage gap や fallback に落ちる場合も live financial write を開けません。`half_day_dates` は午前立会として扱い、11:30 以降はその日の運用を終了します。要点と未完了項目は下の KABUCOM_LIVE 再開 runbook と [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に分けています。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
@@ -698,6 +698,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - runtime entry authorization context が protective stop pending / orphan もブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
   - `LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed にし、`quote_freshness` では `quote_timestamp` / `received_at` / `age_seconds` / `max_age_seconds` の evidence を残し、`journal_reconciliation` では accepted order missing at broker / broker position without journal / journal filled without position / unconfirmed stop replay / corrupt final line / corrupt middle line を見分けること
+  - `request_budget` が orders / wallet / registry / market_data / auth / other のいずれかで予算超過すると blocked になること
   - `LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合に risk readiness / no-lookahead audit が ready にならないこと
   - risk review の `code_commit_sha` / `runtime_config_hash` / `approval_manifest_hash` 不一致が live readiness を閉じること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
@@ -800,7 +801,16 @@ python -m pytest tests/test_order_journal.py
 
 ## KABUCOM_LIVE 再開 runbook
 
-`KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。
+`KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。現時点では actual `KABUCOM_TEST` capture / GitHub Actions run-state / JPX calendar / risk review が未完了なので、reopen checklist が揃うまで closed です。
+
+### 再開条件の要約
+
+| 何を見るか | 必要条件 |
+| --- | --- |
+| 外部証跡 | actual `KABUCOM_TEST` capture / GitHub Actions run-state / JPX calendar source |
+| 承認証跡 | structured operator ACK / CI attestation artifact / risk review |
+| 実行前 readiness | `LiveReadinessReport ready` / `request-budget readiness true` / `no-lookahead review complete` |
+| 判定 | 1 つでも欠けたら closed のまま |
 
 ### actual `KABUCOM_TEST` fixture capture
 

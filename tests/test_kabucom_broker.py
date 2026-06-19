@@ -1346,6 +1346,156 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(item_map["risk_readiness"].status, "ready")
         self.assertEqual(item_map["no_lookahead_audit"].status, "ready")
 
+    def test_build_live_readiness_report_blocks_when_request_budget_is_exhausted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal_path = Path(tmpdir) / "order_journal.jsonl"
+            append_order_journal(
+                {"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1", "kind": "market"},
+                path=str(journal_path),
+            )
+            append_order_journal(
+                {
+                    "event": "FILLED",
+                    "intent_id": "intent-1",
+                    "order_id": "ORDER-1",
+                    "execution_ids": ["EX-1"],
+                    "kind": "market",
+                },
+                path=str(journal_path),
+            )
+            summary = build_order_journal_replay_summary(str(journal_path))
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
+                }
+            ]
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={
+                    "orders": [
+                        {
+                            "ID": "STOP-1",
+                        }
+                    ],
+                    "has_unknown": False,
+                    "unresolved_order_ids": [],
+                },
+                order_journal_summary=summary,
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            request_budget_counts = {bucket: 0 for bucket in RequestBudgetBucket}
+            request_budget_counts[RequestBudgetBucket.ORDERS] = 999999
+            report = build_live_readiness_report(
+                portfolio=portfolio,
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=summary,
+                request_budget_counts=request_budget_counts,
+                quote_fresh=True,
+                quote_freshness_evidence=(
+                    "reference_time=2026-04-21T09:15:00+09:00",
+                    "1000:source=quote_timestamp",
+                    "1000:quote_timestamp=2026-04-21T09:14:00+09:00",
+                    "1000:received_at=2026-04-21T09:14:05+09:00",
+                    "1000:age_seconds=60",
+                ),
+                risk_review_path=risk_review_path,
+                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                expected_code_commit_sha=read_git_commit_sha(),
+            )
+
+        self.assertFalse(report.allowed)
+        self.assertIn("request_budget:blocked:request_budget_exceeded:orders:", report.reason)
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["request_budget"].status, "blocked")
+        self.assertTrue(item_map["request_budget"].reason.startswith("request_budget_exceeded:orders:"))
+        self.assertEqual(item_map["risk_readiness"].status, "ready")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "ready")
+
+    def test_build_live_readiness_report_normalizes_mixed_request_budget_key_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal_path = Path(tmpdir) / "order_journal.jsonl"
+            append_order_journal(
+                {"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1", "kind": "market"},
+                path=str(journal_path),
+            )
+            append_order_journal(
+                {
+                    "event": "FILLED",
+                    "intent_id": "intent-1",
+                    "order_id": "ORDER-1",
+                    "execution_ids": ["EX-1"],
+                    "kind": "market",
+                },
+                path=str(journal_path),
+            )
+            summary = build_order_journal_replay_summary(str(journal_path))
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
+                }
+            ]
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={
+                    "orders": [
+                        {
+                            "ID": "STOP-1",
+                        }
+                    ],
+                    "has_unknown": False,
+                    "unresolved_order_ids": [],
+                },
+                order_journal_summary=summary,
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            request_budget_counts = {
+                "orders": 999999,
+                RequestBudgetBucket.WALLET: 999999,
+                "registry": 999999,
+                RequestBudgetBucket.MARKET_DATA: 999999,
+                "auth": 999999,
+                "other": 999999,
+            }
+            report = build_live_readiness_report(
+                portfolio=portfolio,
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=summary,
+                request_budget_counts=request_budget_counts,
+                quote_fresh=True,
+                quote_freshness_evidence=(
+                    "reference_time=2026-04-21T09:15:00+09:00",
+                    "1000:source=quote_timestamp",
+                    "1000:quote_timestamp=2026-04-21T09:14:00+09:00",
+                    "1000:received_at=2026-04-21T09:14:05+09:00",
+                    "1000:age_seconds=60",
+                ),
+                risk_review_path=risk_review_path,
+                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                expected_code_commit_sha=read_git_commit_sha(),
+            )
+
+        self.assertFalse(report.allowed)
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["request_budget"].status, "blocked")
+        self.assertIn("orders:", item_map["request_budget"].reason)
+        self.assertIn("wallet:", item_map["request_budget"].reason)
+        self.assertIn("registry:", item_map["request_budget"].reason)
+        self.assertIn("market_data:", item_map["request_budget"].reason)
+        self.assertIn("auth:", item_map["request_budget"].reason)
+        self.assertIn("other:", item_map["request_budget"].reason)
+
     def test_build_live_readiness_report_blocks_when_journal_reconciliation_is_dirty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             journal_path = Path(tmpdir) / "order_journal.jsonl"
