@@ -11,6 +11,7 @@ import zipfile
 import pandas as pd
 from types import SimpleNamespace
 
+from core.config import RUNTIME_LIVE_ORDER_CONFIG_HASH
 from core.kabucom_broker import KabucomBroker, RequestBudgetBucket, BrokerOperationClass
 from core.kabucom_broker import BrokerEndpointConfig
 from core.kabucom_broker import BrokerEnvironment
@@ -41,8 +42,12 @@ from core.live_order_gate import (
     get_kabucom_live_financial_write_gate_status,
     get_live_order_gate_status,
 )
+from core.live_readiness_report import build_live_readiness_report
 from core.live_approval_manifest import read_git_commit_sha
-from core.github_actions_artifact_source import verify_live_write_attestation_artifact_source
+from core.github_actions_artifact_source import (
+    clear_live_write_attestation_artifact_source_cache,
+    verify_live_write_attestation_artifact_source,
+)
 from core.live_write_attestation import (
     LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX,
     LIVE_WRITE_ATTESTATION_TEST_COMMAND,
@@ -52,6 +57,8 @@ from core.live_write_attestation import (
     write_live_write_attestation,
 )
 from core.live_approval_manifest import compute_live_approval_manifest_hash
+from core.startup_recovery import build_startup_recovery_report
+from core.order_journal import build_order_journal_replay_summary
 from core.sim_broker import SimulationBroker
 from scripts import build_live_write_attestation as build_live_write_attestation_script
 
@@ -142,6 +149,35 @@ def _write_live_write_attestation_artifact(
     attestation_path = Path(tmpdir) / "live_write_attestation.json"
     write_live_write_attestation(attestation_path, attestation)
     return fixture_path, attestation_path, attestation
+
+
+def _write_live_risk_review_artifact(
+    tmpdir: str,
+    *,
+    code_commit_sha: str | None = None,
+    approval_manifest_hash: str | None = None,
+    runtime_config_hash: str | None = None,
+    reviewer: str = "qa-operator",
+) -> Path:
+    review_path = Path(tmpdir) / "live_risk_review.json"
+    payload = {
+        "schema_version": 1,
+        "status": "ready",
+        "reviewed_at": "2099-01-01T00:00:00+09:00",
+        "reviewer": reviewer,
+        "code_commit_sha": code_commit_sha or read_git_commit_sha(),
+        "approval_manifest_hash": approval_manifest_hash or compute_live_approval_manifest_hash(),
+        "runtime_config_hash": runtime_config_hash or RUNTIME_LIVE_ORDER_CONFIG_HASH,
+        "train_holdout_review": {"status": "ready", "summary": "train/holdout review complete"},
+        "walk_forward_review": {"status": "ready", "summary": "walk-forward review complete"},
+        "transaction_cost_stress": {"status": "ready", "summary": "cost stress complete"},
+        "slippage_stress": {"status": "ready", "summary": "slippage stress complete"},
+        "capacity_liquidity_stress": {"status": "ready", "summary": "capacity stress complete"},
+        "rule_complexity_report": {"status": "ready", "summary": "rule complexity review complete"},
+        "no_lookahead_audit_hash": "sha256:no-lookahead",
+    }
+    review_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return review_path
 
 
 class TestKabucomBroker(unittest.TestCase):
@@ -885,6 +921,14 @@ class TestKabucomBroker(unittest.TestCase):
                     "KABUCOM_LIVE_OPERATOR_ACK_CONTEXT": json.dumps(ack_context, ensure_ascii=False),
                 },
                 clear=False,
+            ), patch("core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"), patch(
+                "core.live_order_gate.get_jpx_trading_day_status",
+                return_value=SimpleNamespace(
+                    trading_day=True,
+                    source_ready=True,
+                    source_reason="calendar_trading_date",
+                    used_fallback=False,
+                ),
             ):
                 status = get_kabucom_live_financial_write_gate_status(
                     base_gate_status=SimpleNamespace(
@@ -901,6 +945,47 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(status.operator_ack_source, "structured_context")
         self.assertEqual(status.operator_ack_reason, "operator_ack_context_ok")
         self.assertTrue(status.operator_acknowledged)
+
+    def test_live_financial_write_gate_blocks_when_legacy_operator_ack_paths_are_used_in_live_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            base_gate_status = SimpleNamespace(
+                allowed=True,
+                reason="ready",
+                runtime_config_hash="sha256:runtime",
+                approved_config_hash="sha256:runtime",
+            )
+
+            cases = [
+                ("legacy_boolean", {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, None),
+                ("explicit_argument", {}, True),
+            ]
+
+            for label, env_overrides, explicit_ack in cases:
+                with self.subTest(label=label):
+                    with patch.dict(os.environ, env_overrides, clear=False), \
+                        patch("core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"), \
+                        patch(
+                            "core.live_order_gate.get_jpx_trading_day_status",
+                            return_value=SimpleNamespace(
+                                trading_day=True,
+                                source_ready=True,
+                                source_reason="calendar_trading_date",
+                                used_fallback=False,
+                            ),
+                        ):
+                        status = get_kabucom_live_financial_write_gate_status(
+                            base_gate_status=base_gate_status,
+                            test_fixture_path=fixture_path,
+                            live_write_attestation_path=attestation_path,
+                            operator_acknowledged=explicit_ack,
+                        )
+
+                    self.assertFalse(status.allowed)
+                    self.assertIn("operator_ack_context_missing", status.reason)
+                    self.assertEqual(status.operator_ack_source, "structured_context")
+                    self.assertEqual(status.operator_ack_reason, "operator_ack_context_missing")
+                    self.assertFalse(status.operator_acknowledged)
 
     def test_live_financial_write_gate_blocks_when_structured_operator_ack_context_is_expired(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -942,7 +1027,134 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(status.operator_ack_source, "structured_context")
         self.assertFalse(status.operator_acknowledged)
 
+    def test_build_live_readiness_report_blocks_when_risk_review_artifact_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=[],
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+            report = build_live_readiness_report(
+                portfolio=[],
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                risk_review_path=Path(tmpdir) / "missing_live_risk_review.json",
+            )
+
+        self.assertFalse(report.allowed)
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["risk_readiness"].status, "not_verified")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "not_verified")
+        self.assertIn("risk_readiness:not_verified:risk_review_missing", report.reason)
+
+    def test_build_live_readiness_report_allows_when_all_evidence_is_present(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                }
+            ]
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            report = build_live_readiness_report(
+                portfolio=portfolio,
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                risk_review_path=risk_review_path,
+                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                expected_code_commit_sha=read_git_commit_sha(),
+            )
+
+        self.assertTrue(report.allowed)
+        self.assertEqual(report.reason, "ready")
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["protective_stop_lifecycle"].status, "ready")
+        self.assertEqual(item_map["partial_fill_unresolved"].status, "ready")
+        self.assertEqual(item_map["execution_id_truth"].status, "ready")
+        self.assertEqual(item_map["quote_freshness"].status, "ready")
+        self.assertEqual(item_map["journal_reconciliation"].status, "ready")
+        self.assertEqual(item_map["request_budget"].status, "ready")
+        self.assertEqual(item_map["risk_readiness"].status, "ready")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "ready")
+
+    def test_build_live_readiness_report_blocks_when_risk_review_runtime_config_hash_mismatches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                }
+            ]
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(
+                tmpdir,
+                runtime_config_hash="sha256:unexpected-runtime-config",
+            )
+            report = build_live_readiness_report(
+                portfolio=portfolio,
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                risk_review_path=risk_review_path,
+                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                expected_code_commit_sha=read_git_commit_sha(),
+            )
+
+        self.assertFalse(report.allowed)
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["risk_readiness"].status, "blocked")
+        self.assertEqual(item_map["risk_readiness"].reason, "risk_review_runtime_config_hash_mismatch")
+
+    def test_entry_authorization_blocks_when_live_readiness_report_is_not_ready(self):
+        status = evaluate_entry_authorization(
+            EntryAuthorizationContext(
+                production_endpoint=True,
+                approved_manifest_valid=True,
+                reconciliation_clean=True,
+                unresolved_order_count=0,
+                ambiguous_position_count=0,
+                wallet_snapshot_fresh=True,
+                positions_snapshot_fresh=True,
+                orders_snapshot_fresh=True,
+                quote_fresh=True,
+                registry_ready=True,
+                critical_state_valid=True,
+                session_allows_entry=True,
+                clock_healthy=True,
+                shutdown_requested=False,
+                live_readiness_allowed=False,
+                live_readiness_reason="risk_readiness:not_verified:risk_review_missing",
+            )
+        )
+
+        self.assertFalse(status.allowed)
+        self.assertIn("live_readiness_report_unready:risk_readiness:not_verified:risk_review_missing", status.blocking_reasons)
+
     def test_verify_live_write_attestation_artifact_source_accepts_matching_github_artifact(self):
+        clear_live_write_attestation_artifact_source_cache()
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path, attestation_path, attestation = _write_live_write_attestation_artifact(tmpdir)
             digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
@@ -997,12 +1209,149 @@ class TestKabucomBroker(unittest.TestCase):
                 token="token",
                 session=fake_session,
             )
+            cached_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token",
+                session=fake_session,
+            )
 
         self.assertTrue(result.valid)
         self.assertEqual(result.reason, "github_actions_artifact_source_verified")
         self.assertEqual(result.workflow_run_id, int(run_id))
         self.assertEqual(result.artifact_name, "live-write-attestation")
         self.assertEqual(result.artifact_digest, archive_digest)
+        self.assertTrue(cached_result.valid)
+        self.assertEqual(cached_result.reason, "github_actions_artifact_source_verified")
+        self.assertEqual(len(fake_session.calls), 3)
+
+    def test_verify_live_write_attestation_artifact_source_revalidates_when_cache_ttl_is_disabled(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, attestation = _write_live_write_attestation_artifact(tmpdir)
+            digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+
+            archive_buffer = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"contracts/{attestation_path.name}", attestation_path.read_text(encoding="utf-8"))
+                archive.writestr(f"contracts/{attestation_path.name}.sha256", digest_path.read_text(encoding="utf-8"))
+            archive_bytes = archive_buffer.getvalue()
+            archive_digest = f"sha256:{sha256(archive_bytes).hexdigest()}"
+
+            run_id = "12345"
+            responses = [
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 77,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/77/zip",
+                                "workflow_run": {
+                                    "id": int(run_id),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes),
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 77,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/77/zip",
+                                "workflow_run": {
+                                    "id": int(run_id),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes),
+            ]
+            fake_session = _FakeSession(responses)
+
+            with patch.dict(os.environ, {"GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC": "0"}, clear=False):
+                first_result = verify_live_write_attestation_artifact_source(
+                    repository_full_name="yayumura/auto-trade",
+                    workflow_run_id=run_id,
+                    head_sha=read_git_commit_sha(),
+                    local_attestation_path=attestation_path,
+                    token="token",
+                    session=fake_session,
+                )
+                second_result = verify_live_write_attestation_artifact_source(
+                    repository_full_name="yayumura/auto-trade",
+                    workflow_run_id=run_id,
+                    head_sha=read_git_commit_sha(),
+                    local_attestation_path=attestation_path,
+                    token="token",
+                    session=fake_session,
+                )
+
+        self.assertTrue(first_result.valid)
+        self.assertTrue(second_result.valid)
+        self.assertEqual(len(fake_session.calls), 6)
+
+    def test_verify_live_write_attestation_artifact_source_does_not_leak_token_or_response_body_on_http_failure(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            secret_token = "super-secret-token"
+            secret_body = '{"error":"super-secret-token","detail":"should-not-leak"}'
+            fake_session = _FakeSession([
+                _FakeResponse(500, text=secret_body),
+            ])
+
+            result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id="12345",
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token=secret_token,
+                session=fake_session,
+            )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "workflow_run_http_500")
+        self.assertNotIn(secret_token, result.reason)
+        self.assertNotIn("should-not-leak", result.reason)
 
     def test_live_financial_write_gate_blocks_when_github_artifact_source_verification_is_required_and_token_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1114,6 +1463,37 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(fallback_status.source_ready)
         self.assertEqual(fallback_status.source_reason, "calendar_fallback")
         self.assertTrue(fallback_status.used_fallback)
+
+    def test_jpx_calendar_marks_half_day_sessions_in_strict_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            calendar_path = Path(tmpdir) / "jpx_trading_calendar.json"
+            calendar_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "closed_dates": [],
+                        "trading_dates": [],
+                        "half_day_dates": ["2026-06-03"],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            status = get_jpx_trading_day_status(
+                pd.Timestamp("2026-06-03"),
+                calendar_path=calendar_path,
+                require_source=True,
+            )
+
+        self.assertTrue(status.source_present)
+        self.assertTrue(status.source_valid)
+        self.assertTrue(status.trading_day)
+        self.assertTrue(status.source_ready)
+        self.assertEqual(status.source_reason, "calendar_half_day")
+        self.assertTrue(status.half_day)
+        self.assertFalse(status.used_fallback)
 
     def test_live_financial_write_gate_blocks_when_jpx_calendar_source_has_coverage_gap_in_live_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:

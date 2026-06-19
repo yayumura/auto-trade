@@ -1712,6 +1712,14 @@ def test_is_board_quote_snapshot_fresh_rejects_received_at_only_quotes():
     assert not auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
 
 
+def test_get_market_phase_treats_half_day_as_morning_only_until_midday_close():
+    assert auto_trade.get_market_phase(auto_trade.datetime.time(10, 0), half_day=True) == auto_trade.MarketPhase.MORNING
+    assert auto_trade.get_market_phase(auto_trade.datetime.time(11, 30), half_day=True) == auto_trade.MarketPhase.CLOSING_TIME
+    assert auto_trade.get_market_phase(auto_trade.datetime.time(12, 0), half_day=True) == auto_trade.MarketPhase.CLOSING_TIME
+    assert auto_trade.get_market_phase(auto_trade.datetime.time(12, 0), half_day=False) == auto_trade.MarketPhase.LUNCH
+    assert auto_trade.get_market_phase(auto_trade.datetime.time(13, 0), half_day=False) == auto_trade.MarketPhase.AFTERNOON
+
+
 def test_acquire_lock_writes_metadata_and_release_removes_owned_lock():
     with tempfile.TemporaryDirectory() as tmpdir:
         lock_path = Path(tmpdir) / "bot.lock"

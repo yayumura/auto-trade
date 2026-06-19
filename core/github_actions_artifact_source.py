@@ -5,16 +5,20 @@ from hashlib import sha256
 import io
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 import zipfile
 
 import requests
 
+from core.live_write_attestation import compute_live_write_attestation_hash
+
 
 GITHUB_API_VERSION = "2022-11-28"
 GITHUB_API_BASE_URL = "https://api.github.com"
 LIVE_WRITE_ATTESTATION_ARTIFACT_NAME = "live-write-attestation"
+DEFAULT_GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC = 600
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,15 @@ class GitHubArtifactSourceVerificationResult:
     artifact_name: str | None = None
     artifact_digest: str | None = None
     downloaded_archive_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubArtifactSourceCacheEntry:
+    stored_at: float
+    result: GitHubArtifactSourceVerificationResult
+
+
+_GITHUB_ARTIFACT_SOURCE_CACHE: dict[tuple[str, ...], GitHubArtifactSourceCacheEntry] = {}
 
 
 def _failure(reason: str, **kwargs: Any) -> GitHubArtifactSourceVerificationResult:
@@ -89,6 +102,81 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
+def clear_live_write_attestation_artifact_source_cache() -> None:
+    _GITHUB_ARTIFACT_SOURCE_CACHE.clear()
+
+
+def _get_cache_ttl_sec() -> float:
+    raw = os.getenv("GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC")
+    if raw is None or not raw.strip():
+        return float(DEFAULT_GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC)
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return 0.0
+    return max(0.0, ttl)
+
+
+def _session_cache_fingerprint(session: requests.Session | None) -> str:
+    if session is None:
+        return "default_session"
+    return f"{session.__class__.__module__}.{session.__class__.__qualname__}:{id(session)}"
+
+
+def _token_cache_fingerprint(token: str | None) -> str:
+    if token is None:
+        return "missing"
+    return sha256(token.encode("utf-8")).hexdigest()
+
+
+def _build_cache_key(
+    *,
+    repository_full_name: str,
+    workflow_run_id: str,
+    head_sha: str,
+    artifact_name: str,
+    local_attestation_hash: str,
+    local_digest_text: str,
+    token: str | None,
+    session: requests.Session | None,
+) -> tuple[str, ...]:
+    return (
+        repository_full_name,
+        workflow_run_id,
+        head_sha,
+        artifact_name,
+        local_attestation_hash,
+        local_digest_text,
+        _token_cache_fingerprint(token),
+        _session_cache_fingerprint(session),
+    )
+
+
+def _get_cached_verification_result(cache_key: tuple[str, ...], ttl_sec: float) -> GitHubArtifactSourceVerificationResult | None:
+    if ttl_sec <= 0:
+        return None
+    cache_entry = _GITHUB_ARTIFACT_SOURCE_CACHE.get(cache_key)
+    if cache_entry is None:
+        return None
+    if time.monotonic() - cache_entry.stored_at > ttl_sec:
+        _GITHUB_ARTIFACT_SOURCE_CACHE.pop(cache_key, None)
+        return None
+    return cache_entry.result
+
+
+def _store_cached_verification_result(
+    cache_key: tuple[str, ...],
+    result: GitHubArtifactSourceVerificationResult,
+    ttl_sec: float,
+) -> GitHubArtifactSourceVerificationResult:
+    if ttl_sec > 0 and result.valid:
+        _GITHUB_ARTIFACT_SOURCE_CACHE[cache_key] = GitHubArtifactSourceCacheEntry(
+            stored_at=time.monotonic(),
+            result=result,
+        )
+    return result
+
+
 def verify_live_write_attestation_artifact_source(
     *,
     repository_full_name: str,
@@ -123,6 +211,21 @@ def verify_live_write_attestation_artifact_source(
         return _failure("local_attestation_digest_missing")
 
     resolved_token = _get_token(token)
+    ttl_sec = _get_cache_ttl_sec()
+    cache_key = _build_cache_key(
+        repository_full_name=repository,
+        workflow_run_id=run_id_text,
+        head_sha=expected_head_sha,
+        artifact_name=artifact_name,
+        local_attestation_hash=compute_live_write_attestation_hash(attestation_payload),
+        local_digest_text=local_digest_text,
+        token=resolved_token,
+        session=session,
+    )
+    cached_result = _get_cached_verification_result(cache_key, ttl_sec)
+    if cached_result is not None:
+        return cached_result
+
     if not resolved_token:
         return _failure("github_token_missing")
 
@@ -365,4 +468,17 @@ def verify_live_write_attestation_artifact_source(
         artifact_name=artifact_name,
         artifact_digest=artifact_digest,
         downloaded_archive_digest=archive_bytes_digest,
+    ) if ttl_sec <= 0 else _store_cached_verification_result(
+        cache_key,
+        _success(
+            "github_actions_artifact_source_verified",
+            workflow_run_id=_coerce_int(run_id_text),
+            workflow_run_status=run_status or None,
+            workflow_run_conclusion=run_conclusion or None,
+            artifact_id=artifact_id_int,
+            artifact_name=artifact_name,
+            artifact_digest=artifact_digest,
+            downloaded_archive_digest=archive_bytes_digest,
+        ),
+        ttl_sec,
     )

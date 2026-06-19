@@ -116,8 +116,8 @@
 - 次の `clean holdout` は、現在の使用データ最新日 `2026-06-05` の翌営業日以降、つまり `2026-06-08` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 - `RUNTIME_LIVE_ORDER_CONFIG_HASH` は、実行設定に加えて `core.logic` の daytrade 定数、monthly rotation モジュール fingerprint、主要コードファイルの fingerprint も含めた承認マニフェストから計算します
-- LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` で commit / config / fixture / attestation hash と期限を紐づけた structured context も受け付けます。さらに、`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します
-- `KABUCOM_LIVE` では、calendar source が未配置・無効・coverage gap/fallback の場合も金融 write を開けません
+- LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。`KABUCOM_LIVE` では operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context を必須にし、legacy boolean や explicit 引数だけでは開きません。さらに、`LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed で示し、`LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合は not_verified のまま閉じます。`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、期限切れ後は再検証します
+- `KABUCOM_LIVE` では、calendar source が未配置・無効・coverage gap/fallback の場合も金融 write を開けません。`half_day_dates` に入った日は午前立会のみとして扱い、11:30 以降はその日の運用を終了します
 
 structured operator ACK の例:
 
@@ -136,7 +136,8 @@ structured operator ACK の例:
 }
 ```
 
-`KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean も残していますが、監査可能性のためには structured context を優先します。
+`KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean は local test / shadow 用のみに留め、`KABUCOM_LIVE` の live gate では structured context を使ってください。
+- `LiveReadinessReport` は startup log と entry authorization で参照され、risk review artifact が欠けている間は live entry を止めます。
 - 不一致または未設定の場合でも、監視・保護逆指値・決済は継続します
 
 ## リポジトリ構成
@@ -181,7 +182,7 @@ auto-trade/
 - `auto_trade.py`
   本番の自動売買実行エントリです。
   `KABUCOM_LIVE` では新規エントリーはデフォルト無効で、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` の一致がそろうまで監視と決済のみを行います。
-  さらに、LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance と、CI artifact 由来の structured attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`) を満たす総合 gate でも判定し、起動時ログと Discord 通知で状態を出します。operator 確認は `KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean に加え、`KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` で commit / config / fixture / attestation hash と期限を紐づけた structured context も扱い、CI の証跡とは分離しています。`GITHUB_TOKEN` / `GH_TOKEN` がある live 実行では GitHub Actions の run と artifact を API で照合し、artifact digest と zip 内容まで確認します。`TRADE_MODE=KABUCOM_LIVE` では JPX calendar source が無い場合だけでなく、coverage gap や fallback に落ちる場合も live financial write を開けません。
+  さらに、LIVE の financial write は actual `KABUCOM_TEST` fixture の provenance と、CI artifact 由来の structured attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`) を満たす総合 gate でも判定し、起動時ログと Discord 通知で状態を出します。`KABUCOM_LIVE` では operator 確認に `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context が必須で、`KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean や explicit 引数だけでは開きません。`GITHUB_TOKEN` / `GH_TOKEN` がある live 実行では GitHub Actions の run と artifact を API で照合し、artifact digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、期限切れ後は再検証します。`TRADE_MODE=KABUCOM_LIVE` では JPX calendar source が無い場合だけでなく、coverage gap や fallback に落ちる場合も live financial write を開けません。`half_day_dates` は午前立会として扱い、11:30 以降はその日の運用を終了します。
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
@@ -442,6 +443,7 @@ python auto_trade.py
 
 `KABUCOM_LIVE` で新規エントリーを許可する場合は、事前に `ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` を設定し、起動ログに出る `runtime_hash` と一致させてください。actual `KABUCOM_TEST` capture から attestation を作る段階では `APPROVED_CONFIG_HASH` が空だと build が止まります。
 必要なら `core.live_approval_manifest.write_live_approval_manifest()` で承認マニフェストをファイルへ書き出してから、その hash を使ってください。
+  さらに `contracts/live_risk_review.json` か `LIVE_RISK_REVIEW_PATH` で指す risk review artifact が必要で、`LiveReadinessReport` が ready にならない限り新規 entry は保留されます。
 
 backtest trade log 分析:
 
@@ -664,8 +666,10 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `resolve_stock_order_action()` が long-only の fail-closed になり、short action を拒否すること
   - `core/kabucom_broker.py` の POST 再送抑止
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
-  - LIVE financial write gate が `KABUCOM_TEST` fixture provenance と structured CI attestation bundle (`.json` + `.sha256`) を要求し、operator ack を `KABUCOM_LIVE_OPERATOR_ACK` / `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` に分離していること
+  - LIVE financial write gate が `KABUCOM_TEST` fixture provenance と structured CI attestation bundle (`.json` + `.sha256`) を要求し、`KABUCOM_LIVE` では operator ack を `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` に限定し、legacy boolean / explicit 引数を live gate に使えないこと
   - live 実行では GitHub Actions の workflow run / artifact の照合ができる場合、artifact digest と zip 内容まで検証すること
+  - GitHub artifact verification の cache hit と TTL=0 再検証が想定どおり動くこと
+  - GitHub artifact verification の失敗理由が token / response body を漏らさず generic のまま返ること
   - attestation bundle の digest sidecar が欠けるか mismatch なら live write を閉じること
   - `TRADE_MODE=KABUCOM_LIVE` で JPX calendar source が無い場合、または coverage gap / fallback に落ちる場合に live write を閉じること
   - `build_live_write_attestation.py` が actual KABUCOM_TEST capture では `APPROVED_CONFIG_HASH` を必須にし、手動 fixture では skip すること
@@ -684,6 +688,9 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
   - runtime entry authorization context が protective stop pending / orphan もブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
+  - `LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed にすること
+  - `LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合に risk readiness / no-lookahead audit が ready にならないこと
+  - risk review の `runtime_config_hash` / `approval_manifest_hash` 不一致が live readiness を閉じること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
   - `BrokerEnvironment` / `BrokerEndpointConfig` の mismatch を constructor / validate で拒否すること
   - live / test endpoint の mutating write が trade mode 不一致では拒否されること
@@ -781,6 +788,85 @@ python -m pytest tests/test_analyze_intraday_logs.py
 python -m pytest tests/test_order_journal.py
 ```
 
+## KABUCOM_LIVE 再開 runbook
+
+`KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。
+
+### actual `KABUCOM_TEST` fixture capture
+
+- 実口座の `KABUCOM_TEST` でしか取れない fixture は、手書きで作らない
+- 発注前に、対象銘柄、最小数量、板、余力、約定リスク、即時取消手順を確認する
+- 注文後は orders を取得し、即時 cancel して cancel 完了を確認する
+- 取消確認が取れない場合は fixture 化せず、手動対応記録だけ残す
+- capture した raw response には秘密値が残るので、fixture は sanitization と provenance metadata を付けて保存する
+- `captured_from_kabucom_test=true` を含む provenance が無い fixture は LIVE に使わない
+- actual capture から attestation を作る段階では `APPROVED_CONFIG_HASH` を必須にし、手動 fixture では build を skip する
+
+### GitHub Actions 実 run 確認
+
+- GitHub Actions の workflow run で `python -m pytest tests -q` が green になっていることを確認する
+- Checks view / Checks API / Actions run page のいずれかで、commit SHA と run id を記録する
+- artifact の digest と zip 内容を確認し、ローカル attestation と一致させる
+- branch protection の required checks が green であることを確認する
+- `GITHUB_TOKEN` / `GH_TOKEN` は read-capable secret として管理し、rotation 時は secret を更新して再検証する
+- token / response body / archive contents はそのままログに出さず、失敗理由は generic に保つ
+- verification 結果は `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、期限切れ後は再検証する
+- CI 実 run が未確認なら `KABUCOM_LIVE` の write gate は開けない
+
+### JPX calendar source 運用
+
+- `contracts/jpx_trading_calendar.json` は authoritative source として扱う
+- `coverage_start` / `coverage_end` / `generated_at` / `source_url` / `source_hash` / `half_day_dates` を明記する
+- missing / invalid / stale / coverage gap / fallback は全部 fail closed
+- half-day は 11:30 で終了し、以後の新規 entry はしない
+
+### structured operator ACK
+
+- `operator_id`
+- `acknowledged_at`
+- `expires_at`
+- `code_commit_sha`
+- `approved_config_hash`
+- `runtime_config_hash`
+- `repository_full_name`
+- `test_fixture_hash`
+- `live_write_attestation_hash`
+- `reason`
+- `KABUCOM_LIVE` では `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` を必須にし、legacy boolean / explicit 引数だけでは通さない
+- ACK 期限切れ、hash 不一致、repo 不一致、fixture 不一致、attestation 不一致は全部 closed
+
+### LIVE readiness report
+
+- `LiveReadinessReport` は startup log と entry authorization で参照する
+- `protective_stop_lifecycle`
+- `partial_fill_unresolved`
+- `execution_id_truth`
+- `quote_freshness`
+- `journal_reconciliation`
+- `request_budget`
+- `risk_readiness`
+- `no_lookahead_audit`
+- どれか 1 つでも `not_verified` / `blocked` なら新規 entry は止める
+- startup で blocked になった項目は Discord にも出す
+
+### risk strategy review
+
+- risk review は別途 `train / validation / untouched holdout` と `walk-forward` を揃えてから承認する
+- `transaction_cost_stress` / `slippage_stress` / `capacity_liquidity_stress` / `rule_complexity_report` / `no_lookahead_audit_hash` が揃わない限り `risk_readiness` は true にしない
+- `runtime_config_hash` と `approval_manifest_hash` が現在値と一致しない review は使わない
+
+### KABUCOM_LIVE reopen checklist
+
+- actual `KABUCOM_TEST` fixture captured
+- GitHub Actions run green confirmed
+- attestation artifact verified
+- JPX calendar source valid and within coverage
+- structured operator ACK valid
+- LiveReadinessReport ready
+- risk readiness true
+- request-budget readiness true
+- no-lookahead review complete
+
 ## 運用メモ
 
 - 戦略変更は、まず [core/logic.py](core/logic.py) の shared logic を直し、その結果を本番・バックテストから参照させます
@@ -788,4 +874,4 @@ python -m pytest tests/test_order_journal.py
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-18
+Last updated: 2026-06-19

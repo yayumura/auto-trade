@@ -24,6 +24,7 @@ class JPXTradingDayStatus:
     source_present: bool
     source_valid: bool
     trading_date: str
+    half_day: bool
     used_fallback: bool
 
 
@@ -129,6 +130,7 @@ def get_jpx_trading_day_status(
                 source_present=source_present,
                 source_valid=False,
                 trading_date=trading_date_text,
+                half_day=False,
                 used_fallback=False,
             )
         return JPXTradingDayStatus(
@@ -139,6 +141,7 @@ def get_jpx_trading_day_status(
             source_present=source_present,
             source_valid=False,
             trading_date=trading_date_text,
+            half_day=False,
             used_fallback=True,
         )
 
@@ -147,16 +150,17 @@ def get_jpx_trading_day_status(
     half_day_dates = set(calendar.get("half_day_dates") or ())
 
     if trading_date_text in closed_dates:
-        return JPXTradingDayStatus(
-            trading_day=False,
-            source_ready=True,
-            source_reason="calendar_closed_date",
-            source_path=str(calendar_path),
-            source_present=True,
-            source_valid=True,
-            trading_date=trading_date_text,
-            used_fallback=False,
-        )
+            return JPXTradingDayStatus(
+                trading_day=False,
+                source_ready=True,
+                source_reason="calendar_closed_date",
+                source_path=str(calendar_path),
+                source_present=True,
+                source_valid=True,
+                trading_date=trading_date_text,
+                half_day=False,
+                used_fallback=False,
+            )
     if trading_date_text in trading_dates:
         return JPXTradingDayStatus(
             trading_day=True,
@@ -166,6 +170,7 @@ def get_jpx_trading_day_status(
             source_present=True,
             source_valid=True,
             trading_date=trading_date_text,
+            half_day=False,
             used_fallback=False,
         )
     if trading_date_text in half_day_dates:
@@ -177,6 +182,7 @@ def get_jpx_trading_day_status(
             source_present=True,
             source_valid=True,
             trading_date=trading_date_text,
+            half_day=True,
             used_fallback=False,
         )
 
@@ -190,6 +196,7 @@ def get_jpx_trading_day_status(
             source_present=True,
             source_valid=True,
             trading_date=trading_date_text,
+            half_day=False,
             used_fallback=False,
         )
 
@@ -201,6 +208,7 @@ def get_jpx_trading_day_status(
         source_present=True,
         source_valid=True,
         trading_date=trading_date_text,
+        half_day=False,
         used_fallback=True,
     )
 
