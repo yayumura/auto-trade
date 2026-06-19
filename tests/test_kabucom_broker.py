@@ -8,6 +8,7 @@ from unittest.mock import patch
 import os
 from pathlib import Path
 import zipfile
+import requests
 import pandas as pd
 from types import SimpleNamespace
 
@@ -178,6 +179,67 @@ def _write_live_risk_review_artifact(
     }
     review_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return review_path
+
+
+def _build_live_write_attestation_archive(attestation_path: Path) -> tuple[bytes, str]:
+    digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"contracts/{attestation_path.name}", attestation_path.read_text(encoding="utf-8"))
+        archive.writestr(f"contracts/{attestation_path.name}.sha256", digest_path.read_text(encoding="utf-8"))
+    archive_bytes = archive_buffer.getvalue()
+    return archive_bytes, f"sha256:{sha256(archive_bytes).hexdigest()}"
+
+
+def _build_live_write_attestation_artifact_source_responses(
+    *,
+    run_id: str,
+    head_sha: str,
+    archive_bytes: bytes,
+    archive_digest: str,
+    artifact_id: int = 77,
+    artifact_name: str = "live-write-attestation",
+    run_status: str = "completed",
+    run_conclusion: str = "success",
+    run_head_sha: str | None = None,
+    workflow_run_head_sha: str | None = None,
+    artifact_expired: bool = False,
+) -> list[_FakeResponse]:
+    run_head_sha = head_sha if run_head_sha is None else run_head_sha
+    workflow_run_head_sha = head_sha if workflow_run_head_sha is None else workflow_run_head_sha
+    return [
+        _FakeResponse(
+            200,
+            {
+                "id": int(run_id),
+                "status": run_status,
+                "conclusion": run_conclusion,
+                "head_sha": run_head_sha,
+                "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id}",
+            },
+        ),
+        _FakeResponse(
+            200,
+            {
+                "total_count": 1,
+                "artifacts": [
+                    {
+                        "id": artifact_id,
+                        "name": artifact_name,
+                        "expired": artifact_expired,
+                        "digest": archive_digest,
+                        "archive_download_url": f"https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/{artifact_id}/zip",
+                        "workflow_run": {
+                            "id": int(run_id),
+                            "head_sha": workflow_run_head_sha,
+                            "head_branch": "main",
+                        },
+                    }
+                ],
+            },
+        ),
+        _FakeResponse(200, payload={}, content=archive_bytes),
+    ]
 
 
 class TestKabucomBroker(unittest.TestCase):
@@ -946,6 +1008,70 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(status.operator_ack_reason, "operator_ack_context_ok")
         self.assertTrue(status.operator_acknowledged)
 
+    def test_live_financial_write_gate_blocks_when_structured_operator_ack_context_mismatches_expected_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture_path, attestation_path, attestation = _write_live_write_attestation_artifact(tmpdir)
+            base_context = {
+                "operator_id": "qa-operator",
+                "acknowledged_at": "2099-01-01T00:00:00+09:00",
+                "expires_at": "2099-12-31T23:59:59+09:00",
+                "code_commit_sha": read_git_commit_sha(),
+                "approved_config_hash": "sha256:runtime",
+                "runtime_config_hash": "sha256:runtime",
+                "repository_full_name": read_git_remote_repository_full_name(),
+                "test_fixture_hash": hash_contract_fixture(fixture_path),
+                "live_write_attestation_hash": compute_live_write_attestation_hash(attestation),
+                "reason": "manual approval for test",
+            }
+            base_gate_status = SimpleNamespace(
+                allowed=True,
+                reason="ready",
+                runtime_config_hash="sha256:runtime",
+                approved_config_hash="sha256:runtime",
+            )
+
+            cases = [
+                ("code_commit_sha", {"code_commit_sha": "sha256:unexpected"}, "operator_ack_context_code_commit_sha_mismatch"),
+                ("approved_config_hash", {"approved_config_hash": "sha256:unexpected"}, "operator_ack_context_approved_config_hash_mismatch"),
+                ("runtime_config_hash", {"runtime_config_hash": "sha256:unexpected"}, "operator_ack_context_runtime_config_hash_mismatch"),
+                ("repository_full_name", {"repository_full_name": "example/repo"}, "operator_ack_context_repository_full_name_mismatch"),
+                ("test_fixture_hash", {"test_fixture_hash": "sha256:unexpected"}, "operator_ack_context_test_fixture_hash_mismatch"),
+                ("live_write_attestation_hash", {"live_write_attestation_hash": "sha256:unexpected"}, "operator_ack_context_live_write_attestation_hash_mismatch"),
+            ]
+
+            for label, overrides, expected_reason in cases:
+                with self.subTest(label=label):
+                    ack_context = dict(base_context)
+                    ack_context.update(overrides)
+                    with patch.dict(
+                        os.environ,
+                        {
+                            "KABUCOM_LIVE_OPERATOR_ACK": "false",
+                            "LIVE_WRITE_OPERATOR_ACK": "false",
+                            "KABUCOM_LIVE_OPERATOR_ACK_CONTEXT": json.dumps(ack_context, ensure_ascii=False),
+                        },
+                        clear=False,
+                    ), patch("core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"), patch(
+                        "core.live_order_gate.get_jpx_trading_day_status",
+                        return_value=SimpleNamespace(
+                            trading_day=True,
+                            source_ready=True,
+                            source_reason="calendar_trading_date",
+                            used_fallback=False,
+                        ),
+                    ):
+                        status = get_kabucom_live_financial_write_gate_status(
+                            base_gate_status=base_gate_status,
+                            test_fixture_path=fixture_path,
+                            live_write_attestation_path=attestation_path,
+                        )
+
+                    self.assertFalse(status.allowed)
+                    self.assertIn(expected_reason, status.reason)
+                    self.assertEqual(status.operator_ack_source, "structured_context")
+                    self.assertEqual(status.operator_ack_reason, expected_reason)
+                    self.assertFalse(status.operator_acknowledged)
+
     def test_live_financial_write_gate_blocks_when_legacy_operator_ack_paths_are_used_in_live_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
@@ -1050,6 +1176,60 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(item_map["no_lookahead_audit"].status, "not_verified")
         self.assertIn("risk_readiness:not_verified:risk_review_missing", report.reason)
 
+    def test_build_live_readiness_report_blocks_when_risk_review_status_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=[],
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            payload = json.loads(risk_review_path.read_text(encoding="utf-8"))
+            payload["status"] = "pending"
+            risk_review_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            report = build_live_readiness_report(
+                portfolio=[],
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                risk_review_path=risk_review_path,
+            )
+
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["risk_readiness"].status, "blocked")
+        self.assertEqual(item_map["risk_readiness"].reason, "risk_review_status_not_ready:pending")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "blocked")
+        self.assertIn("risk_review_not_ready_for_audit:risk_review_status_not_ready:pending", item_map["no_lookahead_audit"].reason)
+
+    def test_build_live_readiness_report_blocks_when_no_lookahead_audit_hash_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=[],
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            payload = json.loads(risk_review_path.read_text(encoding="utf-8"))
+            payload.pop("no_lookahead_audit_hash", None)
+            risk_review_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            report = build_live_readiness_report(
+                portfolio=[],
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                risk_review_path=risk_review_path,
+            )
+
+        item_map = {item.name: item for item in report.items}
+        self.assertEqual(item_map["risk_readiness"].status, "blocked")
+        self.assertEqual(item_map["risk_readiness"].reason, "risk_review_missing_fields:no_lookahead_audit_hash")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "blocked")
+        self.assertIn("risk_review_not_ready_for_audit:risk_review_missing_fields:no_lookahead_audit_hash", item_map["no_lookahead_audit"].reason)
+
     def test_build_live_readiness_report_allows_when_all_evidence_is_present(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             portfolio = [
@@ -1127,6 +1307,52 @@ class TestKabucomBroker(unittest.TestCase):
         item_map = {item.name: item for item in report.items}
         self.assertEqual(item_map["risk_readiness"].status, "blocked")
         self.assertEqual(item_map["risk_readiness"].reason, "risk_review_runtime_config_hash_mismatch")
+        self.assertEqual(item_map["no_lookahead_audit"].status, "blocked")
+        self.assertIn("risk_review_not_ready_for_audit:risk_review_runtime_config_hash_mismatch", item_map["no_lookahead_audit"].reason)
+
+    def test_build_live_readiness_report_blocks_when_risk_review_code_commit_or_approval_manifest_hash_mismatches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                }
+            ]
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+
+            cases = [
+                ("code_commit_sha", {"code_commit_sha": "sha256:unexpected-commit"}, "risk_review_code_commit_sha_mismatch"),
+                ("approval_manifest_hash", {"approval_manifest_hash": "sha256:unexpected-approval"}, "risk_review_approval_manifest_hash_mismatch"),
+            ]
+
+            for label, overrides, expected_reason in cases:
+                with self.subTest(label=label):
+                    risk_review_path = _write_live_risk_review_artifact(tmpdir, **overrides)
+                    report = build_live_readiness_report(
+                        portfolio=portfolio,
+                        startup_recovery_report=startup_recovery_report,
+                        order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                        request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                        quote_fresh=True,
+                        risk_review_path=risk_review_path,
+                        expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                        expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                        expected_code_commit_sha=read_git_commit_sha(),
+                    )
+
+                    item_map = {item.name: item for item in report.items}
+                    self.assertFalse(report.allowed)
+                    self.assertEqual(item_map["risk_readiness"].status, "blocked")
+                    self.assertEqual(item_map["risk_readiness"].reason, expected_reason)
+                    self.assertEqual(item_map["no_lookahead_audit"].status, "blocked")
+                    self.assertIn(f"risk_review_not_ready_for_audit:{expected_reason}", item_map["no_lookahead_audit"].reason)
 
     def test_entry_authorization_blocks_when_live_readiness_report_is_not_ready(self):
         status = evaluate_entry_authorization(
@@ -1329,6 +1555,215 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertTrue(second_result.valid)
         self.assertEqual(len(fake_session.calls), 6)
 
+    def test_verify_live_write_attestation_artifact_source_revalidates_when_token_changes(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            digest_path = attestation_path.with_name(attestation_path.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+
+            archive_buffer = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"contracts/{attestation_path.name}", attestation_path.read_text(encoding="utf-8"))
+                archive.writestr(f"contracts/{attestation_path.name}.sha256", digest_path.read_text(encoding="utf-8"))
+            archive_bytes = archive_buffer.getvalue()
+            archive_digest = f"sha256:{sha256(archive_bytes).hexdigest()}"
+
+            run_id = "12345"
+            fake_session = _FakeSession([
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 77,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/77/zip",
+                                "workflow_run": {
+                                    "id": int(run_id),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes),
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 77,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/77/zip",
+                                "workflow_run": {
+                                    "id": int(run_id),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes),
+            ])
+
+            first_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token-one",
+                session=fake_session,
+            )
+            second_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token-two",
+                session=fake_session,
+            )
+
+        self.assertTrue(first_result.valid)
+        self.assertTrue(second_result.valid)
+        self.assertEqual(len(fake_session.calls), 6)
+
+    def test_verify_live_write_attestation_artifact_source_revalidates_when_local_attestation_changes(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir_one, tempfile.TemporaryDirectory() as tmpdir_two:
+            _, attestation_path_one, _ = _write_live_write_attestation_artifact(tmpdir_one, ci_run_id="11111")
+            digest_path_one = attestation_path_one.with_name(attestation_path_one.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+            archive_buffer_one = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer_one, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"contracts/{attestation_path_one.name}", attestation_path_one.read_text(encoding="utf-8"))
+                archive.writestr(f"contracts/{attestation_path_one.name}.sha256", digest_path_one.read_text(encoding="utf-8"))
+            archive_bytes_one = archive_buffer_one.getvalue()
+            archive_digest_one = f"sha256:{sha256(archive_bytes_one).hexdigest()}"
+
+            _, attestation_path_two, _ = _write_live_write_attestation_artifact(tmpdir_two, ci_run_id="22222")
+            digest_path_two = attestation_path_two.with_name(attestation_path_two.name + LIVE_WRITE_ATTESTATION_DIGEST_SUFFIX)
+            archive_buffer_two = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer_two, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(f"contracts/{attestation_path_two.name}", attestation_path_two.read_text(encoding="utf-8"))
+                archive.writestr(f"contracts/{attestation_path_two.name}.sha256", digest_path_two.read_text(encoding="utf-8"))
+            archive_bytes_two = archive_buffer_two.getvalue()
+            archive_digest_two = f"sha256:{sha256(archive_bytes_two).hexdigest()}"
+
+            run_id_one = "12345"
+            run_id_two = "67890"
+            fake_session = _FakeSession([
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id_one),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id_one}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 77,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest_one,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/77/zip",
+                                "workflow_run": {
+                                    "id": int(run_id_one),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes_one),
+                _FakeResponse(
+                    200,
+                    {
+                        "id": int(run_id_two),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": read_git_commit_sha(),
+                        "html_url": f"https://github.com/yayumura/auto-trade/actions/runs/{run_id_two}",
+                    },
+                ),
+                _FakeResponse(
+                    200,
+                    {
+                        "total_count": 1,
+                        "artifacts": [
+                            {
+                                "id": 88,
+                                "name": "live-write-attestation",
+                                "expired": False,
+                                "digest": archive_digest_two,
+                                "archive_download_url": "https://api.github.com/repos/yayumura/auto-trade/actions/artifacts/88/zip",
+                                "workflow_run": {
+                                    "id": int(run_id_two),
+                                    "head_sha": read_git_commit_sha(),
+                                    "head_branch": "main",
+                                },
+                            }
+                        ],
+                    },
+                ),
+                _FakeResponse(200, payload={}, content=archive_bytes_two),
+            ])
+
+            first_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id_one,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path_one,
+                token="token",
+                session=fake_session,
+            )
+            second_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id_two,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path_two,
+                token="token",
+                session=fake_session,
+            )
+
+        self.assertTrue(first_result.valid)
+        self.assertTrue(second_result.valid)
+        self.assertEqual(len(fake_session.calls), 6)
+
     def test_verify_live_write_attestation_artifact_source_does_not_leak_token_or_response_body_on_http_failure(self):
         clear_live_write_attestation_artifact_source_cache()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1352,6 +1787,162 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(result.reason, "workflow_run_http_500")
         self.assertNotIn(secret_token, result.reason)
         self.assertNotIn("should-not-leak", result.reason)
+
+    def test_verify_live_write_attestation_artifact_source_returns_generic_failure_when_github_api_times_out(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            fake_session = _FakeSession([
+                requests.exceptions.Timeout("timed out"),
+            ])
+
+            result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id="12345",
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token",
+                session=fake_session,
+            )
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.reason, "workflow_run_request_failed")
+
+    def test_verify_live_write_attestation_artifact_source_revalidates_when_session_changes(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            archive_bytes, archive_digest = _build_live_write_attestation_archive(attestation_path)
+            run_id = "12345"
+            responses = _build_live_write_attestation_artifact_source_responses(
+                run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                archive_bytes=archive_bytes,
+                archive_digest=archive_digest,
+            )
+            first_session = _FakeSession(list(responses))
+            second_session = _FakeSession(list(responses))
+
+            first_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token",
+                session=first_session,
+            )
+            second_result = verify_live_write_attestation_artifact_source(
+                repository_full_name="yayumura/auto-trade",
+                workflow_run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                local_attestation_path=attestation_path,
+                token="token",
+                session=second_session,
+            )
+
+        self.assertTrue(first_result.valid)
+        self.assertTrue(second_result.valid)
+        self.assertEqual(len(first_session.calls), 3)
+        self.assertEqual(len(second_session.calls), 3)
+
+    def test_verify_live_write_attestation_artifact_source_rejects_inconsistent_run_and_artifact_metadata(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            archive_bytes, archive_digest = _build_live_write_attestation_archive(attestation_path)
+            run_id = "12345"
+            cases = [
+                (
+                    "workflow_run_head_sha_mismatch",
+                    _build_live_write_attestation_artifact_source_responses(
+                        run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        run_head_sha="sha256:unexpected",
+                        archive_bytes=archive_bytes,
+                        archive_digest=archive_digest,
+                    ),
+                    "workflow_run_head_sha_mismatch",
+                ),
+                (
+                    "workflow_run_conclusion_failure",
+                    _build_live_write_attestation_artifact_source_responses(
+                        run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        run_conclusion="failure",
+                        archive_bytes=archive_bytes,
+                        archive_digest=archive_digest,
+                    ),
+                    "workflow_run_conclusion_failure",
+                ),
+                (
+                    "workflow_artifact_head_sha_mismatch",
+                    _build_live_write_attestation_artifact_source_responses(
+                        run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        workflow_run_head_sha="sha256:unexpected",
+                        archive_bytes=archive_bytes,
+                        archive_digest=archive_digest,
+                    ),
+                    "workflow_artifact_head_sha_mismatch",
+                ),
+                (
+                    "workflow_artifact_expired",
+                    _build_live_write_attestation_artifact_source_responses(
+                        run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        archive_bytes=archive_bytes,
+                        archive_digest=archive_digest,
+                        artifact_expired=True,
+                    ),
+                    "workflow_artifact_expired",
+                ),
+            ]
+
+            for label, responses, expected_reason in cases:
+                with self.subTest(label=label):
+                    result = verify_live_write_attestation_artifact_source(
+                        repository_full_name="yayumura/auto-trade",
+                        workflow_run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        local_attestation_path=attestation_path,
+                        token="token",
+                        session=_FakeSession(list(responses)),
+                    )
+
+                self.assertFalse(result.valid)
+                self.assertEqual(result.reason, expected_reason)
+
+    def test_verify_live_write_attestation_artifact_source_returns_generic_failure_when_artifact_request_or_download_times_out(self):
+        clear_live_write_attestation_artifact_source_cache()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
+            archive_bytes, archive_digest = _build_live_write_attestation_archive(attestation_path)
+            run_id = "12345"
+            base_responses = _build_live_write_attestation_artifact_source_responses(
+                run_id=run_id,
+                head_sha=read_git_commit_sha(),
+                archive_bytes=archive_bytes,
+                archive_digest=archive_digest,
+            )
+
+            cases = [
+                ("workflow_run_artifacts_request_failed", [base_responses[0], requests.exceptions.Timeout("timed out")]),
+                ("workflow_artifact_download_request_failed", [base_responses[0], base_responses[1], requests.exceptions.Timeout("timed out")]),
+            ]
+
+            for label, responses in cases:
+                with self.subTest(label=label):
+                    result = verify_live_write_attestation_artifact_source(
+                        repository_full_name="yayumura/auto-trade",
+                        workflow_run_id=run_id,
+                        head_sha=read_git_commit_sha(),
+                        local_attestation_path=attestation_path,
+                        token="token",
+                        session=_FakeSession(list(responses)),
+                    )
+
+                self.assertFalse(result.valid)
+                self.assertEqual(result.reason, label)
 
     def test_live_financial_write_gate_blocks_when_github_artifact_source_verification_is_required_and_token_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
