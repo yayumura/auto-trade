@@ -13,7 +13,12 @@ import pandas as pd
 from types import SimpleNamespace
 
 from core.config import RUNTIME_LIVE_ORDER_CONFIG_HASH
-from core.kabucom_broker import KabucomBroker, RequestBudgetBucket, BrokerOperationClass
+from core.kabucom_broker import (
+    MAX_RATE_LIMIT_RETRY_AFTER_SECONDS,
+    KabucomBroker,
+    RequestBudgetBucket,
+    BrokerOperationClass,
+)
 from core.kabucom_broker import BrokerEndpointConfig
 from core.kabucom_broker import BrokerEnvironment
 from core.kabu_launcher import _wait_for_api_server, check_api_health
@@ -710,6 +715,41 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertIsNotNone(response)
         self.assertEqual(response.status_code, 200)
+
+    def test_api_request_caps_retry_after_wait_seconds(self):
+        session = _FakeSession([
+            _FakeResponse(429, text="rate limited", headers={"Retry-After": "600"}),
+        ])
+        broker = _make_broker(session)
+
+        capped_wait = broker._resolve_rate_limit_wait_seconds(session.responses[0], delay=1)
+
+        self.assertEqual(capped_wait, MAX_RATE_LIMIT_RETRY_AFTER_SECONDS)
+
+    def test_sleep_with_shutdown_interrupt_stops_without_waiting_when_shutdown_requested(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.shutdown_requested = True
+
+        with patch("core.kabucom_broker.time.sleep", return_value=None) as sleep_mock:
+            self.assertFalse(broker._sleep_with_shutdown_interrupt(5.0))
+
+        sleep_mock.assert_not_called()
+
+    def test_api_request_stops_get_retry_when_shutdown_requested(self):
+        session = _FakeSession([
+            _FakeResponse(429, text="rate limited"),
+            _FakeResponse(200, {"ok": True}),
+        ])
+        broker = _make_broker(session)
+        broker.shutdown_requested = True
+
+        with patch("core.kabucom_broker.time.sleep", return_value=None) as sleep_mock:
+            response = broker._api_request("GET", "orders")
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertIsNotNone(response)
+        self.assertEqual(response.status_code, 429)
+        sleep_mock.assert_not_called()
 
     def test_api_request_does_not_retry_post_on_rate_limit(self):
         session = _FakeSession([_FakeResponse(429, text="rate limited")])

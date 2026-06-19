@@ -88,6 +88,8 @@ REQUEST_BUDGET_LIMITS = {
     RequestBudgetBucket.REGISTRY: 3000,
     RequestBudgetBucket.OTHER: 1200,
 }
+MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 60.0
+RATE_LIMIT_SLEEP_CHECK_INTERVAL_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -306,6 +308,38 @@ class KabucomBroker(BaseBroker):
             retry_at = retry_at.astimezone(JST)
         return max(0.0, (retry_at - datetime.now(JST)).total_seconds())
 
+    def _resolve_rate_limit_wait_seconds(self, response, delay: float) -> float:
+        retry_after = self._resolve_retry_after_seconds(response)
+        if retry_after is None:
+            retry_after = delay * 2 if delay > 0 else 1.0
+        return min(max(0.0, float(retry_after)), MAX_RATE_LIMIT_RETRY_AFTER_SECONDS)
+
+    def _is_shutdown_requested(self) -> bool:
+        if bool(getattr(self, "shutdown_requested", False)):
+            return True
+
+        shutdown_checker = getattr(self, "shutdown_requested_checker", None)
+        if callable(shutdown_checker):
+            try:
+                return bool(shutdown_checker())
+            except Exception:
+                pass
+        return False
+
+    def _sleep_with_shutdown_interrupt(self, total_seconds: float) -> bool:
+        remaining = max(0.0, float(total_seconds))
+        if remaining <= 0:
+            return not self._is_shutdown_requested()
+
+        while True:
+            if self._is_shutdown_requested():
+                return False
+            sleep_for = min(RATE_LIMIT_SLEEP_CHECK_INTERVAL_SECONDS, remaining)
+            if sleep_for <= 0:
+                return not self._is_shutdown_requested()
+            time.sleep(sleep_for)
+            remaining -= sleep_for
+
     def _get_headers(self, force_refresh=False):
         if not self.token or force_refresh:
             self._authenticate()
@@ -342,11 +376,17 @@ class KabucomBroker(BaseBroker):
                         return res
                     elif res.status_code == 429:
                         if allow_transient_retry:
-                            retry_after = self._resolve_retry_after_seconds(res)
-                            if retry_after is None:
-                                retry_after = delay * 2 if delay > 0 else 1.0
-                            print(f"⚠️ API Rate Limited (429). Retrying in {float(retry_after):.1f}s...")
-                            time.sleep(max(0.0, float(retry_after)))
+                            retry_after = self._resolve_rate_limit_wait_seconds(res, delay)
+                            print(
+                                f"⚠️ API Rate Limited (429). Retrying in {float(retry_after):.1f}s "
+                                f"(capped at {MAX_RATE_LIMIT_RETRY_AFTER_SECONDS:.1f}s)..."
+                            )
+                            if self._is_shutdown_requested():
+                                print("⚠️ API Rate Limited wait interrupted by shutdown request before sleep.")
+                                return res
+                            if not self._sleep_with_shutdown_interrupt(retry_after):
+                                print("⚠️ API Rate Limited wait interrupted by shutdown request.")
+                                return res
                             continue
                         return res
                     elif res.status_code in [500, 502, 503, 504]:
