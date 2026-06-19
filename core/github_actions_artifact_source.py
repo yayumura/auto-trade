@@ -237,7 +237,10 @@ def verify_live_write_attestation_artifact_source(
     }
 
     run_url = f"{GITHUB_API_BASE_URL}/repos/{repository}/actions/runs/{run_id_text}"
-    run_response = http.get(run_url, headers=headers, timeout=timeout_sec)
+    try:
+        run_response = http.get(run_url, headers=headers, timeout=timeout_sec)
+    except requests.RequestException:
+        return _failure("workflow_run_request_failed")
     if run_response.status_code != 200:
         return _failure(f"workflow_run_http_{run_response.status_code}")
     try:
@@ -273,7 +276,15 @@ def verify_live_write_attestation_artifact_source(
         )
 
     artifacts_url = f"{GITHUB_API_BASE_URL}/repos/{repository}/actions/runs/{run_id_text}/artifacts"
-    artifacts_response = http.get(artifacts_url, headers=headers, timeout=timeout_sec)
+    try:
+        artifacts_response = http.get(artifacts_url, headers=headers, timeout=timeout_sec)
+    except requests.RequestException:
+        return _failure(
+            "workflow_run_artifacts_request_failed",
+            workflow_run_id=_coerce_int(run_id_text),
+            workflow_run_status=run_status or None,
+            workflow_run_conclusion=run_conclusion or None,
+        )
     if artifacts_response.status_code != 200:
         return _failure(
             f"workflow_run_artifacts_http_{artifacts_response.status_code}",
@@ -357,7 +368,18 @@ def verify_live_write_attestation_artifact_source(
             artifact_digest=artifact_digest,
         )
 
-    archive_response = http.get(archive_url, headers=headers, timeout=timeout_sec, allow_redirects=True)
+    try:
+        archive_response = http.get(archive_url, headers=headers, timeout=timeout_sec, allow_redirects=True)
+    except requests.RequestException:
+        return _failure(
+            "workflow_artifact_download_request_failed",
+            workflow_run_id=_coerce_int(run_id_text),
+            workflow_run_status=run_status or None,
+            workflow_run_conclusion=run_conclusion or None,
+            artifact_id=artifact_id_int,
+            artifact_name=artifact_name,
+            artifact_digest=artifact_digest,
+        )
     if archive_response.status_code != 200:
         return _failure(
             f"workflow_artifact_download_http_{archive_response.status_code}",

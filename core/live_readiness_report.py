@@ -458,6 +458,15 @@ def _build_no_lookahead_item(
             return _make_item(name, LIVE_READINESS_STATUS_NOT_VERIFIED, "risk_review_missing", (), checked_at)
         return _make_item(name, LIVE_READINESS_STATUS_BLOCKED, "risk_review_unavailable_for_audit", (), checked_at)
 
+    if not risk_review_item.is_ready:
+        return _make_item(
+            name,
+            LIVE_READINESS_STATUS_BLOCKED,
+            f"risk_review_not_ready_for_audit:{risk_review_item.reason}",
+            risk_review_item.evidence,
+            checked_at,
+        )
+
     no_lookahead_audit_hash = _as_text(risk_review_payload.get("no_lookahead_audit_hash"))
     if not no_lookahead_audit_hash:
         return _make_item(name, LIVE_READINESS_STATUS_BLOCKED, "no_lookahead_audit_hash_missing", risk_review_item.evidence, checked_at)
