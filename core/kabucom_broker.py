@@ -1,5 +1,4 @@
 import os
-import sys
 import requests
 import json
 import pandas as pd
@@ -323,13 +322,6 @@ class KabucomBroker(BaseBroker):
         if callable(shutdown_checker):
             try:
                 return bool(shutdown_checker())
-            except Exception:
-                pass
-
-        auto_trade_module = sys.modules.get("auto_trade")
-        if auto_trade_module is not None:
-            try:
-                return bool(getattr(auto_trade_module, "SHUTDOWN_REQUESTED", False))
             except Exception:
                 pass
         return False

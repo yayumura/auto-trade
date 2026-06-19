@@ -1795,6 +1795,7 @@ def _main_exec():
             print("[SIM] 【シミュレーションモード】ローカルCSVベースで実行します")
             broker = SimulationBroker()
             is_sim = True
+        broker.shutdown_requested_checker = lambda: SHUTDOWN_REQUESTED
     except Exception as e:
         msg = f"❌ 【致命的エラー】証券会社APIの初期化に失敗しました: {e}"
         print(msg)
