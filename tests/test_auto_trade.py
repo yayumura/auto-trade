@@ -1712,6 +1712,27 @@ def test_is_board_quote_snapshot_fresh_rejects_received_at_only_quotes():
     assert not auto_trade._is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=600)
 
 
+def test_describe_board_quote_snapshot_freshness_returns_evidence():
+    boards = {
+        "1000": {
+            "quote_timestamp": pd.Timestamp("2026-04-21 09:10:00", tz="Asia/Tokyo"),
+            "received_at": pd.Timestamp("2026-04-21 09:10:05", tz="Asia/Tokyo"),
+        }
+    }
+    reference_time = pd.Timestamp("2026-04-21 09:14:00", tz="Asia/Tokyo")
+
+    fresh, evidence = auto_trade._describe_board_quote_snapshot_freshness(boards, reference_time, max_age_seconds=600)
+
+    assert fresh
+    assert "reference_time=2026-04-21T09:14:00+09:00" in evidence
+    assert "max_age_seconds=600" in evidence
+    assert "1000:source=quote_timestamp" in evidence
+    assert "1000:quote_timestamp=2026-04-21T09:10:00+09:00" in evidence
+    assert "1000:received_at=2026-04-21T09:10:05+09:00" in evidence
+    assert "1000:age_seconds=240" in evidence
+    assert "board_snapshot_fresh=true" in evidence
+
+
 def test_get_market_phase_treats_half_day_as_morning_only_until_midday_close():
     assert auto_trade.get_market_phase(auto_trade.datetime.time(10, 0), half_day=True) == auto_trade.MarketPhase.MORNING
     assert auto_trade.get_market_phase(auto_trade.datetime.time(11, 30), half_day=True) == auto_trade.MarketPhase.CLOSING_TIME

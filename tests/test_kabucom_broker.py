@@ -59,7 +59,7 @@ from core.live_write_attestation import (
 )
 from core.live_approval_manifest import compute_live_approval_manifest_hash
 from core.startup_recovery import build_startup_recovery_report
-from core.order_journal import build_order_journal_replay_summary
+from core.order_journal import append_order_journal, build_order_journal_replay_summary
 from core.sim_broker import SimulationBroker
 from scripts import build_live_write_attestation as build_live_write_attestation_script
 
@@ -1232,27 +1232,59 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_build_live_readiness_report_allows_when_all_evidence_is_present(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            journal_path = Path(tmpdir) / "order_journal.jsonl"
+            append_order_journal(
+                {"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1", "kind": "market"},
+                path=str(journal_path),
+            )
+            append_order_journal(
+                {
+                    "event": "FILLED",
+                    "intent_id": "intent-1",
+                    "order_id": "ORDER-1",
+                    "execution_ids": ["EX-1"],
+                    "kind": "market",
+                },
+                path=str(journal_path),
+            )
+            summary = build_order_journal_replay_summary(str(journal_path))
             portfolio = [
                 {
                     "code": "1234",
                     "ownership": "MANAGED_BY_BOT",
                     "position_lot_key_source": "execution_id",
                     "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
                 }
             ]
             startup_recovery_report = build_startup_recovery_report(
                 portfolio=portfolio,
-                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
-                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                active_orders_info={
+                    "orders": [
+                        {
+                            "ID": "STOP-1",
+                        }
+                    ],
+                    "has_unknown": False,
+                    "unresolved_order_ids": [],
+                },
+                order_journal_summary=summary,
                 wallet_snapshot_incomplete=False,
             )
             risk_review_path = _write_live_risk_review_artifact(tmpdir)
             report = build_live_readiness_report(
                 portfolio=portfolio,
                 startup_recovery_report=startup_recovery_report,
-                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                order_journal_summary=summary,
                 request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
                 quote_fresh=True,
+                quote_freshness_evidence=(
+                    "reference_time=2026-04-21T09:15:00+09:00",
+                    "1000:source=quote_timestamp",
+                    "1000:quote_timestamp=2026-04-21T09:14:00+09:00",
+                    "1000:received_at=2026-04-21T09:14:05+09:00",
+                    "1000:age_seconds=60",
+                ),
                 risk_review_path=risk_review_path,
                 expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
                 expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
@@ -1266,10 +1298,184 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(item_map["partial_fill_unresolved"].status, "ready")
         self.assertEqual(item_map["execution_id_truth"].status, "ready")
         self.assertEqual(item_map["quote_freshness"].status, "ready")
+        self.assertIn("reference_time=2026-04-21T09:15:00+09:00", item_map["quote_freshness"].evidence)
+        self.assertIn("1000:quote_timestamp=2026-04-21T09:14:00+09:00", item_map["quote_freshness"].evidence)
+        self.assertIn("1000:received_at=2026-04-21T09:14:05+09:00", item_map["quote_freshness"].evidence)
         self.assertEqual(item_map["journal_reconciliation"].status, "ready")
         self.assertEqual(item_map["request_budget"].status, "ready")
         self.assertEqual(item_map["risk_readiness"].status, "ready")
         self.assertEqual(item_map["no_lookahead_audit"].status, "ready")
+
+    def test_build_live_readiness_report_blocks_when_journal_reconciliation_is_dirty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            journal_path = Path(tmpdir) / "order_journal.jsonl"
+            append_order_journal(
+                {"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1", "kind": "market"},
+                path=str(journal_path),
+            )
+            append_order_journal(
+                {
+                    "event": "FILLED",
+                    "intent_id": "intent-2",
+                    "order_id": "ORDER-2",
+                    "execution_ids": ["EX-2"],
+                    "kind": "market",
+                },
+                path=str(journal_path),
+            )
+            append_order_journal(
+                {"event": "ACCEPTED", "intent_id": "intent-stop", "order_id": "STOP-1", "kind": "stop"},
+                path=str(journal_path),
+            )
+
+            portfolio = [
+                {
+                    "code": "1234",
+                    "ownership": "MANAGED_BY_BOT",
+                    "position_lot_key_source": "execution_id",
+                    "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
+                }
+            ]
+            summary = build_order_journal_replay_summary(str(journal_path))
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=portfolio,
+                active_orders_info={
+                    "orders": [
+                        {
+                            "ID": "STOP-1",
+                        }
+                    ],
+                    "has_unknown": False,
+                    "unresolved_order_ids": [],
+                },
+                order_journal_summary=summary,
+                wallet_snapshot_incomplete=False,
+            )
+            risk_review_path = _write_live_risk_review_artifact(tmpdir)
+            report = build_live_readiness_report(
+                portfolio=portfolio,
+                startup_recovery_report=startup_recovery_report,
+                order_journal_summary=summary,
+                request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                quote_fresh=True,
+                quote_freshness_evidence=("reference_time=2026-04-21T09:15:00+09:00", "board_snapshot_fresh=true"),
+                risk_review_path=risk_review_path,
+                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                expected_code_commit_sha=read_git_commit_sha(),
+            )
+
+        item_map = {item.name: item for item in report.items}
+        self.assertFalse(report.allowed)
+        self.assertEqual(item_map["journal_reconciliation"].status, "blocked")
+        self.assertIn("accepted_order_missing_at_broker=1", item_map["journal_reconciliation"].evidence)
+        self.assertIn("broker_position_without_journal=1", item_map["journal_reconciliation"].evidence)
+        self.assertIn("journal_filled_without_position=1", item_map["journal_reconciliation"].evidence)
+        self.assertIn("unconfirmed_stop_replay=1", item_map["journal_reconciliation"].evidence)
+
+    def test_build_live_readiness_report_blocks_when_execution_id_truth_is_aggregate_or_marked_for_review(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            startup_recovery_report = build_startup_recovery_report(
+                portfolio=[],
+                active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
+                order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                wallet_snapshot_incomplete=False,
+            )
+
+            cases = [
+                (
+                    "aggregate_source",
+                    [
+                        {
+                            "code": "1234",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_ids",
+                            "position_lot_key_needs_review": False,
+                        }
+                    ],
+                    "execution_id_truth_aggregate_lot:1234",
+                ),
+                (
+                    "aggregate_execution_ids",
+                    [
+                        {
+                            "code": "1234",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_id",
+                            "position_lot_key_needs_review": False,
+                            "execution_id": "EX-1",
+                            "execution_ids": ("EX-1", "EX-2"),
+                        }
+                    ],
+                    "execution_id_truth_aggregate_lot:1234",
+                ),
+                (
+                    "manual_review_flag",
+                    [
+                        {
+                            "code": "1234",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_id",
+                            "position_lot_key_needs_review": True,
+                            "execution_id": "EX-1",
+                        }
+                    ],
+                    "execution_id_truth_needs_review:1234",
+                ),
+                (
+                    "duplicate_execution_id",
+                    [
+                        {
+                            "code": "1234",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_id",
+                            "position_lot_key_needs_review": False,
+                            "execution_id": "EX-1",
+                        },
+                        {
+                            "code": "5678",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_id",
+                            "position_lot_key_needs_review": False,
+                            "execution_id": "EX-1",
+                        },
+                    ],
+                    "execution_id_truth_duplicate_execution_id:1234,5678",
+                ),
+                (
+                    "missing_execution_id",
+                    [
+                        {
+                            "code": "1234",
+                            "ownership": "MANAGED_BY_BOT",
+                            "position_lot_key_source": "execution_id",
+                            "position_lot_key_needs_review": False,
+                        }
+                    ],
+                    "execution_id_truth_needs_review:1234",
+                ),
+            ]
+
+            for label, portfolio, expected_reason in cases:
+                with self.subTest(label=label):
+                    risk_review_path = _write_live_risk_review_artifact(tmpdir)
+                    report = build_live_readiness_report(
+                        portfolio=portfolio,
+                        startup_recovery_report=startup_recovery_report,
+                        order_journal_summary=build_order_journal_replay_summary(str(Path(tmpdir) / "order_journal.jsonl")),
+                        request_budget_counts={bucket: 0 for bucket in RequestBudgetBucket},
+                        quote_fresh=True,
+                        risk_review_path=risk_review_path,
+                        expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                        expected_approval_manifest_hash=compute_live_approval_manifest_hash(),
+                        expected_code_commit_sha=read_git_commit_sha(),
+                    )
+
+                    item_map = {item.name: item for item in report.items}
+                    self.assertFalse(report.allowed)
+                    self.assertEqual(item_map["execution_id_truth"].status, "blocked")
+                    self.assertIn(expected_reason, item_map["execution_id_truth"].reason)
 
     def test_build_live_readiness_report_blocks_when_risk_review_runtime_config_hash_mismatches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1279,6 +1485,7 @@ class TestKabucomBroker(unittest.TestCase):
                     "ownership": "MANAGED_BY_BOT",
                     "position_lot_key_source": "execution_id",
                     "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
                 }
             ]
             startup_recovery_report = build_startup_recovery_report(
@@ -1318,6 +1525,7 @@ class TestKabucomBroker(unittest.TestCase):
                     "ownership": "MANAGED_BY_BOT",
                     "position_lot_key_source": "execution_id",
                     "position_lot_key_needs_review": False,
+                    "execution_id": "EX-1",
                 }
             ]
             startup_recovery_report = build_startup_recovery_report(
@@ -2983,7 +3191,9 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertFalse(result["unresolved"])
         self.assertEqual(result["execution_status"], "completed")
         self.assertEqual(result["exit_execution_status"], "completed")
-        self.assertTrue(any(event.get("event") == "FILLED" for event in journal_events))
+        filled_event = next(event for event in journal_events if event.get("event") == "FILLED")
+        self.assertEqual(filled_event["execution_ids"], ("EX-1", "EX-2"))
+        self.assertEqual(filled_event["execution_id"], "EX-1")
 
     def test_wait_for_execution_returns_unresolved_partial_fill_after_timeout(self):
         details_iter = iter([
@@ -3312,6 +3522,8 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertGreaterEqual(len(journal_events), 2)
         self.assertEqual(journal_events[0]["event"], "CANCEL_REQUESTED")
         self.assertEqual(journal_events[1]["event"], "FILLED_BEFORE_CANCEL")
+        self.assertEqual(journal_events[1]["execution_ids"], ("EX-1",))
+        self.assertEqual(journal_events[1]["execution_id"], "EX-1")
         self.assertEqual(captured_cancel["json"]["OrderID"], "ORDER-1")
         self.assertNotIn("OrderId", captured_cancel["json"])
 

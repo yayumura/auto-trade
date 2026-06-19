@@ -38,6 +38,8 @@ class OrderJournalReplaySummary:
     parsed_lines: int
     corrupt_lines: int
     intents: tuple[OrderJournalIntentReplay, ...]
+    corrupt_final_line_count: int = 0
+    corrupt_middle_line_count: int = 0
 
     @property
     def unresolved_intents(self) -> tuple[OrderJournalIntentReplay, ...]:
@@ -89,6 +91,17 @@ def _journal_tracking_key(payload: dict[str, Any], line_number: int) -> str:
     return f"line:{line_number}:{event_name}:{kind}:{symbol}"
 
 
+def _count_corrupt_line_categories(total_lines: int, parsed_line_numbers: set[int]) -> tuple[int, int]:
+    if total_lines <= 0:
+        return 0, 0
+    missing_line_numbers = sorted(set(range(1, total_lines + 1)) - set(parsed_line_numbers))
+    if not missing_line_numbers:
+        return 0, 0
+    corrupt_final_line_count = 1 if total_lines in missing_line_numbers else 0
+    corrupt_middle_line_count = max(0, len(missing_line_numbers) - corrupt_final_line_count)
+    return corrupt_final_line_count, corrupt_middle_line_count
+
+
 def _journal_unresolved_reason(event_name: str) -> str | None:
     if event_name == "PLANNED":
         return "planned_not_accepted"
@@ -129,6 +142,12 @@ def build_order_journal_replay_summary(path: str = ORDER_JOURNAL_FILE) -> OrderJ
     if journal_path.exists():
         with journal_path.open("r", encoding="utf-8") as f:
             total_lines = sum(1 for _ in f)
+
+    parsed_line_numbers = {
+        int(event.get("__line_number__") or 0)
+        for event in events
+        if int(event.get("__line_number__") or 0) > 0
+    }
 
     grouped: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -209,9 +228,15 @@ def build_order_journal_replay_summary(path: str = ORDER_JOURNAL_FILE) -> OrderJ
         item.latest_sequence if item.latest_sequence is not None else 0,
         item.tracking_key,
     ))
+    corrupt_final_line_count, corrupt_middle_line_count = _count_corrupt_line_categories(
+        total_lines,
+        parsed_line_numbers,
+    )
     return OrderJournalReplaySummary(
         total_lines=total_lines,
         parsed_lines=len(events),
         corrupt_lines=max(0, total_lines - len(events)),
         intents=tuple(intents),
+        corrupt_final_line_count=corrupt_final_line_count,
+        corrupt_middle_line_count=corrupt_middle_line_count,
     )
