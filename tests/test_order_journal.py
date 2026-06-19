@@ -84,8 +84,80 @@ def test_build_startup_recovery_report_blocks_on_corrupt_journal_lines(tmp_path:
     )
 
     assert summary.corrupt_lines == 1
+    assert summary.corrupt_final_line_count == 1
+    assert summary.corrupt_middle_line_count == 0
     assert report.needs_manual_review is True
     assert "journal_corrupt_lines:1" in report.blocking_reasons
+    assert "journal_corrupt_final_lines:1" in report.blocking_reasons
+
+
+def test_build_order_journal_replay_summary_distinguishes_corrupt_final_and_middle_lines(tmp_path: Path):
+    journal_path = tmp_path / "order_journal.jsonl"
+    append_order_journal({"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1"}, path=str(journal_path))
+    with journal_path.open("a", encoding="utf-8") as f:
+        f.write("{middle-corrupt}\n")
+    append_order_journal(
+        {"event": "FILLED", "intent_id": "intent-1", "order_id": "ORDER-1", "execution_ids": ["EX-1"]},
+        path=str(journal_path),
+    )
+    with journal_path.open("a", encoding="utf-8") as f:
+        f.write("{final-corrupt}\n")
+
+    summary = build_order_journal_replay_summary(str(journal_path))
+
+    assert summary.total_lines == 4
+    assert summary.parsed_lines == 2
+    assert summary.corrupt_lines == 2
+    assert summary.corrupt_middle_line_count == 1
+    assert summary.corrupt_final_line_count == 1
+
+
+def test_build_startup_recovery_report_blocks_on_journal_reconciliation_mismatches(tmp_path: Path):
+    journal_path = tmp_path / "order_journal.jsonl"
+    append_order_journal({"event": "ACCEPTED", "intent_id": "intent-1", "order_id": "ORDER-1", "kind": "market"}, path=str(journal_path))
+    append_order_journal(
+        {
+            "event": "FILLED",
+            "intent_id": "intent-2",
+            "order_id": "ORDER-2",
+            "execution_ids": ["EX-2"],
+            "kind": "market",
+        },
+        path=str(journal_path),
+    )
+    append_order_journal({"event": "ACCEPTED", "intent_id": "intent-stop", "order_id": "STOP-1", "kind": "stop"}, path=str(journal_path))
+
+    summary = build_order_journal_replay_summary(str(journal_path))
+    report = build_startup_recovery_report(
+        portfolio=[
+            {
+                "code": "1000",
+                "ownership": "MANAGED_BY_BOT",
+                "execution_id": "EX-1",
+            }
+        ],
+        active_orders_info={
+            "orders": [
+                {
+                    "ID": "STOP-1",
+                }
+            ],
+            "has_unknown": False,
+            "unresolved_order_ids": [],
+        },
+        order_journal_summary=summary,
+        wallet_snapshot_incomplete=False,
+    )
+
+    assert report.accepted_order_missing_at_broker_count == 1
+    assert report.broker_position_without_journal_count == 1
+    assert report.journal_filled_without_position_count == 1
+    assert report.unconfirmed_stop_replay_count == 1
+    assert report.needs_manual_review is True
+    assert "accepted_order_missing_at_broker:1" in report.blocking_reasons
+    assert "broker_position_without_journal:1" in report.blocking_reasons
+    assert "journal_filled_without_position:1" in report.blocking_reasons
+    assert "unconfirmed_stop_replay:1" in report.blocking_reasons
 
 
 def test_build_startup_recovery_report_blocks_on_unresolved_active_orders():

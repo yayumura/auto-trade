@@ -401,6 +401,7 @@ def _build_live_readiness_report(
     startup_recovery_report,
     order_journal_summary,
     quote_fresh,
+    quote_freshness_evidence=None,
     checked_at=None,
 ):
     request_budget_counts = getattr(broker, "request_budget_counts", None)
@@ -410,6 +411,7 @@ def _build_live_readiness_report(
         order_journal_summary=order_journal_summary,
         request_budget_counts=request_budget_counts,
         quote_fresh=quote_fresh,
+        quote_freshness_evidence=quote_freshness_evidence,
         risk_review_path=_resolve_live_risk_review_path(),
         checked_at=checked_at,
     )
@@ -627,28 +629,57 @@ def _coerce_jst_datetime(value):
     return value.astimezone(JST)
 
 
-def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
+def _describe_board_quote_snapshot_freshness(boards, reference_time, max_age_seconds=300):
     reference_dt = _coerce_jst_datetime(reference_time)
     if reference_dt is None:
-        return False
+        return False, ("reference_time_missing",)
+
+    evidence = [
+        f"reference_time={reference_dt.isoformat()}",
+        f"max_age_seconds={int(max_age_seconds)}",
+    ]
     if not boards:
-        return False
+        evidence.append("board_snapshot_missing")
+        return False, tuple(evidence)
 
     max_age = datetime.timedelta(seconds=int(max_age_seconds))
-    for board in boards.values():
+    for code, board in boards.items():
+        code_text = str(code or "").strip() or "unknown"
         if not isinstance(board, dict):
-            return False
-        quote_dt = _coerce_jst_datetime(board.get("quote_timestamp") or board.get("current_price_timestamp"))
+            evidence.append(f"{code_text}:invalid_board")
+            return False, tuple(evidence)
+        raw_quote_timestamp = board.get("quote_timestamp")
+        source = "quote_timestamp"
+        if raw_quote_timestamp is None:
+            raw_quote_timestamp = board.get("current_price_timestamp")
+            source = "current_price_timestamp" if raw_quote_timestamp is not None else "missing"
+        quote_dt = _coerce_jst_datetime(raw_quote_timestamp)
+        received_dt = _coerce_jst_datetime(board.get("received_at"))
+        evidence.append(f"{code_text}:source={source}")
+        evidence.append(f"{code_text}:quote_timestamp={quote_dt.isoformat() if quote_dt else 'missing'}")
+        evidence.append(f"{code_text}:received_at={received_dt.isoformat() if received_dt else 'missing'}")
         if quote_dt is None:
             # 受信時刻だけでは価格時刻の freshness を保証できないので、entry では落とす。
-            return False
+            evidence.append(f"{code_text}:missing_quote_timestamp")
+            return False, tuple(evidence)
         if quote_dt.date() != reference_dt.date():
-            return False
+            evidence.append(f"{code_text}:cross_day_quote_timestamp")
+            return False, tuple(evidence)
         if quote_dt > reference_dt + datetime.timedelta(minutes=1):
-            return False
+            evidence.append(f"{code_text}:quote_timestamp_future")
+            return False, tuple(evidence)
+        age_seconds = int((reference_dt - quote_dt).total_seconds())
+        evidence.append(f"{code_text}:age_seconds={age_seconds}")
         if reference_dt - quote_dt > max_age:
-            return False
-    return True
+            evidence.append(f"{code_text}:stale_over_max_age")
+            return False, tuple(evidence)
+
+    evidence.append("board_snapshot_fresh=true")
+    return True, tuple(evidence)
+
+
+def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
+    return _describe_board_quote_snapshot_freshness(boards, reference_time, max_age_seconds=max_age_seconds)[0]
 
 
 def _find_live_managed_position_for_entry(broker, code, execution_id=None, execution_ids=None, shares=None):
@@ -2211,12 +2242,18 @@ def _main_exec():
         if boards:
             record_intraday_snapshots(server_datetime, boards, realtime_buffers)
 
+        quote_fresh_ok = True
+        quote_freshness_evidence = None
+        if not is_sim:
+            quote_fresh_ok, quote_freshness_evidence = _describe_board_quote_snapshot_freshness(boards, server_datetime)
+
         live_readiness_report = _build_live_readiness_report(
             broker=broker,
             portfolio=portfolio,
             startup_recovery_report=loop_recovery_report,
             order_journal_summary=current_order_journal_replay_summary,
-            quote_fresh=is_sim or _is_board_quote_snapshot_fresh(boards, server_datetime),
+            quote_fresh=quote_fresh_ok if not is_sim else True,
+            quote_freshness_evidence=quote_freshness_evidence,
             checked_at=server_datetime,
         )
         account["live_readiness_allowed"] = live_readiness_report.allowed
@@ -2300,7 +2337,7 @@ def _main_exec():
             wallet_snapshot_fresh=is_sim or not loop_recovery_report.wallet_snapshot_incomplete,
             positions_snapshot_fresh=is_sim or positions_snapshot_fresh,
             orders_snapshot_fresh=is_sim or active_orders_info is not None,
-            quote_fresh=is_sim or _is_board_quote_snapshot_fresh(boards, server_datetime),
+            quote_fresh=is_sim or quote_fresh_ok,
             registry_ready=is_sim or registry_sync_ok,
             critical_state_valid=not loop_recovery_report.needs_manual_review,
             session_allows_entry=(

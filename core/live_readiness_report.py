@@ -117,6 +117,24 @@ def _as_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalize_execution_ids(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    for item in raw_values:
+        text = _as_text(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return tuple(normalized)
+
+
 def _read_json_payload(path: str | Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
@@ -170,23 +188,59 @@ def _portfolio_execution_id_truth(
     if not managed_positions:
         return LIVE_READINESS_STATUS_READY, "managed_positions_empty", ("managed_positions=0",)
 
-    review_needed: list[str] = []
+    aggregate_lot_codes: list[str] = []
+    review_needed_codes: list[str] = []
+    duplicate_execution_id_codes: list[str] = []
     evidence: list[str] = []
+    seen_execution_ids: dict[str, str] = {}
     for position in managed_positions:
         code = _as_text(position.get("code")) or _as_text(position.get("symbol")) or "unknown"
         source = _as_text(position.get("position_lot_key_source"))
         needs_review = bool(position.get("position_lot_key_needs_review"))
-        if source:
-            evidence.append(f"{code}:{source}")
-        else:
-            evidence.append(f"{code}:missing")
-        if needs_review or source not in {"execution_id", "execution_ids"}:
-            review_needed.append(code)
+        execution_id = _as_text(position.get("execution_id"))
+        execution_ids = _normalize_execution_ids(position.get("execution_ids"))
 
-    if review_needed:
+        evidence.append(f"{code}:source={source or 'missing'}")
+        evidence.append(f"{code}:execution_id={execution_id or 'missing'}")
+        evidence.append(f"{code}:execution_ids={','.join(execution_ids) if execution_ids else 'none'}")
+
+        if source == "execution_ids" or len(execution_ids) > 1:
+            aggregate_lot_codes.append(code)
+            for exec_id in execution_ids:
+                previous_code = seen_execution_ids.get(exec_id)
+                if previous_code is not None and previous_code != code:
+                    duplicate_execution_id_codes.extend([previous_code, code])
+                else:
+                    seen_execution_ids[exec_id] = code
+            continue
+        if needs_review or source != "execution_id":
+            review_needed_codes.append(code)
+            continue
+        if execution_ids and execution_id and execution_id not in execution_ids:
+            review_needed_codes.append(code)
+            continue
+        if not execution_id:
+            review_needed_codes.append(code)
+            continue
+
+        previous_code = seen_execution_ids.get(execution_id)
+        if previous_code is not None and previous_code != code:
+            duplicate_execution_id_codes.extend([previous_code, code])
+        else:
+            seen_execution_ids[execution_id] = code
+
+    if aggregate_lot_codes or review_needed_codes or duplicate_execution_id_codes:
+        reason_parts: list[str] = []
+        if aggregate_lot_codes:
+            reason_parts.append(f"execution_id_truth_aggregate_lot:{','.join(aggregate_lot_codes[:10])}")
+        if review_needed_codes:
+            reason_parts.append(f"execution_id_truth_needs_review:{','.join(review_needed_codes[:10])}")
+        if duplicate_execution_id_codes:
+            unique_duplicate_codes = list(dict.fromkeys(duplicate_execution_id_codes))
+            reason_parts.append(f"execution_id_truth_duplicate_execution_id:{','.join(unique_duplicate_codes[:10])}")
         return (
             LIVE_READINESS_STATUS_BLOCKED,
-            f"execution_id_truth_needs_review:{','.join(review_needed[:10])}",
+            " | ".join(reason_parts),
             tuple(evidence),
         )
     return LIVE_READINESS_STATUS_READY, "execution_id_truth_verified", tuple(evidence)
@@ -248,11 +302,16 @@ def _build_execution_id_item(
 def _build_quote_freshness_item(
     quote_fresh: bool | None,
     checked_at: str,
+    quote_freshness_evidence: tuple[str, ...] | None = None,
 ) -> LiveReadinessItem:
     name = "quote_freshness"
+    evidence = tuple(str(entry) for entry in (quote_freshness_evidence or ()) if str(entry or "").strip())
     if quote_fresh is None:
-        return _make_item(name, LIVE_READINESS_STATUS_NOT_VERIFIED, "quote_freshness_missing", (), checked_at)
-    evidence = (f"quote_fresh={bool(quote_fresh)}",)
+        return _make_item(name, LIVE_READINESS_STATUS_NOT_VERIFIED, "quote_freshness_missing", evidence, checked_at)
+    if evidence:
+        evidence = tuple(list(evidence) + [f"quote_fresh={bool(quote_fresh)}"])
+    else:
+        evidence = (f"quote_fresh={bool(quote_fresh)}",)
     if quote_fresh:
         return _make_item(name, LIVE_READINESS_STATUS_READY, "quote_snapshot_fresh", evidence, checked_at)
     return _make_item(name, LIVE_READINESS_STATUS_BLOCKED, "quote_snapshot_stale", evidence, checked_at)
@@ -270,11 +329,23 @@ def _build_journal_reconciliation_item(
     evidence = (
         f"journal_unresolved={order_journal_summary.unresolved_count}",
         f"journal_corrupt_lines={order_journal_summary.corrupt_lines}",
+        f"journal_corrupt_final_lines={order_journal_summary.corrupt_final_line_count}",
+        f"journal_corrupt_middle_lines={order_journal_summary.corrupt_middle_line_count}",
+        f"accepted_order_missing_at_broker={startup_recovery_report.accepted_order_missing_at_broker_count}",
+        f"broker_position_without_journal={startup_recovery_report.broker_position_without_journal_count}",
+        f"journal_filled_without_position={startup_recovery_report.journal_filled_without_position_count}",
+        f"unconfirmed_stop_replay={startup_recovery_report.unconfirmed_stop_replay_count}",
         f"active_orders_unknown={startup_recovery_report.active_orders_unknown_count}",
     )
     if (
         order_journal_summary.unresolved_count > 0
         or order_journal_summary.corrupt_lines > 0
+        or order_journal_summary.corrupt_final_line_count > 0
+        or order_journal_summary.corrupt_middle_line_count > 0
+        or startup_recovery_report.accepted_order_missing_at_broker_count > 0
+        or startup_recovery_report.broker_position_without_journal_count > 0
+        or startup_recovery_report.journal_filled_without_position_count > 0
+        or startup_recovery_report.unconfirmed_stop_replay_count > 0
         or startup_recovery_report.active_orders_unknown_count > 0
     ):
         return _make_item(name, LIVE_READINESS_STATUS_BLOCKED, "journal_or_active_order_reconciliation_pending", evidence, checked_at)
@@ -486,6 +557,7 @@ def build_live_readiness_report(
     order_journal_summary: OrderJournalReplaySummary | None = None,
     request_budget_counts: Mapping[Any, Any] | None = None,
     quote_fresh: bool | None = None,
+    quote_freshness_evidence: tuple[str, ...] | None = None,
     risk_review_path: str | Path | None = None,
     expected_code_commit_sha: str | None = None,
     expected_runtime_config_hash: str | None = None,
@@ -500,7 +572,7 @@ def build_live_readiness_report(
     protective_stop_item = _build_protective_stop_item(startup_recovery_report, checked_at_text)
     partial_fill_item = _build_partial_fill_item(startup_recovery_report, checked_at_text)
     execution_id_item = _build_execution_id_item(portfolio, checked_at_text)
-    quote_freshness_item = _build_quote_freshness_item(quote_fresh, checked_at_text)
+    quote_freshness_item = _build_quote_freshness_item(quote_fresh, checked_at_text, quote_freshness_evidence)
     journal_item = _build_journal_reconciliation_item(startup_recovery_report, order_journal_summary, checked_at_text)
     request_budget_item = _build_request_budget_item(request_budget_counts, checked_at_text)
     risk_item, risk_payload = _build_risk_review_item(

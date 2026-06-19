@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from core.order_journal import OrderJournalReplaySummary
+from core.order_journal import OrderJournalIntentReplay, OrderJournalReplaySummary
 
 _UNRESOLVED_EXECUTION_STATUSES = {"partial_unresolved", "zero_fill_unresolved"}
 
@@ -20,10 +20,44 @@ class StartupRecoveryReport:
     protective_stop_missing_count: int
     journal_unresolved_count: int
     journal_corrupt_line_count: int
+    journal_corrupt_final_line_count: int
+    journal_corrupt_middle_line_count: int
+    accepted_order_missing_at_broker_count: int
+    broker_position_without_journal_count: int
+    journal_filled_without_position_count: int
+    unconfirmed_stop_replay_count: int
     active_orders_unknown_count: int
     wallet_snapshot_incomplete: bool
     needs_manual_review: bool
     blocking_reasons: tuple[str, ...]
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_execution_ids(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+
+    normalized: list[str] = []
+    for item in raw_values:
+        text = _first_text(item)
+        if text and text not in normalized:
+            normalized.append(text)
+    return tuple(normalized)
 
 
 def _extract_active_order_ids(active_orders_info: Mapping[str, Any] | None) -> set[str]:
@@ -39,6 +73,27 @@ def _extract_active_order_ids(active_orders_info: Mapping[str, Any] | None) -> s
                 order_ids.add(value)
                 break
     return order_ids
+
+
+def _extract_journal_identifiers(intent: OrderJournalIntentReplay) -> tuple[str | None, set[str], str]:
+    payload = intent.latest_payload if isinstance(intent.latest_payload, Mapping) else {}
+    order_id = _first_text(payload.get("order_id"), payload.get("OrderId"), payload.get("OrderID"))
+    execution_ids: set[str] = set(_normalize_execution_ids(payload.get("execution_ids")))
+    execution_id = _first_text(payload.get("execution_id"), payload.get("ExecutionID"))
+    if execution_id:
+        execution_ids.add(execution_id)
+    kind = _first_text(intent.kind, payload.get("kind")) or ""
+    return order_id, execution_ids, kind.lower()
+
+
+def _extract_position_reconciliation_ids(position: Mapping[str, Any]) -> set[str]:
+    identifiers: set[str] = set()
+    for key in ("entry_order_id", "order_id", "execution_id", "hold_id"):
+        text = _first_text(position.get(key))
+        if text:
+            identifiers.add(text)
+    identifiers.update(_normalize_execution_ids(position.get("execution_ids")))
+    return identifiers
 
 
 def _count_positions(portfolio: list[dict[str, Any]] | None, active_orders_info: Mapping[str, Any] | None = None) -> dict[str, int]:
@@ -98,6 +153,8 @@ def build_startup_recovery_report(
     counts = _count_positions(portfolio, active_orders_info)
     journal_unresolved_count = 0 if order_journal_summary is None else order_journal_summary.unresolved_count
     journal_corrupt_line_count = 0 if order_journal_summary is None else order_journal_summary.corrupt_lines
+    journal_corrupt_final_line_count = 0 if order_journal_summary is None else order_journal_summary.corrupt_final_line_count
+    journal_corrupt_middle_line_count = 0 if order_journal_summary is None else order_journal_summary.corrupt_middle_line_count
 
     active_orders_unknown_count = 0
     if active_orders_info is None:
@@ -106,6 +163,52 @@ def build_startup_recovery_report(
         active_orders_unknown_count = len(active_orders_info.get("unresolved_order_ids", []))
         if active_orders_info.get("has_unknown"):
             active_orders_unknown_count += 1
+
+    active_order_ids = _extract_active_order_ids(active_orders_info)
+    journal_order_ids: set[str] = set()
+    journal_execution_ids: set[str] = set()
+    accepted_order_missing_at_broker_count = 0
+    journal_filled_without_position_count = 0
+    unconfirmed_stop_replay_count = 0
+
+    managed_positions = [
+        dict(position)
+        for position in portfolio or []
+        if isinstance(position, Mapping) and str(position.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+    ]
+    managed_position_identifiers = [_extract_position_reconciliation_ids(position) for position in managed_positions]
+    managed_position_identifier_union = set().union(*managed_position_identifiers) if managed_position_identifiers else set()
+
+    if order_journal_summary is not None:
+        for intent in order_journal_summary.intents:
+            order_id, execution_ids, kind = _extract_journal_identifiers(intent)
+            if order_id:
+                journal_order_ids.add(order_id)
+            journal_execution_ids.update(execution_ids)
+            latest_event = str(intent.latest_event or "").strip().upper()
+
+            if latest_event == "ACCEPTED" and order_id and active_orders_info is not None and order_id not in active_order_ids:
+                accepted_order_missing_at_broker_count += 1
+
+            if latest_event in {"FILLED", "FILLED_BEFORE_CANCEL"}:
+                journal_ids = set()
+                if order_id:
+                    journal_ids.add(order_id)
+                journal_ids.update(execution_ids)
+                if not journal_ids or not (journal_ids & managed_position_identifier_union):
+                    journal_filled_without_position_count += 1
+
+            if kind == "stop" and intent.unresolved:
+                unconfirmed_stop_replay_count += 1
+
+    broker_position_without_journal_count = 0
+    journal_reconciliation_union = journal_order_ids | journal_execution_ids
+    for _position, position_identifiers in zip(managed_positions, managed_position_identifiers):
+        if not position_identifiers:
+            broker_position_without_journal_count += 1
+            continue
+        if not (position_identifiers & journal_reconciliation_union):
+            broker_position_without_journal_count += 1
 
     blocking_reasons: list[str] = []
     if wallet_snapshot_incomplete:
@@ -126,6 +229,18 @@ def build_startup_recovery_report(
         blocking_reasons.append(f"journal_unresolved:{journal_unresolved_count}")
     if journal_corrupt_line_count > 0:
         blocking_reasons.append(f"journal_corrupt_lines:{journal_corrupt_line_count}")
+    if journal_corrupt_final_line_count > 0:
+        blocking_reasons.append(f"journal_corrupt_final_lines:{journal_corrupt_final_line_count}")
+    if journal_corrupt_middle_line_count > 0:
+        blocking_reasons.append(f"journal_corrupt_middle_lines:{journal_corrupt_middle_line_count}")
+    if accepted_order_missing_at_broker_count > 0:
+        blocking_reasons.append(f"accepted_order_missing_at_broker:{accepted_order_missing_at_broker_count}")
+    if broker_position_without_journal_count > 0:
+        blocking_reasons.append(f"broker_position_without_journal:{broker_position_without_journal_count}")
+    if journal_filled_without_position_count > 0:
+        blocking_reasons.append(f"journal_filled_without_position:{journal_filled_without_position_count}")
+    if unconfirmed_stop_replay_count > 0:
+        blocking_reasons.append(f"unconfirmed_stop_replay:{unconfirmed_stop_replay_count}")
     if active_orders_unknown_count > 0:
         blocking_reasons.append(f"active_orders_unknown:{active_orders_unknown_count}")
 
@@ -140,6 +255,12 @@ def build_startup_recovery_report(
         protective_stop_missing_count=counts["protective_stop_missing"],
         journal_unresolved_count=journal_unresolved_count,
         journal_corrupt_line_count=journal_corrupt_line_count,
+        journal_corrupt_final_line_count=journal_corrupt_final_line_count,
+        journal_corrupt_middle_line_count=journal_corrupt_middle_line_count,
+        accepted_order_missing_at_broker_count=accepted_order_missing_at_broker_count,
+        broker_position_without_journal_count=broker_position_without_journal_count,
+        journal_filled_without_position_count=journal_filled_without_position_count,
+        unconfirmed_stop_replay_count=unconfirmed_stop_replay_count,
         active_orders_unknown_count=active_orders_unknown_count,
         wallet_snapshot_incomplete=bool(wallet_snapshot_incomplete),
         needs_manual_review=bool(blocking_reasons),

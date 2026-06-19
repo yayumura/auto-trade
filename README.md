@@ -116,7 +116,7 @@
 - 次の `clean holdout` は、現在の使用データ最新日 `2026-06-05` の翌営業日以降、つまり `2026-06-08` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 - `RUNTIME_LIVE_ORDER_CONFIG_HASH` は、実行設定に加えて `core.logic` の daytrade 定数、monthly rotation モジュール fingerprint、主要コードファイルの fingerprint も含めた承認マニフェストから計算します
-- LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。`KABUCOM_LIVE` では operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context を必須にし、legacy boolean や explicit 引数だけでは開きません。さらに、`LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed で示し、`LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合は not_verified のまま閉じます。`no_lookahead_audit` は risk review 自体が ready の場合にだけ ready とみなします。`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、キャッシュキーには repository / workflow run / head_sha / artifact 名 / local attestation hash / local digest / token fingerprint / session fingerprint を含めます。期限切れ後や token ローテーション後、local attestation 更新後は再検証され、必要なら `clear_live_write_attestation_artifact_source_cache()` で手動クリアできます
+- LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。`KABUCOM_LIVE` では operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context を必須にし、legacy boolean や explicit 引数だけでは開きません。さらに、`LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed で示し、`execution_ids` の集約ロットや重複 execution_id は truth lot ではなく blocked 扱いにします。`LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合は not_verified のまま閉じます。`no_lookahead_audit` は risk review 自体が ready の場合にだけ ready とみなします。`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、キャッシュキーには repository / workflow run / head_sha / artifact 名 / local attestation hash / local digest / token fingerprint / session fingerprint を含めます。期限切れ後や token ローテーション後、local attestation 更新後は再検証され、必要なら `clear_live_write_attestation_artifact_source_cache()` で手動クリアできます
 - `KABUCOM_LIVE` では、calendar source が未配置・無効・coverage gap/fallback の場合も金融 write を開けません。`half_day_dates` に入った日は午前立会のみとして扱い、11:30 以降はその日の運用を終了します
 
 structured operator ACK の例:
@@ -641,7 +641,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - partial remainder の protective stop rearm が失敗したら unresolved exit として止めること
   - entry record が複数 `execution_id` を保持し、保護逆指値の紐づけでその集合を使うこと
   - entry / exit の unresolved partial / zero-fill で `entry_order_execution_status` / `exit_order_execution_status` を残すこと
-  - `received_at` は分離して保持し、`quote_timestamp` / `current_price_timestamp` が無い quote は entry で使わないこと
+  - `received_at` は分離して保持し、`quote_timestamp` / `current_price_timestamp` が無い quote は entry で使わないこと。`LiveReadinessReport` では `quote_timestamp` / `received_at` / `age_seconds` / `max_age_seconds` の evidence も残すこと
   - multi-HoldID の protective stop を `ClosePositions` 経路で設定し、空の close route は通さないこと
   - stop journal が `ROUTE_RESOLVED` と route summary を残し、multi-HoldID の `ClosePositions` と `hold_ids` を復元できること
   - protective stop cancel 未確定を unresolved exit として扱い、新規 scan を止めること
@@ -661,7 +661,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - safe shutdown が managed order cancel 未確定なら flatten を見送ること
   - safe shutdown が managed order だけを cancel し、unmanaged order / position を触らないこと
   - unexpected exception が最後の runtime state を使って safe shutdown を試みること
-  - board quote freshness helper が stale / cross-day quote を entry 前に落とすこと
+  - board quote freshness helper が stale / cross-day quote を entry 前に落とし、`quote_timestamp` / `received_at` / `age_seconds` の evidence を返すこと
 - `tests/test_kabucom_broker.py`
   - `resolve_stock_order_action()` が long-only の fail-closed になり、short action を拒否すること
   - `core/kabucom_broker.py` の POST 再送抑止
@@ -674,6 +674,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - GitHub artifact verification が workflow_run_head_sha_mismatch / workflow_artifact_head_sha_mismatch / workflow_run_conclusion_failure / workflow_artifact_expired / timeout で fail closed になること
   - attestation bundle の digest sidecar が欠けるか mismatch なら live write を閉じること
   - `TRADE_MODE=KABUCOM_LIVE` で JPX calendar source が無い場合、または coverage gap / fallback に落ちる場合に live write を閉じること
+  - `LiveReadinessReport` の `execution_id_truth` が aggregate `execution_ids` / duplicate execution_id / `position_lot_key_needs_review=True` を blocked にし、truth lot だけを ready 扱いすること
+  - `LiveReadinessReport` の `execution_id_truth` が duplicate execution_id も blocked にすること
   - `LiveReadinessReport` の `no_lookahead_audit` が risk review blocked 時に ready にならないこと
   - structured operator ACK が code_commit_sha / approved_config_hash / runtime_config_hash / repository_full_name / test_fixture_hash / live_write_attestation_hash mismatch で閉じること
   - risk review が `code_commit_sha` / `approval_manifest_hash` mismatch で blocked になること
@@ -693,7 +695,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - runtime entry authorization context が未解決注文、曖昧建玉、stale quote、shutdown 要求をまとめてブロックすること
   - runtime entry authorization context が protective stop pending / orphan もブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
-  - `LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed にすること
+  - `LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed にし、`quote_freshness` では `quote_timestamp` / `received_at` / `age_seconds` / `max_age_seconds` の evidence を残し、`journal_reconciliation` では accepted order missing at broker / broker position without journal / journal filled without position / unconfirmed stop replay / corrupt final line / corrupt middle line を見分けること
   - `LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合に risk readiness / no-lookahead audit が ready にならないこと
   - risk review の `code_commit_sha` / `runtime_config_hash` / `approval_manifest_hash` 不一致が live readiness を閉じること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
@@ -756,7 +758,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - order journal に `schema_version` / `event_id` / `sequence` / `process_id` を付けること
   - JSONL append が連番で追記されること
   - journal replay が PLANNED / ACCEPTED / CANCEL_REQUESTED の未解決 intent を拾うこと
-  - startup recovery が corrupt journal 行や unresolved active orders を manual review にすること
+  - startup recovery が corrupt journal 行を final / middle で分けて扱い、accepted order missing at broker / broker position without journal / journal filled without position / unconfirmed stop replay も manual review にすること
   - startup recovery が protective stop の pending / orphan 状態も manual review にすること
   - startup recovery が armed だが broker snapshot に無い protective stop も manual review にすること
   - journal replay が `FILLED` / filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
@@ -764,6 +766,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `portfolio.json` を schema-versioned JSON で保存すること
   - legacy CSV を読み込んで migration できること
   - 空の `portfolio.json` でも CSV フォールバックで読み込めること
+  - aggregate `execution_ids` lot を review-needed として保存すること
   - migration 時に archive backup を残すこと
 
 全件実行:
@@ -850,8 +853,8 @@ python -m pytest tests/test_order_journal.py
 - `protective_stop_lifecycle`
 - `partial_fill_unresolved`
 - `execution_id_truth`
-- `quote_freshness`
-- `journal_reconciliation`
+- `quote_freshness` は `quote_timestamp` / `current_price_timestamp` / `received_at` / `age_seconds` / `max_age_seconds` を evidence に残す
+- `journal_reconciliation` は accepted order missing at broker / broker position without journal / journal filled without position / unconfirmed stop replay / corrupt final line / corrupt middle line を含めて判定する
 - `request_budget`
 - `risk_readiness`
 - `no_lookahead_audit`

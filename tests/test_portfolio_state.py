@@ -60,6 +60,32 @@ def test_write_portfolio_state_creates_schema_versioned_json(tmp_path: Path):
     assert state.positions[0]["shares"] == 100
 
 
+def test_write_portfolio_state_marks_aggregate_execution_ids_lots_for_review(tmp_path: Path):
+    path = tmp_path / "portfolio.json"
+
+    write_portfolio_state(
+        str(path),
+        [
+            {
+                "code": "1000",
+                "shares": 100,
+                "execution_id": "EX-1",
+                "execution_ids": ["EX-1", "EX-2"],
+                "buy_time": "2026-04-21 09:00:00",
+            }
+        ],
+        metadata={"source": "unit-test"},
+    )
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["positions"][0]["position_lot_key_source"] == "execution_id"
+    assert raw["positions"][0]["position_lot_key_needs_review"] is True
+
+    state = load_portfolio_state(str(path))
+    assert state is not None
+    assert state.positions[0]["position_lot_key_needs_review"] is True
+
+
 def test_load_portfolio_positions_migrates_legacy_csv_and_backs_it_up(tmp_path: Path):
     path = tmp_path / "portfolio.json"
     legacy = pd.DataFrame([

@@ -153,10 +153,13 @@ def _build_position_lot_identity(record: Mapping[str, Any], context: Mapping[str
     }
     filtered_components = {key: value for key, value in components.items() if value not in (None, "", [], ())}
     position_lot_key = json.dumps(filtered_components, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    has_aggregate_execution_ids = len(execution_ids) > 1
+    execution_id_mismatch = bool(direct_execution_id and execution_ids and direct_execution_id not in execution_ids)
     return {
         "position_lot_key": position_lot_key,
         "position_lot_key_source": source,
-        "position_lot_key_needs_review": source not in {"execution_id", "execution_ids"},
+        # Multiple execution_ids means this record is an aggregate view, not a truth lot.
+        "position_lot_key_needs_review": source != "execution_id" or has_aggregate_execution_ids or execution_id_mismatch,
         "position_lot_key_components": filtered_components,
     }
 
