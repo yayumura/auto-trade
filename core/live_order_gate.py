@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from core.kabucom_contracts import (
     compute_contract_fixture_manifest_hash,
@@ -16,8 +19,13 @@ from core.config import (
     APPROVED_CONFIG_HASH,
     DEBUG_MODE,
     ENABLE_LIVE_ORDER,
+    JST,
     RUNTIME_LIVE_ORDER_CONFIG_HASH,
     TRADE_MODE,
+)
+from core.github_actions_artifact_source import (
+    GitHubArtifactSourceVerificationResult,
+    verify_live_write_attestation_artifact_source,
 )
 from core.live_approval_manifest import compute_live_approval_manifest_hash
 from core.live_approval_manifest import read_git_commit_sha
@@ -64,6 +72,11 @@ class LiveFinancialWriteGateStatus:
     live_write_attestation_captured_from_kabucom_test: bool
     live_write_attestation_digest_present: bool
     live_write_attestation_digest_valid: bool
+    github_artifact_source_required: bool
+    github_artifact_source_verified: bool
+    github_artifact_source_reason: str
+    operator_ack_source: str
+    operator_ack_reason: str
     jpx_calendar_ready: bool
     jpx_calendar_trading_day: bool
     jpx_calendar_reason: str
@@ -115,6 +128,104 @@ def _coerce_env_bool(*names: str) -> bool | None:
     return None
 
 
+def _parse_ack_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=JST)
+    return parsed.astimezone(JST)
+
+
+def _load_operator_ack_context() -> tuple[dict[str, Any] | None, str | None]:
+    raw = os.getenv("KABUCOM_LIVE_OPERATOR_ACK_CONTEXT")
+    if raw is None or not raw.strip():
+        return None, None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None, "operator_ack_context_invalid_json"
+    if not isinstance(payload, dict):
+        return None, "operator_ack_context_not_mapping"
+    return payload, None
+
+
+def _resolve_operator_acknowledgement(
+    *,
+    expected_code_commit_sha: str | None,
+    expected_approved_config_hash: str | None,
+    expected_runtime_config_hash: str | None,
+    expected_repository_full_name: str | None,
+    expected_test_fixture_hash: str | None,
+    expected_live_write_attestation_hash: str | None,
+) -> tuple[bool, str, str]:
+    context, context_error = _load_operator_ack_context()
+    if context_error is not None:
+        return False, "structured_context", context_error
+
+    if context is not None:
+        required_keys = {
+            "operator_id",
+            "acknowledged_at",
+            "expires_at",
+            "code_commit_sha",
+            "approved_config_hash",
+            "runtime_config_hash",
+            "repository_full_name",
+            "test_fixture_hash",
+            "live_write_attestation_hash",
+        }
+        missing = sorted(key for key in required_keys if key not in context)
+        if missing:
+            return False, "structured_context", f"operator_ack_context_missing:{','.join(missing)}"
+
+        operator_id = str(context.get("operator_id") or "").strip()
+        if not operator_id:
+            return False, "structured_context", "operator_ack_context_operator_id_missing"
+
+        acknowledged_at = _parse_ack_datetime(context.get("acknowledged_at"))
+        if acknowledged_at is None:
+            return False, "structured_context", "operator_ack_context_acknowledged_at_invalid"
+        expires_at = _parse_ack_datetime(context.get("expires_at"))
+        if expires_at is None:
+            return False, "structured_context", "operator_ack_context_expires_at_invalid"
+        if expires_at <= datetime.now(JST):
+            return False, "structured_context", "operator_ack_context_expired"
+        if acknowledged_at > expires_at:
+            return False, "structured_context", "operator_ack_context_acknowledged_at_after_expiry"
+
+        actual_code_commit_sha = str(context.get("code_commit_sha") or "").strip()
+        actual_approved_config_hash = str(context.get("approved_config_hash") or "").strip()
+        actual_runtime_config_hash = str(context.get("runtime_config_hash") or "").strip()
+        actual_repository_full_name = str(context.get("repository_full_name") or "").strip()
+        actual_test_fixture_hash = str(context.get("test_fixture_hash") or "").strip()
+        actual_live_write_attestation_hash = str(context.get("live_write_attestation_hash") or "").strip()
+
+        if expected_code_commit_sha is not None and actual_code_commit_sha != str(expected_code_commit_sha).strip():
+            return False, "structured_context", "operator_ack_context_code_commit_sha_mismatch"
+        if expected_approved_config_hash is not None and actual_approved_config_hash != str(expected_approved_config_hash).strip():
+            return False, "structured_context", "operator_ack_context_approved_config_hash_mismatch"
+        if expected_runtime_config_hash is not None and actual_runtime_config_hash != str(expected_runtime_config_hash).strip():
+            return False, "structured_context", "operator_ack_context_runtime_config_hash_mismatch"
+        if expected_repository_full_name is not None and actual_repository_full_name != str(expected_repository_full_name).strip():
+            return False, "structured_context", "operator_ack_context_repository_full_name_mismatch"
+        if expected_test_fixture_hash is not None and actual_test_fixture_hash != str(expected_test_fixture_hash).strip():
+            return False, "structured_context", "operator_ack_context_test_fixture_hash_mismatch"
+        if expected_live_write_attestation_hash is not None and actual_live_write_attestation_hash != str(expected_live_write_attestation_hash).strip():
+            return False, "structured_context", "operator_ack_context_live_write_attestation_hash_mismatch"
+
+        return True, "structured_context", "operator_ack_context_ok"
+
+    resolved_operator_acknowledged = _coerce_env_bool("KABUCOM_LIVE_OPERATOR_ACK", "LIVE_WRITE_OPERATOR_ACK") is True
+    if resolved_operator_acknowledged:
+        return True, "legacy_bool", "legacy_boolean_true"
+    return False, "legacy_bool", "legacy_boolean_false"
+
+
 def _build_live_financial_write_gate_status(
     *,
     allowed: bool,
@@ -133,6 +244,11 @@ def _build_live_financial_write_gate_status(
     live_write_attestation_captured_from_kabucom_test: bool,
     live_write_attestation_digest_present: bool,
     live_write_attestation_digest_valid: bool,
+    github_artifact_source_required: bool,
+    github_artifact_source_verified: bool,
+    github_artifact_source_reason: str,
+    operator_ack_source: str,
+    operator_ack_reason: str,
     jpx_calendar_ready: bool,
     jpx_calendar_trading_day: bool,
     jpx_calendar_reason: str,
@@ -154,6 +270,11 @@ def _build_live_financial_write_gate_status(
         live_write_attestation_captured_from_kabucom_test=live_write_attestation_captured_from_kabucom_test,
         live_write_attestation_digest_present=live_write_attestation_digest_present,
         live_write_attestation_digest_valid=live_write_attestation_digest_valid,
+        github_artifact_source_required=github_artifact_source_required,
+        github_artifact_source_verified=github_artifact_source_verified,
+        github_artifact_source_reason=github_artifact_source_reason,
+        operator_ack_source=operator_ack_source,
+        operator_ack_reason=operator_ack_reason,
         jpx_calendar_ready=jpx_calendar_ready,
         jpx_calendar_trading_day=jpx_calendar_trading_day,
         jpx_calendar_reason=jpx_calendar_reason,
@@ -245,6 +366,7 @@ def get_kabucom_live_financial_write_gate_status(
     base_gate_status: LiveOrderGateStatus | None = None,
     test_fixture_path: str | Path | None = None,
     live_write_attestation_path: str | Path | None = None,
+    require_github_artifact_source: bool = False,
     operator_acknowledged: bool | None = None,
 ) -> LiveFinancialWriteGateStatus:
     """KABUCOM_LIVE の financial write を開けてよいかを総合判定する。
@@ -258,9 +380,14 @@ def get_kabucom_live_financial_write_gate_status(
     fixture_path_text = str(fixture_path)
     attestation_path = LIVE_WRITE_ATTESTATION_PATH if live_write_attestation_path is None else Path(live_write_attestation_path)
     attestation_path_text = str(attestation_path)
-    if operator_acknowledged is None:
-        operator_acknowledged = _coerce_env_bool("KABUCOM_LIVE_OPERATOR_ACK", "LIVE_WRITE_OPERATOR_ACK") is True
-    resolved_operator_acknowledged = bool(operator_acknowledged)
+    resolved_operator_acknowledged = bool(operator_acknowledged) if operator_acknowledged is not None else False
+    operator_ack_source = "explicit_argument" if operator_acknowledged is not None else "not_checked"
+    operator_ack_reason = (
+        "explicit_argument_true"
+        if operator_acknowledged is True
+        else "explicit_argument_false" if operator_acknowledged is False
+        else "not_checked"
+    )
 
     if not bool(getattr(base_gate_status, "allowed", False)):
         reason = str(getattr(base_gate_status, "reason", "live_order_gate_blocked"))
@@ -281,6 +408,11 @@ def get_kabucom_live_financial_write_gate_status(
             live_write_attestation_captured_from_kabucom_test=False,
             live_write_attestation_digest_present=False,
             live_write_attestation_digest_valid=False,
+            github_artifact_source_required=require_github_artifact_source,
+            github_artifact_source_verified=False,
+            github_artifact_source_reason="not_checked",
+            operator_ack_source=operator_ack_source,
+            operator_ack_reason=operator_ack_reason,
             jpx_calendar_ready=False,
             jpx_calendar_trading_day=False,
             jpx_calendar_reason="not_checked",
@@ -304,6 +436,11 @@ def get_kabucom_live_financial_write_gate_status(
             live_write_attestation_captured_from_kabucom_test=False,
             live_write_attestation_digest_present=False,
             live_write_attestation_digest_valid=False,
+            github_artifact_source_required=require_github_artifact_source,
+            github_artifact_source_verified=False,
+            github_artifact_source_reason="not_checked",
+            operator_ack_source="not_checked",
+            operator_ack_reason="non_live_mode",
             jpx_calendar_ready=False,
             jpx_calendar_trading_day=False,
             jpx_calendar_reason="not_checked",
@@ -328,6 +465,8 @@ def get_kabucom_live_financial_write_gate_status(
     attestation_digest_present = False
     attestation_digest_valid = False
     ci_artifact_attested = False
+    github_artifact_source_verified = False
+    github_artifact_source_reason = "not_checked"
     trade_mode = str(TRADE_MODE).strip().upper()
     jpx_calendar_status = get_jpx_trading_day_status(require_source=trade_mode == "KABUCOM_LIVE")
     jpx_calendar_ready = bool(jpx_calendar_status.source_ready)
@@ -359,15 +498,16 @@ def get_kabucom_live_financial_write_gate_status(
     attestation = load_live_write_attestation(attestation_path)
     if attestation is None:
         blocking_reasons.append("live_write_attestation_missing")
+        attestation_hash = None
     else:
         attestation_present = True
+        attestation_hash = compute_live_write_attestation_hash(attestation)
         attestation_digest = load_live_write_attestation_digest(attestation_path)
         if attestation_digest is None:
             blocking_reasons.append("live_write_attestation_digest_missing")
         else:
             attestation_digest_present = True
-            expected_attestation_hash = compute_live_write_attestation_hash(attestation)
-            if attestation_digest != expected_attestation_hash:
+            if attestation_digest != attestation_hash:
                 blocking_reasons.append("live_write_attestation_digest_mismatch")
             else:
                 attestation_digest_valid = True
@@ -401,6 +541,35 @@ def get_kabucom_live_financial_write_gate_status(
     if fixture_captured_from_test and not ci_artifact_attested:
         blocking_reasons.append("ci_artifact_attestation_missing")
 
+    if require_github_artifact_source:
+        if not attestation_present or not attestation_valid:
+            github_artifact_source_reason = "live_write_attestation_unavailable_for_source_verification"
+        else:
+            github_result: GitHubArtifactSourceVerificationResult = verify_live_write_attestation_artifact_source(
+                repository_full_name=repository_full_name or "",
+                workflow_run_id=str(attestation.get("ci_run_id") or "").strip(),
+                head_sha=str(attestation.get("ci_head_sha") or "").strip(),
+                local_attestation_path=attestation_path,
+            )
+            github_artifact_source_verified = bool(github_result.valid)
+            github_artifact_source_reason = str(github_result.reason)
+            if not github_result.valid:
+                blocking_reasons.append(f"github_attestation_source_unverified:{github_result.reason}")
+
+    if operator_acknowledged is None:
+        resolved_operator_acknowledged, operator_ack_source, operator_ack_reason = _resolve_operator_acknowledgement(
+            expected_code_commit_sha=code_commit_sha,
+            expected_approved_config_hash=expected_approved_config_hash,
+            expected_runtime_config_hash=expected_runtime_config_hash,
+            expected_repository_full_name=repository_full_name,
+            expected_test_fixture_hash=fixture_hash,
+            expected_live_write_attestation_hash=attestation_hash,
+        )
+    else:
+        resolved_operator_acknowledged = bool(operator_acknowledged)
+        operator_ack_source = "explicit_argument"
+        operator_ack_reason = "explicit_argument_true" if resolved_operator_acknowledged else "explicit_argument_false"
+
     if trade_mode == "KABUCOM_LIVE":
         if not jpx_calendar_ready:
             blocking_reasons.append(jpx_calendar_reason)
@@ -408,7 +577,10 @@ def get_kabucom_live_financial_write_gate_status(
             blocking_reasons.append("jpx_calendar_non_trading_day")
 
     if not resolved_operator_acknowledged:
-        blocking_reasons.append("operator_ack_missing")
+        if operator_ack_source == "structured_context" and operator_ack_reason != "operator_ack_context_ok":
+            blocking_reasons.append(operator_ack_reason)
+        else:
+            blocking_reasons.append("operator_ack_missing")
 
     allowed = not blocking_reasons
     reason = "ready" if allowed else " | ".join(blocking_reasons)
@@ -429,6 +601,11 @@ def get_kabucom_live_financial_write_gate_status(
         live_write_attestation_captured_from_kabucom_test=attestation_captured_from_test,
         live_write_attestation_digest_present=attestation_digest_present,
         live_write_attestation_digest_valid=attestation_digest_valid,
+        github_artifact_source_required=require_github_artifact_source,
+        github_artifact_source_verified=github_artifact_source_verified,
+        github_artifact_source_reason=github_artifact_source_reason,
+        operator_ack_source=operator_ack_source,
+        operator_ack_reason=operator_ack_reason,
         jpx_calendar_ready=jpx_calendar_ready,
         jpx_calendar_trading_day=jpx_calendar_trading_day,
         jpx_calendar_reason=jpx_calendar_reason,
@@ -440,12 +617,14 @@ def can_enable_kabucom_live_financial_write(
     base_gate_status: LiveOrderGateStatus | None = None,
     test_fixture_path: str | Path | None = None,
     live_write_attestation_path: str | Path | None = None,
+    require_github_artifact_source: bool = False,
     operator_acknowledged: bool | None = None,
 ) -> bool:
     return get_kabucom_live_financial_write_gate_status(
         base_gate_status=base_gate_status,
         test_fixture_path=test_fixture_path,
         live_write_attestation_path=live_write_attestation_path,
+        require_github_artifact_source=require_github_artifact_source,
         operator_acknowledged=operator_acknowledged,
     ).allowed
 
@@ -507,4 +686,6 @@ def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAut
 
 def is_live_new_entry_allowed() -> bool:
     """KABUCOM_LIVE の新規 entry が許可されるかだけを返す。"""
-    return can_enable_kabucom_live_financial_write()
+    return can_enable_kabucom_live_financial_write(
+        require_github_artifact_source=str(TRADE_MODE).strip().upper() == "KABUCOM_LIVE",
+    )

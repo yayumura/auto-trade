@@ -1752,6 +1752,7 @@ def _main_exec():
         live_order_gate_status = get_live_order_gate_status()
         live_financial_write_gate_status = get_kabucom_live_financial_write_gate_status(
             base_gate_status=live_order_gate_status,
+            require_github_artifact_source=True,
         )
         print(
             "🔐 [LIVE-GATE] "
@@ -1766,6 +1767,11 @@ def _main_exec():
             f"test_fixture={live_financial_write_gate_status.test_fixture_captured_from_kabucom_test} "
             f"ci_artifact={live_financial_write_gate_status.ci_artifact_attested} "
             f"operator_ack={live_financial_write_gate_status.operator_acknowledged} "
+            f"ack_source={live_financial_write_gate_status.operator_ack_source} "
+            f"ack_reason={live_financial_write_gate_status.operator_ack_reason} "
+            f"github_source={live_financial_write_gate_status.github_artifact_source_required}/"
+            f"{live_financial_write_gate_status.github_artifact_source_verified} "
+            f"github_reason={live_financial_write_gate_status.github_artifact_source_reason} "
             f"digest={live_financial_write_gate_status.live_write_attestation_digest_present}/"
             f"{live_financial_write_gate_status.live_write_attestation_digest_valid} "
             f"calendar={live_financial_write_gate_status.jpx_calendar_ready}/"
@@ -1782,6 +1788,11 @@ def _main_exec():
             f"reason={live_financial_write_gate_status.reason} "
             f"ci_artifact={live_financial_write_gate_status.ci_artifact_attested} "
             f"operator_ack={live_financial_write_gate_status.operator_acknowledged} "
+            f"ack_source={live_financial_write_gate_status.operator_ack_source} "
+            f"ack_reason={live_financial_write_gate_status.operator_ack_reason} "
+            f"github_source={live_financial_write_gate_status.github_artifact_source_required}/"
+            f"{live_financial_write_gate_status.github_artifact_source_verified} "
+            f"github_reason={live_financial_write_gate_status.github_artifact_source_reason} "
             f"digest={live_financial_write_gate_status.live_write_attestation_digest_present}/"
             f"{live_financial_write_gate_status.live_write_attestation_digest_valid} "
             f"calendar={live_financial_write_gate_status.jpx_calendar_ready}/"

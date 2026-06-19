@@ -548,6 +548,7 @@ class KabucomBroker(BaseBroker):
                 return False, "order_password_missing"
             gate_status = get_kabucom_live_financial_write_gate_status(
                 base_gate_status=get_live_order_gate_status(),
+                require_github_artifact_source=True,
             )
             if not gate_status.allowed:
                 return False, f"live_new_order_disabled:{gate_status.reason}"

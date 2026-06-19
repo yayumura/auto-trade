@@ -180,6 +180,19 @@ def get_jpx_trading_day_status(
             used_fallback=False,
         )
 
+    if require_source:
+        # LIVE ではカレンダーの未列挙日を fallback で埋めず、coverage gap として fail closed にする。
+        return JPXTradingDayStatus(
+            trading_day=False,
+            source_ready=False,
+            source_reason="jpx_calendar_coverage_gap",
+            source_path=str(calendar_path),
+            source_present=True,
+            source_valid=True,
+            trading_date=trading_date_text,
+            used_fallback=False,
+        )
+
     return JPXTradingDayStatus(
         trading_day=_fallback_business_day(resolved_date),
         source_ready=True,
