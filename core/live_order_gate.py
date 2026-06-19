@@ -100,6 +100,8 @@ class EntryAuthorizationContext:
     shutdown_requested: bool
     protective_stop_pending_count: int = 0
     protective_stop_orphan_count: int = 0
+    live_readiness_allowed: bool = True
+    live_readiness_reason: str = "ready"
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,7 @@ def _resolve_operator_acknowledgement(
     expected_repository_full_name: str | None,
     expected_test_fixture_hash: str | None,
     expected_live_write_attestation_hash: str | None,
+    allow_legacy_boolean: bool = True,
 ) -> tuple[bool, str, str]:
     context, context_error = _load_operator_ack_context()
     if context_error is not None:
@@ -219,6 +222,9 @@ def _resolve_operator_acknowledgement(
             return False, "structured_context", "operator_ack_context_live_write_attestation_hash_mismatch"
 
         return True, "structured_context", "operator_ack_context_ok"
+
+    if not allow_legacy_boolean:
+        return False, "structured_context", "operator_ack_context_missing"
 
     resolved_operator_acknowledged = _coerce_env_bool("KABUCOM_LIVE_OPERATOR_ACK", "LIVE_WRITE_OPERATOR_ACK") is True
     if resolved_operator_acknowledged:
@@ -374,6 +380,8 @@ def get_kabucom_live_financial_write_gate_status(
     既存の live order gate に加えて、KABUCOM_TEST fixture の provenance、
     CI artifact attestation bundle、digest sidecar、JPX calendar source、
     operator acknowledgement も fail closed で要求する。
+    KABUCOM_LIVE では structured operator ack context が必須で、
+    legacy boolean や explicit 引数だけでは開けない。
     """
     base_gate_status = get_live_order_gate_status() if base_gate_status is None else base_gate_status
     fixture_path = TEST_CONTRACT_FIXTURE_PATH if test_fixture_path is None else Path(test_fixture_path)
@@ -468,6 +476,7 @@ def get_kabucom_live_financial_write_gate_status(
     github_artifact_source_verified = False
     github_artifact_source_reason = "not_checked"
     trade_mode = str(TRADE_MODE).strip().upper()
+    is_live_mode = trade_mode == "KABUCOM_LIVE"
     jpx_calendar_status = get_jpx_trading_day_status(require_source=trade_mode == "KABUCOM_LIVE")
     jpx_calendar_ready = bool(jpx_calendar_status.source_ready)
     jpx_calendar_trading_day = bool(jpx_calendar_status.trading_day)
@@ -556,7 +565,7 @@ def get_kabucom_live_financial_write_gate_status(
             if not github_result.valid:
                 blocking_reasons.append(f"github_attestation_source_unverified:{github_result.reason}")
 
-    if operator_acknowledged is None:
+    if operator_acknowledged is None or is_live_mode:
         resolved_operator_acknowledged, operator_ack_source, operator_ack_reason = _resolve_operator_acknowledgement(
             expected_code_commit_sha=code_commit_sha,
             expected_approved_config_hash=expected_approved_config_hash,
@@ -564,13 +573,14 @@ def get_kabucom_live_financial_write_gate_status(
             expected_repository_full_name=repository_full_name,
             expected_test_fixture_hash=fixture_hash,
             expected_live_write_attestation_hash=attestation_hash,
+            allow_legacy_boolean=not is_live_mode,
         )
     else:
         resolved_operator_acknowledged = bool(operator_acknowledged)
         operator_ack_source = "explicit_argument"
         operator_ack_reason = "explicit_argument_true" if resolved_operator_acknowledged else "explicit_argument_false"
 
-    if trade_mode == "KABUCOM_LIVE":
+    if is_live_mode:
         if not jpx_calendar_ready:
             blocking_reasons.append(jpx_calendar_reason)
         elif not jpx_calendar_trading_day:
@@ -669,6 +679,9 @@ def evaluate_entry_authorization(context: EntryAuthorizationContext) -> EntryAut
         blocking_reasons.append("clock_unhealthy")
     if context.shutdown_requested:
         blocking_reasons.append("shutdown_requested")
+    if not context.live_readiness_allowed:
+        readiness_reason = str(context.live_readiness_reason or "").strip() or "not_ready"
+        blocking_reasons.append(f"live_readiness_report_unready:{readiness_reason}")
 
     if blocking_reasons:
         return EntryAuthorizationStatus(

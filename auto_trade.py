@@ -2,6 +2,7 @@ import os
 import sys
 import datetime
 import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import time
@@ -23,7 +24,7 @@ class MarketPhase(Enum):
     AFTERNOON = "後場"
     CLOSING_TIME = "大引け後"
 
-def get_market_phase(now_time) -> MarketPhase:
+def get_market_phase(now_time, *, half_day: bool = False) -> MarketPhase:
     """現在時刻から市場のフェーズを判定する"""
     t900 = datetime.time(9, 0)
     t1130 = datetime.time(11, 30)
@@ -34,6 +35,8 @@ def get_market_phase(now_time) -> MarketPhase:
         return MarketPhase.PRE_MARKET
     elif t900 <= now_time < t1130:
         return MarketPhase.MORNING
+    elif half_day:
+        return MarketPhase.CLOSING_TIME
     elif t1130 <= now_time < t1230:
         return MarketPhase.LUNCH
     elif t1230 <= now_time < t1530:
@@ -91,6 +94,7 @@ from core.config import (
 )
 from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
 from core.live_approval_manifest import read_git_commit_sha
+from core.live_readiness_report import build_live_readiness_report
 
 # --- インスタンスロック機構 ---
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
@@ -107,6 +111,7 @@ ACTIVE_RUNTIME_STATE = {
     "is_sim": True,
     "realtime_buffers": {},
 }
+LIVE_RISK_REVIEW_PATH = Path(PROJECT_ROOT) / "contracts" / "live_risk_review.json"
 
 def _resolve_lock_broker_environment(trade_mode: str | None = None) -> str:
     mode = TRADE_MODE if trade_mode is None else str(trade_mode).strip().upper()
@@ -380,6 +385,34 @@ def _set_active_runtime_state(*, broker=None, portfolio=None, account=None, is_s
         ACTIVE_RUNTIME_STATE["is_sim"] = bool(is_sim)
     if realtime_buffers is not None:
         ACTIVE_RUNTIME_STATE["realtime_buffers"] = realtime_buffers
+
+
+def _resolve_live_risk_review_path() -> str:
+    env_path = os.getenv("LIVE_RISK_REVIEW_PATH")
+    if env_path and str(env_path).strip():
+        return str(env_path).strip()
+    return str(LIVE_RISK_REVIEW_PATH)
+
+
+def _build_live_readiness_report(
+    *,
+    broker,
+    portfolio,
+    startup_recovery_report,
+    order_journal_summary,
+    quote_fresh,
+    checked_at=None,
+):
+    request_budget_counts = getattr(broker, "request_budget_counts", None)
+    return build_live_readiness_report(
+        portfolio=portfolio,
+        startup_recovery_report=startup_recovery_report,
+        order_journal_summary=order_journal_summary,
+        request_budget_counts=request_budget_counts,
+        quote_fresh=quote_fresh,
+        risk_review_path=_resolve_live_risk_review_path(),
+        checked_at=checked_at,
+    )
 
 from core.logic import (
     detect_market_regime,
@@ -1911,6 +1944,25 @@ def _main_exec():
         for reason in startup_recovery_report.blocking_reasons[:5]:
             print(f"⚠️ [Startup Recovery] - {reason}")
 
+    startup_live_readiness_report = _build_live_readiness_report(
+        broker=broker,
+        portfolio=portfolio,
+        startup_recovery_report=startup_recovery_report,
+        order_journal_summary=order_journal_replay_summary,
+        quote_fresh=None,
+        checked_at=datetime.datetime.now(JST),
+    )
+    account["live_readiness_allowed"] = startup_live_readiness_report.allowed
+    account["live_readiness_reason"] = startup_live_readiness_report.reason
+    account["live_readiness_checked_at"] = startup_live_readiness_report.checked_at
+    account["live_readiness_blocking_reasons"] = list(startup_live_readiness_report.blocking_reasons[:25])
+    print(f"⚠️ [LIVE-READINESS] {startup_live_readiness_report.format_compact()}")
+    for item in startup_live_readiness_report.blocking_items[:5]:
+        evidence_text = ", ".join(item.evidence[:4]) if item.evidence else "none"
+        print(f"⚠️ [LIVE-READINESS] - {item.name}: {item.reason} | evidence={evidence_text}")
+    if TRADE_MODE == "KABUCOM_LIVE" and not startup_live_readiness_report.allowed:
+        send_discord_notify(f"🔎 [LIVE-READINESS] {startup_live_readiness_report.format_compact()}")
+
     atomic_write_json(ACCOUNT_FILE, account)
 
     while True:
@@ -1955,25 +2007,6 @@ def _main_exec():
         else:
             should_scan_override = True
 
-        if phase == MarketPhase.CLOSING_TIME and not DEBUG_MODE:
-            print("\n🏁 15:30（大引け）を過ぎました。本日の運用を終了します。")
-            send_discord_notify("🏁 【業務終了】大引けを過ぎたため運用を終了しました。")
-            shutdown_result = perform_safe_shutdown(
-                broker=broker,
-                portfolio=portfolio,
-                account=account,
-                is_sim=is_sim,
-                realtime_buffers=realtime_buffers,
-                reason="closing_time",
-            )
-            portfolio = shutdown_result.updated_portfolio
-            account = shutdown_result.updated_account
-            if not is_sim and shutdown_result.success:
-                terminate_kabu_station()
-            elif not is_sim:
-                print("⚠️ [STOP] 大引けの安全停止が未解決のため、kabuステーション終了は見送ります。")
-            break
-
         phase_entry_blocked = False
         if not DEBUG_MODE:
             jpx_day_status = get_jpx_trading_day_status(
@@ -1991,7 +2024,29 @@ def _main_exec():
                     reason=non_trading_day_reason,
                 )
                 break
-            
+            half_day_session = bool(getattr(jpx_day_status, "half_day", False))
+            phase = get_market_phase(now_time, half_day=half_day_session)
+
+            if phase == MarketPhase.CLOSING_TIME:
+                closing_label = "11:30（半日立会の大引け）" if half_day_session else "15:30（大引け）"
+                print(f"\n🏁 {closing_label}を過ぎました。本日の運用を終了します。")
+                send_discord_notify(f"🏁 【業務終了】{closing_label}を過ぎたため運用を終了しました。")
+                shutdown_result = perform_safe_shutdown(
+                    broker=broker,
+                    portfolio=portfolio,
+                    account=account,
+                    is_sim=is_sim,
+                    realtime_buffers=realtime_buffers,
+                    reason="closing_time",
+                )
+                portfolio = shutdown_result.updated_portfolio
+                account = shutdown_result.updated_account
+                if not is_sim and shutdown_result.success:
+                    terminate_kabu_station()
+                elif not is_sim:
+                    print("⚠️ [STOP] 大引けの安全停止が未解決のため、kabuステーション終了は見送ります。")
+                break
+
             if phase in [MarketPhase.PRE_MARKET, MarketPhase.LUNCH]:
                 phase_entry_blocked = True
 
@@ -2156,6 +2211,21 @@ def _main_exec():
         if boards:
             record_intraday_snapshots(server_datetime, boards, realtime_buffers)
 
+        live_readiness_report = _build_live_readiness_report(
+            broker=broker,
+            portfolio=portfolio,
+            startup_recovery_report=loop_recovery_report,
+            order_journal_summary=current_order_journal_replay_summary,
+            quote_fresh=is_sim or _is_board_quote_snapshot_fresh(boards, server_datetime),
+            checked_at=server_datetime,
+        )
+        account["live_readiness_allowed"] = live_readiness_report.allowed
+        account["live_readiness_reason"] = live_readiness_report.reason
+        account["live_readiness_checked_at"] = live_readiness_report.checked_at
+        account["live_readiness_blocking_reasons"] = list(live_readiness_report.blocking_reasons[:25])
+        if not live_readiness_report.allowed:
+            print(f"⚠️ [LIVE-READINESS] {live_readiness_report.format_compact()}")
+
         try:
             # [V131.1 Aegis Enhancement] Regime Filter & Trend Health
             regime, is_trend_snapped = detect_market_regime(data_df=jp_cache_df, buffer=realtime_buffers)
@@ -2209,6 +2279,7 @@ def _main_exec():
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
         elif not is_sim and _portfolio_has_unresolved_execution_state(portfolio): should_scan = False
         elif not is_sim and loop_recovery_report.needs_manual_review: should_scan = False
+        elif TRADE_MODE == "KABUCOM_LIVE" and not live_readiness_report.allowed: should_scan = False
         elif (
             live_financial_write_gate_status is not None
             and not live_financial_write_gate_status.allowed
@@ -2243,6 +2314,8 @@ def _main_exec():
             shutdown_requested=SHUTDOWN_REQUESTED,
             protective_stop_pending_count=loop_recovery_report.protective_stop_pending_count,
             protective_stop_orphan_count=loop_recovery_report.protective_stop_orphan_count,
+            live_readiness_allowed=live_readiness_report.allowed,
+            live_readiness_reason=live_readiness_report.reason,
         )
         entry_authorization = evaluate_entry_authorization(entry_authorization_context)
         if not entry_authorization.allowed:
