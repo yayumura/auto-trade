@@ -436,6 +436,7 @@ from core.logic import (
     resolve_daytrade_intraday_target_mult,
     resolve_daytrade_live_exit_decision,
     calculate_position_stops,
+    update_daytrade_post_entry_extrema,
     cancel_linked_protective_stop_before_exit,
     resolve_protective_stop_order_id,
 )
@@ -522,7 +523,7 @@ def ensure_daytrade_week_state(account, total_equity, server_datetime):
     return account
 
 
-def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None, quote_time=None):
+def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None, quote_time=None, quote_is_fresh=True):
     latest_close_map = latest_close_map or {}
     quote_time_str = quote_time.strftime('%Y-%m-%d %H:%M:%S') if quote_time is not None else None
     updated = []
@@ -537,10 +538,7 @@ def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=N
         elif code in latest_close_map and latest_close_map[code] > 0:
             current_price = latest_close_map[code]
         pos["current_price"] = round(float(current_price), 1)
-        pos["highest_price"] = round(max(float(pos.get("highest_price", pos["buy_price"])), float(current_price)), 1)
-        pos["lowest_price"] = round(min(float(pos.get("lowest_price", pos["buy_price"])), float(current_price)), 1)
-        pos["post_entry_high"] = pos["highest_price"]
-        pos["post_entry_low"] = pos["lowest_price"]
+        pos = update_daytrade_post_entry_extrema(pos, current_price, quote_is_fresh=bool(quote_is_fresh))
         if "entry_timestamp" not in pos:
             pos["entry_timestamp"] = pos.get("buy_time")
         if quote_time_str is not None:
@@ -896,7 +894,7 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
     if not execution_id_text and normalized_execution_ids:
         execution_id_text = normalized_execution_ids[0]
 
-    return {
+    record = {
         "code": str(item["code"]),
         "name": item.get("name", str(item["code"])),
         "setup_type": setup_type,
@@ -946,6 +944,7 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "exit_order_filled_qty": 0,
         "exit_order_remaining_qty": 0,
     }
+    return update_daytrade_post_entry_extrema(record, executed_price)
 
 
 def build_daytrade_exit_log_row(
@@ -1094,6 +1093,7 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
     if is_sim and original_positions:
         for position in original_positions:
             current_price = float(position.get("current_price", position["buy_price"]))
+            position = update_daytrade_post_entry_extrema(position, current_price)
             sell_price = current_price * (1.0 - SLIPPAGE_RATE)
             shares = int(position["shares"])
             pnl = (sell_price - float(position["buy_price"])) * shares
@@ -1118,7 +1118,7 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
                     modeled_exit_price=current_price,
                     exit_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                     session_open=position.get("buy_price"),
-                    session_high=position.get("post_entry_high", position.get("highest_price", current_price)),
+                    session_high=position.get("post_entry_high", position.get("buy_price", current_price)),
                     session_low=position.get("post_entry_low", min(float(position.get("buy_price", current_price)), float(current_price))),
                     filled_shares=shares,
                     remaining_shares=0,
@@ -1166,7 +1166,7 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
     return updated_portfolio, sell_actions, account
 
 
-def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realtime_buffers):
+def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realtime_buffers, quote_is_fresh=True):
     if not portfolio:
         return [], [], account
 
@@ -1194,15 +1194,11 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
         if current_price <= 0:
             remaining_portfolio.append(position)
             continue
+        position = update_daytrade_post_entry_extrema(position, current_price, quote_is_fresh=bool(quote_is_fresh))
 
         session_open = float(buffer.get_session_open() or position.get("buy_price") or current_price)
-        session_high = max(
-            float(position.get("post_entry_high", position.get("highest_price", position["buy_price"]))),
-            float(current_price),
-        )
-        session_low = float(position.get("post_entry_low", position.get("lowest_price", position["buy_price"])))
-        if not session_low or session_low <= 0:
-            session_low = min(float(position.get("buy_price", current_price)), current_price)
+        session_high = float(position.get("post_entry_high", position.get("buy_price", current_price)))
+        session_low = float(position.get("post_entry_low", position.get("buy_price", current_price)))
 
         buy_price = float(position["buy_price"])
         buy_atr = float(position.get("buy_atr", 0.0))
@@ -1348,10 +1344,6 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             remaining_position = dict(position)
             remaining_position["shares"] = remaining_shares
             remaining_position["current_price"] = round(observed_price, 1)
-            remaining_position["highest_price"] = round(max(float(position.get("highest_price", buy_price)), session_high), 1)
-            remaining_position["lowest_price"] = round(min(float(position.get("lowest_price", buy_price)), session_low), 1)
-            remaining_position["post_entry_high"] = remaining_position["highest_price"]
-            remaining_position["post_entry_low"] = remaining_position["lowest_price"]
             remaining_position["last_quote_timestamp"] = exit_time
             if isinstance(details, dict) and details.get("unresolved"):
                 remaining_position["exit_order_unresolved"] = True
@@ -2290,6 +2282,7 @@ def _main_exec():
             realtime_buffers=realtime_buffers,
             latest_close_map=latest_close_map,
             quote_time=server_datetime,
+            quote_is_fresh=quote_fresh_ok,
         )
         portfolio, signal_close_actions, account = close_daytrade_positions_by_signal(
             portfolio=portfolio,
@@ -2297,6 +2290,7 @@ def _main_exec():
             broker=broker,
             is_sim=is_sim,
             realtime_buffers=realtime_buffers,
+            quote_is_fresh=quote_fresh_ok,
         )
         if signal_close_actions:
             actions_taken.extend(signal_close_actions)
@@ -2438,6 +2432,7 @@ def _main_exec():
                         realtime_buffers=realtime_buffers,
                         latest_close_map=latest_close_snapshot,
                         quote_time=server_datetime,
+                        quote_is_fresh=quote_fresh_ok,
                     )
                     top_candidates = snapshot["top_candidates"]
                     print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")
