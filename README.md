@@ -666,6 +666,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_kabucom_broker.py`
   - `resolve_stock_order_action()` が long-only の fail-closed になり、short action を拒否すること
   - `core/kabucom_broker.py` の POST 再送抑止
+  - `core/kabucom_broker.py` の GET 429 Retry-After 待機が上限付きで、shutdown 要求で中断できること
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
   - LIVE financial write gate が `KABUCOM_TEST` fixture provenance と structured CI attestation bundle (`.json` + `.sha256`) を要求し、`KABUCOM_LIVE` では operator ack を `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` に限定し、legacy boolean / explicit 引数を live gate に使えないこと
   - live 実行では GitHub Actions の workflow run / artifact の照合ができる場合、artifact digest と zip 内容まで検証すること
@@ -885,6 +886,7 @@ python -m pytest tests/test_order_journal.py
 - 戦略変更は、まず [core/logic.py](core/logic.py) の shared logic を直し、その結果を本番・バックテストから参照させます
 - 改善探索では、やみくもに閾値を振るのではなく、負け日・未達週の原因分析から仮説を立てます
 - 効かなかった案は [STRATEGY_EXPERIMENT_LOG.md](STRATEGY_EXPERIMENT_LOG.md) に残して、別セッションで同じ試行を繰り返さないようにします
+- 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
 Last updated: 2026-06-19
