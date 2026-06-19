@@ -113,6 +113,94 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["protective_stop_order_id"] is None
 
 
+def test_mark_daytrade_portfolio_updates_post_entry_extrema_from_current_quote_not_legacy_high_low():
+    portfolio = [
+        {
+            "code": "1000",
+            "name": "Foo",
+            "buy_time": "2026-04-21 09:03:00",
+            "buy_price": 100.0,
+            "current_price": 100.0,
+            "highest_price": 120.0,
+            "lowest_price": 95.0,
+            "post_entry_high": 105.0,
+            "post_entry_low": 99.0,
+            "shares": 300,
+        }
+    ]
+
+    updated = auto_trade.mark_daytrade_portfolio(
+        portfolio,
+        latest_close_map={"1000": 106.0},
+        quote_time=pd.Timestamp("2026-04-21 09:15:00"),
+    )
+
+    record = updated[0]
+    assert record["current_price"] == 106.0
+    assert record["post_entry_high"] == 106.0
+    assert record["post_entry_low"] == 99.0
+    assert record["highest_price"] == 106.0
+    assert record["lowest_price"] == 99.0
+
+
+def test_mark_daytrade_portfolio_initializes_post_entry_extrema_without_legacy_high_low_bootstrap():
+    portfolio = [
+        {
+            "code": "1000",
+            "name": "Foo",
+            "buy_time": "2026-04-21 09:03:00",
+            "buy_price": 100.0,
+            "current_price": 100.0,
+            "highest_price": 120.0,
+            "lowest_price": 95.0,
+            "shares": 300,
+        }
+    ]
+
+    updated = auto_trade.mark_daytrade_portfolio(
+        portfolio,
+        latest_close_map={"1000": 106.0},
+        quote_time=pd.Timestamp("2026-04-21 09:15:00"),
+        quote_is_fresh=True,
+    )
+
+    record = updated[0]
+    assert record["current_price"] == 106.0
+    assert record["post_entry_high"] == 106.0
+    assert record["post_entry_low"] == 100.0
+    assert record["highest_price"] == 106.0
+    assert record["lowest_price"] == 100.0
+
+
+def test_mark_daytrade_portfolio_skips_post_entry_extrema_update_for_stale_quote():
+    portfolio = [
+        {
+            "code": "1000",
+            "name": "Foo",
+            "buy_time": "2026-04-21 09:03:00",
+            "buy_price": 100.0,
+            "current_price": 100.0,
+            "post_entry_high": 105.0,
+            "post_entry_low": 99.0,
+            "shares": 300,
+        }
+    ]
+
+    updated = auto_trade.mark_daytrade_portfolio(
+        portfolio,
+        latest_close_map={"1000": 110.0},
+        quote_time=pd.Timestamp("2026-04-21 09:15:00"),
+        quote_is_fresh=False,
+    )
+
+    record = updated[0]
+    assert record["current_price"] == 110.0
+    assert record["post_entry_high"] == 105.0
+    assert record["post_entry_low"] == 99.0
+    assert record["highest_price"] == 105.0
+    assert record["lowest_price"] == 99.0
+
+
 def test_sync_daytrade_registry_tracks_success_and_failure():
     class _Broker:
         def __init__(self, register_result=True, unregister_result=True):
@@ -574,6 +662,8 @@ def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_
         "buy_price": 100.0,
         "highest_price": 105.0,
         "lowest_price": 99.2,
+        "post_entry_high": 105.0,
+        "post_entry_low": 99.2,
         "current_price": 100.0,
         "shares": 300,
         "buy_atr": 2.0,
@@ -685,6 +775,8 @@ def test_close_daytrade_positions_by_signal_marks_partial_remainder_unresolved_w
         "buy_price": 100.0,
         "highest_price": 105.0,
         "lowest_price": 99.2,
+        "post_entry_high": 105.0,
+        "post_entry_low": 99.2,
         "current_price": 100.0,
         "shares": 300,
         "buy_atr": 2.0,
@@ -786,6 +878,8 @@ def test_close_daytrade_positions_by_signal_skips_exit_when_protective_stop_canc
         "buy_price": 100.0,
         "highest_price": 105.0,
         "lowest_price": 99.2,
+        "post_entry_high": 105.0,
+        "post_entry_low": 99.2,
         "current_price": 100.0,
         "shares": 300,
         "buy_atr": 2.0,

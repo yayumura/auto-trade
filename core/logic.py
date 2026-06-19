@@ -4051,6 +4051,67 @@ def calculate_position_stops(buy_price, buy_atr, max_price, current_price,
     return tsl_price, target_price
 
 
+def update_daytrade_post_entry_extrema(
+    position,
+    current_price,
+    *,
+    quote_high_price=None,
+    quote_low_price=None,
+    quote_is_fresh: bool = True,
+):
+    """Keep post-entry extrema separate from legacy high/low fields.
+
+    `post_entry_*` is the source of truth. If the current quote is stale or
+    unverified, preserve the existing extrema instead of moving them.
+    """
+    updated = dict(position or {})
+
+    def _resolve_reference_price() -> float:
+        for candidate in (updated.get("buy_price"), current_price):
+            if _is_invalid_number(candidate):
+                continue
+            price = float(candidate)
+            if price > 0:
+                return price
+        return 0.0
+
+    def _resolve_initial_extreme(primary_key: str, reference_price: float) -> float:
+        value = updated.get(primary_key)
+        if not _is_invalid_number(value):
+            price = float(value)
+            if price > 0:
+                return price
+        return reference_price
+
+    reference_price = _resolve_reference_price()
+    post_entry_high = _resolve_initial_extreme("post_entry_high", reference_price)
+    post_entry_low = _resolve_initial_extreme("post_entry_low", reference_price)
+
+    if quote_is_fresh:
+        observed_high = current_price if _is_invalid_number(quote_high_price) else quote_high_price
+        observed_low = current_price if _is_invalid_number(quote_low_price) else quote_low_price
+        if not _is_invalid_number(observed_high):
+            quote_high = float(observed_high)
+            if quote_high > 0:
+                post_entry_high = max(post_entry_high, quote_high)
+        if not _is_invalid_number(observed_low):
+            quote_low = float(observed_low)
+            if quote_low > 0:
+                post_entry_low = quote_low if post_entry_low <= 0 else min(post_entry_low, quote_low)
+
+    if post_entry_high <= 0:
+        post_entry_high = reference_price
+    if post_entry_low <= 0:
+        post_entry_low = reference_price
+
+    updated["post_entry_high"] = round(float(post_entry_high), 1)
+    updated["post_entry_low"] = round(float(post_entry_low), 1)
+    # Keep legacy fields aligned so older call sites continue to see the same extrema.
+    updated["highest_price"] = updated["post_entry_high"]
+    updated["lowest_price"] = updated["post_entry_low"]
+    return updated
+
+
 def resolve_protective_stop_order_id(position: dict | None = None, stop_order_id: str | None = None) -> str:
     """Resolve the best known linked protective-stop order id for a position."""
     explicit_stop_order_id = str(stop_order_id or "").strip()
@@ -4086,9 +4147,10 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             remaining_portfolio.append(dict(p))
             continue
         if realtime_buffers and code in realtime_buffers:
-            current_price = realtime_buffers[code].get_latest_price()
+            current_price = float(realtime_buffers[code].get_latest_price() or p.get('current_price', p['buy_price']))
         else:
             current_price = float(p.get('current_price', p['buy_price']))
+        p = update_daytrade_post_entry_extrema(p, current_price)
         ownership = str(p.get("ownership", "MANAGED_BY_BOT" if is_simulation else "AMBIGUOUS")).upper()
         if not is_simulation and ownership != "MANAGED_BY_BOT":
             sell_actions.append(f"SKIP {code} - unmanaged position ({ownership})")
@@ -4150,8 +4212,8 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             "modeled_exit_price": float(current_price),
             "remaining_shares": remaining_shares,
             "session_open": float(p.get("buy_price", current_price)),
-            "session_high": float(max(float(p.get("highest_price", current_price)), float(current_price))),
-            "session_low": float(min(float(p.get("lowest_price", p.get("buy_price", current_price))), float(current_price))),
+            "session_high": float(p.get("post_entry_high", p.get("buy_price", current_price))),
+            "session_low": float(p.get("post_entry_low", p.get("buy_price", current_price))),
             "exit_time": dt.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
             "exit_reason": "daytrade_flatten",
         })
@@ -4159,8 +4221,6 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             remaining_position = dict(p)
             remaining_position["shares"] = remaining_shares
             remaining_position["current_price"] = round(observed_price, 1)
-            remaining_position["highest_price"] = round(max(float(p.get("highest_price", current_price)), float(current_price)), 1)
-            remaining_position["lowest_price"] = round(min(float(p.get("lowest_price", p.get("buy_price", current_price))), float(current_price)), 1)
             remaining_position["last_quote_timestamp"] = dt.now(JST).strftime('%Y-%m-%d %H:%M:%S')
             remaining_portfolio.append(remaining_position)
 

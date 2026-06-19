@@ -628,6 +628,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - live entry 後の protective stop arming と portfolio 反映
   - daytrade exit decision 行の modeled exit / fade 指標と、live 約定時の二重スリッページ防止
   - live での intraday failed-runup break-even exit と post-entry high/low 追跡
+  - post-entry high/low が legacy `highest_price` / `lowest_price` に引きずられず、fresh な current quote から更新されること。stale quote では更新しないこと
   - shared intraday stop / target と `14:30` force flatten の live exit フロー
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
   - live での unmanaged position を signal flatten / force flatten から除外すること
