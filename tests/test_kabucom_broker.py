@@ -2,6 +2,7 @@ import unittest
 import json
 import io
 import tempfile
+from datetime import datetime, timedelta
 from dataclasses import replace
 from hashlib import sha256
 from unittest.mock import patch
@@ -12,7 +13,7 @@ import requests
 import pandas as pd
 from types import SimpleNamespace
 
-from core.config import RUNTIME_LIVE_ORDER_CONFIG_HASH
+from core.config import JST, RUNTIME_LIVE_ORDER_CONFIG_HASH
 from core.kabucom_broker import (
     MAX_RATE_LIMIT_RETRY_AFTER_SECONDS,
     KabucomBroker,
@@ -41,7 +42,7 @@ from core.kabucom_order_state import (
 )
 from core.kabucom_quote import parse_board_quote
 from core.kabucom_contracts import TEST_CONTRACT_FIXTURE_PATH, hash_contract_fixture, load_contract_fixture
-from core.jpx_calendar import get_jpx_trading_day_status
+from core.jpx_calendar import JPX_CALENDAR_MAX_AGE_DAYS, get_jpx_trading_day_status
 from core.live_order_gate import (
     EntryAuthorizationContext,
     evaluate_entry_authorization,
@@ -155,6 +156,49 @@ def _write_live_write_attestation_artifact(
     attestation_path = Path(tmpdir) / "live_write_attestation.json"
     write_live_write_attestation(attestation_path, attestation)
     return fixture_path, attestation_path, attestation
+
+
+def _write_jpx_calendar_artifact(tmpdir: str, payload: dict[str, object]) -> Path:
+    calendar_path = Path(tmpdir) / "jpx_trading_calendar.json"
+    calendar_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return calendar_path
+
+
+def _make_jpx_calendar_payload(
+    *,
+    source_url: str | None = "https://example.com/jpx_trading_calendar.json",
+    source_hash: str | None = "sha256:jpx-calendar",
+    generated_at: str | None = None,
+    coverage_start: str | None = None,
+    coverage_end: str | None = None,
+    closed_dates: list[str] | None = None,
+    trading_dates: list[str] | None = None,
+    half_day_dates: list[str] | None = None,
+    source: str | None = None,
+) -> dict[str, object]:
+    now = datetime.now(JST)
+    if generated_at is None:
+        generated_at = (now - timedelta(days=1)).isoformat()
+    if coverage_start is None:
+        coverage_start = (now.date() - timedelta(days=1)).isoformat()
+    if coverage_end is None:
+        coverage_end = (now.date() + timedelta(days=1)).isoformat()
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "closed_dates": closed_dates if closed_dates is not None else [],
+        "trading_dates": trading_dates if trading_dates is not None else [],
+        "half_day_dates": half_day_dates if half_day_dates is not None else [],
+        "generated_at": generated_at,
+        "coverage_start": coverage_start,
+        "coverage_end": coverage_end,
+    }
+    if source_url is not None:
+        payload["source_url"] = source_url
+    if source_hash is not None:
+        payload["source_hash"] = source_hash
+    if source is not None:
+        payload["source"] = source
+    return payload
 
 
 def _write_live_risk_review_artifact(
@@ -1465,6 +1509,7 @@ class TestKabucomBroker(unittest.TestCase):
                 "registry": 999999,
                 RequestBudgetBucket.MARKET_DATA: 999999,
                 "auth": 999999,
+                "positions": 999999,
                 "other": 999999,
             }
             report = build_live_readiness_report(
@@ -1494,7 +1539,9 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertIn("registry:", item_map["request_budget"].reason)
         self.assertIn("market_data:", item_map["request_budget"].reason)
         self.assertIn("auth:", item_map["request_budget"].reason)
+        self.assertIn("positions:", item_map["request_budget"].reason)
         self.assertIn("other:", item_map["request_budget"].reason)
+        self.assertTrue(any(entry.startswith("positions=") for entry in item_map["request_budget"].evidence))
 
     def test_build_live_readiness_report_blocks_when_journal_reconciliation_is_dirty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2417,28 +2464,23 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_jpx_calendar_strict_mode_fails_closed_on_coverage_gap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            calendar_path = Path(tmpdir) / "jpx_trading_calendar.json"
-            calendar_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "closed_dates": [],
-                        "trading_dates": [],
-                        "half_day_dates": [],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
+            today = datetime.now(JST).date()
+            target_date = today + timedelta(days=2)
+            calendar_path = _write_jpx_calendar_artifact(
+                tmpdir,
+                _make_jpx_calendar_payload(
+                    coverage_start=(today - timedelta(days=1)).isoformat(),
+                    coverage_end=(today + timedelta(days=1)).isoformat(),
                 ),
-                encoding="utf-8",
             )
 
             strict_status = get_jpx_trading_day_status(
-                pd.Timestamp("2026-06-03"),
+                pd.Timestamp(target_date),
                 calendar_path=calendar_path,
                 require_source=True,
             )
             fallback_status = get_jpx_trading_day_status(
-                pd.Timestamp("2026-06-03"),
+                pd.Timestamp(target_date),
                 calendar_path=calendar_path,
                 require_source=False,
             )
@@ -2455,23 +2497,18 @@ class TestKabucomBroker(unittest.TestCase):
 
     def test_jpx_calendar_marks_half_day_sessions_in_strict_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            calendar_path = Path(tmpdir) / "jpx_trading_calendar.json"
-            calendar_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "closed_dates": [],
-                        "trading_dates": [],
-                        "half_day_dates": ["2026-06-03"],
-                    },
-                    ensure_ascii=False,
-                    indent=2,
+            today = datetime.now(JST).date()
+            calendar_path = _write_jpx_calendar_artifact(
+                tmpdir,
+                _make_jpx_calendar_payload(
+                    coverage_start=(today - timedelta(days=1)).isoformat(),
+                    coverage_end=(today + timedelta(days=1)).isoformat(),
+                    half_day_dates=[today.isoformat()],
                 ),
-                encoding="utf-8",
             )
 
             status = get_jpx_trading_day_status(
-                pd.Timestamp("2026-06-03"),
+                pd.Timestamp(today),
                 calendar_path=calendar_path,
                 require_source=True,
             )
@@ -2483,6 +2520,107 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(status.source_reason, "calendar_half_day")
         self.assertTrue(status.half_day)
         self.assertFalse(status.used_fallback)
+
+    def test_jpx_calendar_strict_mode_rejects_invalid_schema_and_date_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            today = datetime.now(JST).date()
+            future_generated_at = (datetime.now(JST) + timedelta(days=1)).isoformat()
+            stale_generated_at = (datetime.now(JST) - timedelta(days=JPX_CALENDAR_MAX_AGE_DAYS + 1)).isoformat()
+            base_payload = _make_jpx_calendar_payload(
+                coverage_start=(today - timedelta(days=1)).isoformat(),
+                coverage_end=(today + timedelta(days=1)).isoformat(),
+                trading_dates=[today.isoformat()],
+            )
+            cases = [
+                ("invalid_json", "{ not json", "jpx_calendar_invalid"),
+                ("missing_source_hash", {**base_payload, "source_hash": None}, "jpx_calendar_invalid"),
+                ("missing_generated_at", {**base_payload, "generated_at": None}, "jpx_calendar_invalid"),
+                ("missing_coverage_start", {**base_payload, "coverage_start": None}, "jpx_calendar_invalid"),
+                ("missing_coverage_end", {**base_payload, "coverage_end": None}, "jpx_calendar_invalid"),
+                ("coverage_start_after_end", {**base_payload, "coverage_start": (today + timedelta(days=2)).isoformat()}, "jpx_calendar_invalid"),
+                ("future_generated_at", {**base_payload, "generated_at": future_generated_at}, "jpx_calendar_invalid"),
+                ("stale_generated_at", {**base_payload, "generated_at": stale_generated_at}, "jpx_calendar_stale"),
+                ("closed_overlaps_trading", {**base_payload, "closed_dates": [today.isoformat()]}, "jpx_calendar_invalid"),
+                ("half_day_overlaps_trading", {**base_payload, "half_day_dates": [today.isoformat()]}, "jpx_calendar_invalid"),
+                (
+                    "source_url_missing_in_live",
+                    {**base_payload, "source_url": None, "source": "https://example.com/jpx_trading_calendar.json"},
+                    "jpx_calendar_invalid",
+                ),
+            ]
+
+            for case_name, payload, expected_reason in cases:
+                with self.subTest(case_name=case_name):
+                    calendar_path = Path(tmpdir) / f"{case_name}.json"
+                    if isinstance(payload, str):
+                        calendar_path.write_text(payload, encoding="utf-8")
+                    else:
+                        clean_payload = dict(payload)
+                        if clean_payload.get("source_url") is None:
+                            clean_payload.pop("source_url", None)
+                        if clean_payload.get("source_hash") is None:
+                            clean_payload.pop("source_hash", None)
+                        if clean_payload.get("generated_at") is None:
+                            clean_payload.pop("generated_at", None)
+                        if clean_payload.get("coverage_start") is None:
+                            clean_payload.pop("coverage_start", None)
+                        if clean_payload.get("coverage_end") is None:
+                            clean_payload.pop("coverage_end", None)
+                        calendar_path.write_text(json.dumps(clean_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+                    status = get_jpx_trading_day_status(
+                        pd.Timestamp(today),
+                        calendar_path=calendar_path,
+                        require_source=True,
+                    )
+
+                    self.assertFalse(status.source_ready)
+                    self.assertFalse(status.used_fallback)
+                    self.assertEqual(status.source_reason, expected_reason)
+                    self.assertFalse(status.trading_day)
+
+    def test_jpx_calendar_non_strict_mode_falls_back_when_source_is_invalid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            today = datetime.now(JST).date()
+            invalid_calendar_path = Path(tmpdir) / "invalid_jpx_calendar.json"
+            invalid_calendar_path.write_text("{ not json", encoding="utf-8")
+            invalid_status = get_jpx_trading_day_status(
+                pd.Timestamp(today),
+                calendar_path=invalid_calendar_path,
+                require_source=False,
+            )
+
+            legacy_calendar_path = _write_jpx_calendar_artifact(
+                tmpdir,
+                _make_jpx_calendar_payload(
+                    source_url=None,
+                    source="https://example.com/legacy-jpx-calendar.json",
+                    coverage_start=(today - timedelta(days=1)).isoformat(),
+                    coverage_end=(today + timedelta(days=1)).isoformat(),
+                    trading_dates=[today.isoformat()],
+                ),
+            )
+            legacy_strict_status = get_jpx_trading_day_status(
+                pd.Timestamp(today),
+                calendar_path=legacy_calendar_path,
+                require_source=True,
+            )
+            legacy_fallback_status = get_jpx_trading_day_status(
+                pd.Timestamp(today),
+                calendar_path=legacy_calendar_path,
+                require_source=False,
+            )
+
+        self.assertFalse(invalid_status.source_ready)
+        self.assertFalse(invalid_status.source_valid)
+        self.assertTrue(invalid_status.used_fallback)
+        self.assertEqual(invalid_status.source_reason, "fallback_jpholiday")
+        self.assertEqual(legacy_strict_status.source_reason, "jpx_calendar_invalid")
+        self.assertFalse(legacy_strict_status.source_valid)
+        self.assertTrue(legacy_fallback_status.source_ready)
+        self.assertTrue(legacy_fallback_status.source_valid)
+        self.assertTrue(legacy_fallback_status.trading_day)
+        self.assertEqual(legacy_fallback_status.source_reason, "calendar_trading_date")
 
     def test_live_financial_write_gate_blocks_when_jpx_calendar_source_has_coverage_gap_in_live_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3487,17 +3625,22 @@ class TestKabucomBroker(unittest.TestCase):
             _FakeResponse(200, {"StockAccountWallet": 1.0}),
             _FakeResponse(200, {"MarginAccountWallet": 2.0}),
             _FakeResponse(200, {"ok": True}),
+            _FakeResponse(200, []),
         ]))
 
         broker._api_request("GET", "orders")
         broker._api_request("GET", "wallet/cash")
         broker._api_request("GET", "wallet/margin")
         broker._api_request("GET", "register")
+        broker._api_request("GET", "positions?product=2")
 
         self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.ORDERS], 2)
         self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.WALLET], 2)
         self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.REGISTRY], 1)
+        self.assertGreaterEqual(broker.request_budget_counts[RequestBudgetBucket.POSITIONS], 1)
         self.assertEqual(broker._classify_request_bucket("GET", "board/7203@1"), RequestBudgetBucket.MARKET_DATA)
+        self.assertEqual(broker._classify_request_bucket("GET", "positions?product=2"), RequestBudgetBucket.POSITIONS)
+        self.assertEqual(broker._classify_request_bucket("GET", "positions"), RequestBudgetBucket.POSITIONS)
         self.assertEqual(broker._classify_request_bucket("POST", "sendorder"), RequestBudgetBucket.ORDERS)
         self.assertEqual(broker._classify_request_bucket("PUT", "cancelorder"), RequestBudgetBucket.ORDERS)
 
