@@ -804,7 +804,7 @@ python -m pytest tests/test_order_journal.py
 
 ### KABUCOM_LIVE financial write gate
 
-`KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。現時点では actual `KABUCOM_TEST` capture / GitHub Actions run-state / JPX calendar / risk review が未完了なので、reopen checklist が揃うまで closed です。
+`KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。現時点では actual `KABUCOM_TEST` capture / GitHub Actions run-state / JPX calendar / structured operator ACK / risk review が未完了なので、reopen checklist が揃うまで closed です。
 
 ### Required external evidence
 
