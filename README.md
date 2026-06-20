@@ -675,7 +675,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - GitHub artifact verification が session fingerprint 変更で cache invalid になること
   - GitHub artifact verification が workflow_run_head_sha_mismatch / workflow_artifact_head_sha_mismatch / workflow_run_conclusion_failure / workflow_artifact_expired / timeout で fail closed になること
   - attestation bundle の digest sidecar が欠けるか mismatch なら live write を閉じること
-  - `TRADE_MODE=KABUCOM_LIVE` で JPX calendar source が無い場合、または coverage gap / fallback に落ちる場合に live write を閉じること
+  - `TRADE_MODE=KABUCOM_LIVE` で JPX calendar source の `source_url` / `source_hash` / `generated_at` / `coverage_start` / `coverage_end` / duplicate / overlap / stale を検証し、coverage gap / fallback に落ちる場合に live write を閉じること
   - `LiveReadinessReport` の `execution_id_truth` が aggregate `execution_ids` / duplicate execution_id / `position_lot_key_needs_review=True` を blocked にし、truth lot だけを ready 扱いすること
   - `LiveReadinessReport` の `execution_id_truth` が duplicate execution_id も blocked にすること
   - `LiveReadinessReport` の `no_lookahead_audit` が risk review blocked 時に ready にならないこと
@@ -698,7 +698,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - runtime entry authorization context が protective stop pending / orphan もブロックすること
   - runtime entry authorization context が registry 未同期もブロックすること
   - `LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed にし、`quote_freshness` では `quote_timestamp` / `received_at` / `age_seconds` / `max_age_seconds` の evidence を残し、`journal_reconciliation` では accepted order missing at broker / broker position without journal / journal filled without position / unconfirmed stop replay / corrupt final line / corrupt middle line を見分けること
-  - `request_budget` が orders / wallet / registry / market_data / auth / other のいずれかで予算超過すると blocked になること
+  - `request_budget` は new exposure だけを止め、protective stop / exit / cancel / read-only は別経路で継続すること
+  - `request_budget` が orders / wallet / positions / registry / market_data / auth / other のいずれかで予算超過すると blocked になること
   - `LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合に risk readiness / no-lookahead audit が ready にならないこと
   - risk review の `code_commit_sha` / `runtime_config_hash` / `approval_manifest_hash` 不一致が live readiness を閉じること
   - live 口座余力の `wallet/cash` / `wallet/margin` 分離と、永続 strategy state を broker snapshot に混ぜないこと
@@ -728,7 +729,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - API health が 401 を成功扱いしないこと
   - launcher の port reachable と authenticated ready を分離し、401 を認証完了扱いしないこと
   - `get_server_time` が symbol endpoint ではなく `wallet/cash` の `Date` header を使うこと
-  - request budget が orders / wallet / registry / market_data で分かれて記録されること
+  - request budget が orders / wallet / positions / registry / market_data / auth / other で分かれて記録されること
   - trade history の append-only 化
   - order journal の append-only 記録
 - `tests/test_file_io.py`
@@ -801,9 +802,11 @@ python -m pytest tests/test_order_journal.py
 
 ## KABUCOM_LIVE 再開 runbook
 
+### KABUCOM_LIVE financial write gate
+
 `KABUCOM_LIVE` の financial write は、外部依存が揃ったときだけ開きます。足りないものは捏造せず、closed のままにします。現時点では actual `KABUCOM_TEST` capture / GitHub Actions run-state / JPX calendar / risk review が未完了なので、reopen checklist が揃うまで closed です。
 
-### 再開条件の要約
+### Required external evidence
 
 | 何を見るか | 必要条件 |
 | --- | --- |
@@ -840,11 +843,14 @@ python -m pytest tests/test_order_journal.py
 ### JPX calendar source 運用
 
 - `contracts/jpx_trading_calendar.json` は authoritative source として扱う
-- `coverage_start` / `coverage_end` / `generated_at` / `source_url` / `source_hash` / `half_day_dates` を明記する
+- `schema_version=1`、`source_url`、`source_hash`、`generated_at`、`coverage_start`、`coverage_end`、`closed_dates`、`trading_dates`、`half_day_dates` を明記する
+- `source` は legacy compatibility field としてのみ読み込み、`KABUCOM_LIVE` の require_source では `source_url` 欠落を invalid 扱いにする
+- `generated_at` が `JPX_CALENDAR_MAX_AGE_DAYS = 370` を超えたら stale として fail closed にする
+- duplicate / overlap の日付は invalid にする
 - missing / invalid / stale / coverage gap / fallback は全部 fail closed
 - half-day は 11:30 で終了し、以後の新規 entry はしない
 
-### structured operator ACK
+### Required runtime acknowledgement
 
 - `operator_id`
 - `acknowledged_at`
@@ -879,7 +885,7 @@ python -m pytest tests/test_order_journal.py
 - `transaction_cost_stress` / `slippage_stress` / `capacity_liquidity_stress` / `rule_complexity_report` / `no_lookahead_audit_hash` が揃わない限り `risk_readiness` は true にしない
 - `code_commit_sha` / `runtime_config_hash` / `approval_manifest_hash` が現在値と一致しない review は使わない
 
-### KABUCOM_LIVE reopen checklist
+### Reopen checklist
 
 - actual `KABUCOM_TEST` fixture captured
 - GitHub Actions run green confirmed
@@ -899,4 +905,4 @@ python -m pytest tests/test_order_journal.py
 - 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-19
+Last updated: 2026-06-20

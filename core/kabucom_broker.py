@@ -75,6 +75,7 @@ class RequestBudgetBucket(Enum):
     AUTH = "auth"
     WALLET = "wallet"
     ORDERS = "orders"
+    POSITIONS = "positions"
     MARKET_DATA = "market_data"
     REGISTRY = "registry"
     OTHER = "other"
@@ -84,6 +85,7 @@ REQUEST_BUDGET_LIMITS = {
     RequestBudgetBucket.AUTH: 120,
     RequestBudgetBucket.WALLET: 1200,
     RequestBudgetBucket.ORDERS: 1200,
+    RequestBudgetBucket.POSITIONS: 1200,
     RequestBudgetBucket.MARKET_DATA: 3600,
     RequestBudgetBucket.REGISTRY: 3000,
     RequestBudgetBucket.OTHER: 1200,
@@ -222,6 +224,8 @@ class KabucomBroker(BaseBroker):
             return RequestBudgetBucket.WALLET
         if endpoint_text.startswith("orders") or endpoint_text.startswith("sendorder") or endpoint_text.startswith("cancelorder"):
             return RequestBudgetBucket.ORDERS
+        if endpoint_text.startswith("positions"):
+            return RequestBudgetBucket.POSITIONS
         if endpoint_text.startswith("board/") or endpoint_text.startswith("symbol/"):
             return RequestBudgetBucket.MARKET_DATA
         if endpoint_text.startswith("register") or endpoint_text.startswith("unregister"):
