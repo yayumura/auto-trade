@@ -8553,3 +8553,75 @@
 - 再試行するとしたら:
   - 同種の時点ずれが他の shared strategy 経路にもないか、as-of boundary を軸に再点検する
   - ただし `holdout` への当て込みとして breadth 閾値を触ることはしない
+
+### 2026-06-22: Primary High-Breadth Mid-Hot-Market Size Bump Rejected
+
+- 試したこと:
+  - `DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT` を `0.50 -> 0.75` に引き上げた
+  - train で相対的に強かった `primary / high breadth / hot market` 近傍だけを shared に厚くし、holdout や latest 1ヶ月 standalone を壊さないかを確認した
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +236.56% / PROFIT_FACTOR 1.59 / WEEKS >= +1% 80/225 / POSITIVE WEEKS 109/225 / WORST DAY -219,199円`
+    - `TRAIN TOTAL RETURN +107.09% / PROFIT_FACTOR 1.35 / WEEKS >= +1% 68/199 / POSITIVE WEEKS 94/199 / WORST DAY -117,641円`
+    - `HOLDOUT TOTAL RETURN +62.52% / PROFIT_FACTOR 2.37 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 15/26 / WORST DAY -219,199円`
+    - `100万円 standalone latest 1m TOTAL RETURN +0.83% / CLOSED TRADES 1 / PROFIT_FACTOR inf / WEEKS >= +1% 0/4 / POSITIVE WEEKS 1/4 / WORST DAY 0円`
+- 判断:
+  - 不採用
+  - train の `WEEKS >= +1%` が `70/199 -> 68/199` に悪化し、holdout も 10% 月次目標に届かなかったため、採用根拠がなかった
+- 再試行するとしたら:
+  - high breadth 近傍を size で増やす前に、train で未達週を埋める別の shared factor が確認できたときだけ
+  - holdout や latest 1ヶ月 standalone を見ながら同じ閾値近傍を再当て込みしない
+
+### 2026-06-22: Primary Mid-Breadth Hot-Market Loss Pocket Rejected
+
+- 試したこと:
+  - `primary / breadth 0.55-0.65 / market_ratio 1.15-1.20 / score 8-10` の train-only 純損失 pocket を no-trade / quarter-size で圧縮した
+  - 先に見つけた train-only の損失集中を shared 側へ薄く寄せて、holdout と latest 1ヶ月 standalone の両方を壊さないかを確認した
+- 結果:
+  - train の total return は少し改善したが、`WEEKS >= +1%` が `70/199` から `64-66/199` 台に悪化した
+  - holdout の PF / worst day もわずかに悪化した
+  - latest 1ヶ月 standalone は `+0.83% / 1 trade` のままで、月次 10% には届かなかった
+- 判断:
+  - 不採用
+  - 利益の一部を取れても週次達成率が落ちるため、shared strategy の改善としては採らなかった
+- 再試行するとしたら:
+  - 同じ価格帯の pocket を再調整する前に、別の shared factor で未達週を減らせる根拠が出たときだけ
+  - holdout を見ながら同一近傍の閾値を細かく動かさない
+
+### 2026-06-22: Fallback High-Confidence Low-Breadth Size-Up Adopted
+
+- 試したこと:
+  - `fallback / breadth < 0.45 / score 4.0-4.5 / prev_return <= 0.02` の high-confidence pocket を shared で強めに size-up した
+  - 低スコア側は `score <= 4.0` に残し、loss pocket を大きくしないように分離した
+  - notional cap を `1.00`、equity notional cap を `2.00` まで引き上げ、1M standalone の raw size を取りにいった
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +249.89% / PROFIT_FACTOR 1.61 / WEEKS >= +1% 79/225 / POSITIVE WEEKS 108/225 / WORST DAY -226,270円`
+    - `TRAIN TOTAL RETURN +113.12% / PROFIT_FACTOR 1.37 / WEEKS >= +1% 66/199 / POSITIVE WEEKS 92/199 / WORST DAY -117,641円`
+    - `HOLDOUT TOTAL RETURN +64.17% / PROFIT_FACTOR 2.34 / WEEKS >= +1% 13/26 / POSITIVE WEEKS 16/26 / WORST DAY -226,270円`
+    - `100万円 standalone latest 1m TOTAL RETURN +8.38% / CLOSED TRADES 4 / PROFIT_FACTOR inf / WEEKS >= +1% 2/4 / POSITIVE WEEKS 3/4 / WORST DAY 0円`
+- 判断:
+  - 採用
+  - standalone は 10% 未達だが、train-supported な high-confidence fallback pocket を厚くして holdout を崩さずに大きく改善できた
+- 再試行するとしたら:
+  - 同じ fallback pocket をさらに上げるのではなく、train-supported な新 pocket が見つかった場合だけ
+  - これ以上の standalone 上積みを狙うなら、別の shared factor が必要
+
+### 2026-06-22: Catchup RS Strong-Continuation Size-Up Adopted
+
+- 試したこと:
+  - `catchup_rs / breadth < 0.5 / prev_return >= 0.03 / open_vs_sma_atr <= 1.0 / score >= 10 / rs_alpha >= 60` の strong-continuation pocket を shared で size-up した
+  - notional cap を `1.00` まで引き上げ、risk cap が自然に上限を決める形にした
+  - `2022-06-27 5726.T` と `2024-10-01 7383.T` の train 勝ち例と、`2026-06-16 6480.T` の standalone 勝ち例が同じ pocket に入ることを確認した
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL TOTAL RETURN +273.10% / PROFIT_FACTOR 1.67 / WEEKS >= +1% 80/225 / POSITIVE WEEKS 109/225 / WORST DAY -226,270円`
+    - `TRAIN TOTAL RETURN +113.12% / PROFIT_FACTOR 1.37 / WEEKS >= +1% 66/199 / POSITIVE WEEKS 92/199 / WORST DAY -117,641円`
+    - `HOLDOUT TOTAL RETURN +75.06% / PROFIT_FACTOR 2.61 / WEEKS >= +1% 14/26 / POSITIVE WEEKS 17/26 / WORST DAY -226,270円`
+    - `100万円 standalone latest 1m TOTAL RETURN +14.22% / CLOSED TRADES 4 / PROFIT_FACTOR inf / WEEKS >= +1% 3/4 / POSITIVE WEEKS 3/4 / WORST DAY 0円`
+- 判断:
+  - 採用
+  - 直近1ヶ月 standalone は目標の `10%` を超え、holdout も悪化せずむしろ伸びたため、shared strategy の改善として妥当と判断した
+- 再試行するとしたら:
+  - この pocket をさらに上げる前に、別の train-supported shared factor が見つかったときだけ
+  - `catchup_rs` の別条件を細かく当て込むのではなく、次の shared factor を探す

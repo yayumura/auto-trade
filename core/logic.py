@@ -404,6 +404,14 @@ DAYTRADE_FALLBACK_BREADTH_THRESHOLD = 0.36
 DAYTRADE_FALLBACK_TREND_BUFFER = 0.98
 DAYTRADE_FALLBACK_MIN_SETUP_SCORE = 2.60
 DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT = 0.04
+DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_BREADTH = 0.45
+DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_SCORE = 4.0
+DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_NOTIONAL_PCT = 0.21
+DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_BREADTH = 0.45
+DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_SCORE = 4.0
+DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MAX_SCORE = 4.5
+DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_NOTIONAL_PCT = 1.00
+DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_EQUITY_NOTIONAL_PCT = 2.00
 DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT = 1.20
 DAYTRADE_FALLBACK_HIGH_BREADTH_EXTENDED_MIN_BREADTH = 0.55
 DAYTRADE_FALLBACK_HIGH_BREADTH_EXTENDED_MIN_PREV_RETURN = 0.04
@@ -523,6 +531,12 @@ DAYTRADE_CATCHUP_RS_MAX_OPEN_FROM_LOW_ATR = 4.0
 DAYTRADE_CATCHUP_RS_STOP_MULT = 0.80
 DAYTRADE_CATCHUP_RS_TARGET_MULT = 2.50
 DAYTRADE_CATCHUP_RS_NOTIONAL_PCT = 0.10
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_BREADTH = 0.50
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_PREV_RETURN = 0.03
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MAX_OPEN_VS_SMA_ATR = 1.0
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_SCORE = 10.0
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_RS_ALPHA = 60.0
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT = 1.00
 DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT = 2.00
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_WEEKDAY = 0
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_MAX = 0.45
@@ -1759,6 +1773,36 @@ def resolve_daytrade_primary_equity_notional_pct(
     return float(default_pct)
 
 
+def resolve_daytrade_fallback_notional_pct(
+    breadth_val,
+    score=None,
+    prev_return=None,
+    default_pct=DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+):
+    resolved_pct = float(default_pct)
+    if (
+        _is_invalid_number(breadth_val)
+        or _is_invalid_number(score)
+        or _is_invalid_number(prev_return)
+    ):
+        return resolved_pct
+    if (
+        float(breadth_val) < DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_BREADTH
+        and float(score) <= DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_SCORE
+        and float(prev_return) <= 0.02
+    ):
+        return max(resolved_pct, DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_NOTIONAL_PCT)
+    if (
+        float(breadth_val) < DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_BREADTH
+        and DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_SCORE
+        < float(score)
+        <= DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MAX_SCORE
+        and float(prev_return) <= 0.02
+    ):
+        return max(resolved_pct, DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_NOTIONAL_PCT)
+    return resolved_pct
+
+
 def resolve_daytrade_fallback_equity_notional_pct(
     gap_pct,
     breadth_val=None,
@@ -1795,6 +1839,22 @@ def resolve_daytrade_fallback_equity_notional_pct(
         and float(score) <= 4.0
     ):
         return min(resolved_pct, 0.30)
+    if (
+        not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(score)
+        and not _is_invalid_number(prev_return)
+        and not _is_invalid_number(open_vs_sma_atr)
+        and float(breadth_val) < DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_BREADTH
+        and DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_SCORE
+        < float(score)
+        <= DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MAX_SCORE
+        and float(prev_return) <= 0.02
+        and float(open_vs_sma_atr) <= 3.5
+    ):
+        return max(
+            resolved_pct,
+            DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_EQUITY_NOTIONAL_PCT,
+        )
     if (
         not _is_invalid_number(breadth_val)
         and not _is_invalid_number(score)
@@ -1994,6 +2054,10 @@ def resolve_daytrade_catchup_notional_pct(
     setup_type,
     breadth_val,
     market_ratio=None,
+    prev_return=None,
+    open_vs_sma_atr=None,
+    score=None,
+    rs_alpha=None,
     default_pct=None,
 ):
     if default_pct is None:
@@ -2001,6 +2065,23 @@ def resolve_daytrade_catchup_notional_pct(
             DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT
             if setup_type == "catchup_gapdown"
             else DAYTRADE_CATCHUP_RS_NOTIONAL_PCT
+        )
+    if (
+        setup_type == "catchup_rs"
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(prev_return)
+        and not _is_invalid_number(open_vs_sma_atr)
+        and not _is_invalid_number(score)
+        and not _is_invalid_number(rs_alpha)
+        and float(breadth_val) < DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_BREADTH
+        and float(prev_return) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_PREV_RETURN
+        and float(open_vs_sma_atr) <= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MAX_OPEN_VS_SMA_ATR
+        and float(score) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_SCORE
+        and float(rs_alpha) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_RS_ALPHA
+    ):
+        return max(
+            float(default_pct),
+            DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT,
         )
     return float(default_pct)
 
@@ -4899,7 +4980,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "recovery_atr": None,
                     "score": score,
                     "setup_type": "fallback",
-                    "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+                    "notional_pct": resolve_daytrade_fallback_notional_pct(
+                        breadth_val=breadth_val,
+                        score=score,
+                        prev_return=fallback_metrics.get("prev_return"),
+                        default_pct=DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+                    ),
                     "equity_notional_pct": resolve_daytrade_fallback_equity_notional_pct(
                         gap_pct=fallback_metrics["gap_pct"],
                         breadth_val=breadth_val,
@@ -4955,6 +5041,10 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         setup_type=catchup_metrics["setup_type"],
                         breadth_val=breadth_val,
                         market_ratio=market_ratio,
+                        prev_return=catchup_metrics.get("prev_return"),
+                        open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                        score=score,
+                        rs_alpha=rs,
                         default_pct=DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
                     )
                     equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(
@@ -4974,6 +5064,10 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         setup_type=catchup_metrics["setup_type"],
                         breadth_val=breadth_val,
                         market_ratio=market_ratio,
+                        prev_return=catchup_metrics.get("prev_return"),
+                        open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                        score=score,
+                        rs_alpha=rs,
                         default_pct=DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
                     )
                     equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(

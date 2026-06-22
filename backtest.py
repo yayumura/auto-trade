@@ -33,6 +33,7 @@ from core.logic import (
     resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_catchup_notional_pct,
     resolve_daytrade_primary_equity_notional_pct,
+    resolve_daytrade_fallback_notional_pct,
     resolve_daytrade_fallback_equity_notional_pct,
     resolve_daytrade_catchup_equity_notional_pct,
     DAYTRADE_MAX_DAILY_LOSS_PCT, DAYTRADE_MAX_GAP, DAYTRADE_MAX_RSI2,
@@ -1249,7 +1250,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             "atr": prev_atr,
                     "turnover": t_turnover,
                     "setup_type": "fallback",
-                    "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+                    "notional_pct": resolve_daytrade_fallback_notional_pct(
+                        breadth_val=entry_breadth,
+                        score=score,
+                        prev_return=fallback_metrics.get("prev_return"),
+                        default_pct=DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+                    ),
                     "equity_notional_pct": resolve_daytrade_fallback_equity_notional_pct(
                         gap_pct=fallback_metrics["gap_pct"],
                         breadth_val=entry_breadth,
@@ -1287,6 +1293,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             setup_type=catchup_metrics["setup_type"],
                             breadth_val=entry_breadth,
                             market_ratio=market_ratio,
+                            prev_return=catchup_metrics.get("prev_return"),
+                            open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                            score=score,
+                            rs_alpha=catchup_metrics.get("rs_alpha"),
                             default_pct=DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
                         )
                         equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(
@@ -1306,6 +1316,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             setup_type=catchup_metrics["setup_type"],
                             breadth_val=entry_breadth,
                             market_ratio=market_ratio,
+                            prev_return=catchup_metrics.get("prev_return"),
+                            open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                            score=score,
+                            rs_alpha=catchup_metrics.get("rs_alpha"),
                             default_pct=DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
                         )
                         equity_notional_pct = resolve_daytrade_catchup_equity_notional_pct(
