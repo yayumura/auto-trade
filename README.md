@@ -20,12 +20,12 @@
   - 前日リターンと寄りギャップ
   - ATR、RSI2、相対強度
 - 補助セットアップ:
-- `fallback`
-- `strong_oversold`
-- `catchup`
-- `inverse`
-- `inverse_pullback`
-- `inverse_rebreak`
+  - `fallback`
+  - `strong_oversold`
+  - `catchup`
+  - `inverse`
+  - `inverse_pullback`
+  - `inverse_rebreak`
 - 設計方針:
   - 週初資産比 `+1%` の達成週数を最適化目標として追う
   - 稼働率も見るが、低品質なエントリーの水増しはしない
@@ -39,11 +39,16 @@
   - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional は `0.25` に抑える
   - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
   - `primary` の Tuesday high-market mid-breadth では、stop-heavy な low-score / low-RS サブクラスターだけを quarter-size に落とす
+  - `primary` の Tuesday mid-breadth / low-score / hot-market continuation は、small-gap pocket を 0.10 に寄せつつ、low market-ratio / positive-gap pocket は no-trade にする
   - `primary` の Tuesday high breadth / high-score / stretched open は half-size に落とす
+  - `primary` の Tuesday / Thursday mid-breadth / hot-market / score `8-10` は selected base leverage を `0.10` に制限する
   - `strong_oversold` の Tuesday 伸び切り open は selector から除外する
   - `primary` の Monday high-market high-breadth / low-RS は no-trade を許容する
   - `primary` の Monday high-market high-breadth / high-RS / stretched continuation は no-trade を許容する
+  - `primary` の Monday / Thursday broad hot-market は no-trade を許容する
+  - `primary` の Monday high-breadth / soft-gap continuation は no-trade を許容する
   - `primary` の Wednesday high-market mid-breadth / high-RS / stretched open は quarter-size に落とす
+  - `primary` の Wednesday mid-breadth / hot-market / score `9-12` / breadth `0.60-0.80` / market_ratio `1.07-1.21` は selected base leverage を `0.10` に制限する
   - `primary` の high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap は quarter-size に落とす
   - `primary` の Wednesday low-breadth / high-gap / high-score / strong-open は quarter-size に落とす
   - `primary` の Thursday high-score / moderate-prev-return / hot-market / stretched open は quarter-size に落とす
@@ -57,50 +62,51 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-07** です。
-使用データの最新日は **2026-06-05** です。
+最新確認日は **2026-06-22** です。
+使用データの最新日は **2026-06-19** です。
 `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の最新確認値:
 
-- `FINAL EQUITY: 6,023,918円`
-- `CLOSED TRADES: 627`
-- `WIN RATE: 44.50%`
-- `WEEKS >= +1%: 87/223`
-- `POSITIVE WEEKS: 111/223`
-- `TOTAL RETURN: +502.39%`
-- `PROFIT FACTOR: 1.62`
-- `AVG MONTH ACTIVE RATE: 59.51%`
-- `MONTHS >= 3/4 ACTIVE: 17/52`
-- `WORST DAY: -388,901円`
+- `FINAL EQUITY: 3,374,032円`
+- `CLOSED TRADES: 527`
+- `WIN RATE: 45.16%`
+- `WEEKS >= +1%: 82/225`
+- `POSITIVE WEEKS: 110/225`
+- `TOTAL RETURN: +237.40%`
+- `PROFIT FACTOR: 1.61`
+- `AVG MONTH ACTIVE RATE: 49.91%`
+- `MONTHS >= 50% ACTIVE: 26/52`
+- `MONTHS >= 2/3 ACTIVE: 10/52`
+- `MONTHS >= 3/4 ACTIVE: 7/52`
+- `WORST DAY: -219,199円`
 
-直近 6ヶ月 holdout `2025-12-08` から `2026-06-05` の確認値:
+直近 6ヶ月 holdout `2025-12-22` から `2026-06-19` の確認値:
 
-- `START EQUITY: 4,083,431円`
-- `FINAL EQUITY: 6,023,918円`
-- `CLOSED TRADES: 72`
-- `WIN RATE: 41.67%`
-- `TOTAL RETURN: +47.52%`
+- `START EQUITY: 2,080,462円`
+- `FINAL EQUITY: 3,374,032円`
+- `CLOSED TRADES: 52`
+- `WIN RATE: 48.08%`
+- `TOTAL RETURN: +62.18%`
 - `WEEKS >= +1%: 12/26`
-- `POSITIVE WEEKS: 14/26`
-- `PROFIT FACTOR: 1.66`
-- `WORST DAY: -388,901円`
-- `AVG MONTH ACTIVE RATE: 55.16%`
-- `MONTHS >= 50% ACTIVE: 5/6`
-- `MONTHS >= 2/3 ACTIVE: 2/6`
+- `POSITIVE WEEKS: 15/26`
+- `PROFIT FACTOR: 2.37`
+- `WORST DAY: -219,199円`
+- `AVG MONTH ACTIVE RATE: 41.99%`
+- `MONTHS >= 50% ACTIVE: 2/6`
+- `MONTHS >= 2/3 ACTIVE: 0/6`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
 
-直近1ヶ月 `100万円 standalone` `2026-05-07` から `2026-06-05` の確認値:
+直近1ヶ月 `100万円 standalone` `2026-05-20` から `2026-06-19` の確認値:
 
 - `START EQUITY: 1,000,000円`
-- `FINAL EQUITY: 1,001,032円`
-- `TOTAL RETURN: +0.10%`
-- `CLOSED TRADES: 2`
-- `WIN RATE: 50.00%`
-- `PROFIT FACTOR: 1.89`
-- `WEEKS >= +1%: 0/5`
-- `POSITIVE WEEKS: 1/5`
-- `WORST DAY: -1,165円`
-- `TRADE DAY RATE: 9.09%`
-- `AVG MONTH ACTIVE RATE: 20.00%`
+- `FINAL EQUITY: 1,008,345円`
+- `TOTAL RETURN: +0.83%`
+- `CLOSED TRADES: 1`
+- `PROFIT FACTOR: inf`
+- `WEEKS >= +1%: 0/4`
+- `POSITIVE WEEKS: 1/4`
+- `WORST DAY: 0円`
+- `TRADE DAY RATE: 4.35%`
+- `AVG MONTH ACTIVE RATE: 6.67%`
 - `MONTHS >= 50% ACTIVE: 0/1`
 - `MONTHS >= 2/3 ACTIVE: 0/1`
 - `MONTHS >= 3/4 ACTIVE: 0/1`
@@ -113,7 +119,7 @@
 - 週次 `+1%` は保証値ではなく、改善目標として扱っています
 - 上の holdout と standalone は、すでに改善判断で参照した汚染済み期間です
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
-- 次の `clean holdout` は、現在の使用データ最新日 `2026-06-05` の翌営業日以降、つまり `2026-06-08` 以降の未観測データです
+- 次の `clean holdout` は、現在の使用データ最新日 `2026-06-19` の翌営業日以降、つまり `2026-06-20` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 - `RUNTIME_LIVE_ORDER_CONFIG_HASH` は、実行設定に加えて `core.logic` の daytrade 定数、monthly rotation モジュール fingerprint、主要コードファイルの fingerprint も含めた承認マニフェストから計算します
 - LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。`KABUCOM_LIVE` では operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context を必須にし、legacy boolean や explicit 引数だけでは開きません。さらに、`LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed で示し、`execution_ids` の集約ロットや重複 execution_id は truth lot ではなく blocked 扱いにします。`LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合は not_verified のまま閉じます。`no_lookahead_audit` は risk review 自体が ready の場合にだけ ready とみなします。`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、キャッシュキーには repository / workflow run / head_sha / artifact 名 / local attestation hash / local digest / token fingerprint / session fingerprint を含めます。期限切れ後や token ローテーション後、local attestation 更新後は再検証され、必要なら `clear_live_write_attestation_artifact_source_cache()` で手動クリアできます
@@ -272,8 +278,8 @@ auto-trade/
 
 現時点の運用メモ:
 
-- 現在の `1m holdout` `2026-05-07` から `2026-06-02` と、`6m holdout` `2025-12-03` から `2026-06-02` は `contaminated holdout` として扱う
-- 次の `clean holdout` は `2026-06-03` 以降の未観測データで積み上げる
+- 現在の `1m holdout` `2026-05-20` から `2026-06-19` と、`6m holdout` `2025-12-22` から `2026-06-19` は `contaminated holdout` として扱う
+- 次の `clean holdout` は `2026-06-20` 以降の未観測データで積み上げる
 - それまでは `train` と `jp_walkforward.py` を採用判断の主軸にし、既存 holdout は `veto` 専用で使う
 
 推奨コマンド:
@@ -905,4 +911,4 @@ python -m pytest tests/test_order_journal.py
 - 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-20
+Last updated: 2026-06-22

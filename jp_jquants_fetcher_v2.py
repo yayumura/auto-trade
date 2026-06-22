@@ -50,6 +50,16 @@ _REFRESH_BACKUP_TAG = None
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 
+def _ensure_jquants_no_proxy():
+    no_proxy_value = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    hosts = [entry.strip() for entry in no_proxy_value.split(",") if entry.strip()]
+    if "api.jquants.com" not in hosts:
+        hosts.append("api.jquants.com")
+    joined = ",".join(dict.fromkeys(hosts))
+    os.environ["NO_PROXY"] = joined
+    os.environ["no_proxy"] = joined
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -622,6 +632,7 @@ def _extract_subscription_floor_date_from_text(text):
 
 
 def fetch_ticker_master_with_fallback(output_path, checkpointed_tickers, api_key, max_retries=4):
+    _ensure_jquants_no_proxy()
     print("Handshaking with J-Quants ClientV2 for ticker master...")
     cli = jquantsapi.ClientV2(api_key=api_key)
     last_exc = None
@@ -708,6 +719,7 @@ def fetch_ticker_turbo(ticker_code, api_key, from_date, to_date):
     """
     Fetch one ticker and merge any overlapping rows back into the local checkpoint.
     """
+    _ensure_jquants_no_proxy()
     code_raw = str(ticker_code)
     code = code_raw[:4]
     if len(code) == 4:
@@ -806,7 +818,7 @@ def fetch_jquants_v2_turbo_revelation(
     )
     end_date = datetime.now().strftime("%Y%m%d")
 
-    ticker_codes, used_fallback_universe = fetch_ticker_master_with_fallback(
+    ticker_codes, _used_fallback_universe = fetch_ticker_master_with_fallback(
         output_path=output_path,
         checkpointed_tickers=checkpointed_tickers,
         api_key=api_key,
@@ -814,16 +826,18 @@ def fetch_jquants_v2_turbo_revelation(
     incremental_mode = (effective_start_date != DEFAULT_START_DATE) and not force_full_refresh
     if force_full_refresh:
         target_tickers = resolve_full_refresh_target_tickers(ticker_codes, effective_start_date)
+    elif incremental_mode:
+        # Even when the ticker master fetch falls back to the cached/checkpoint universe,
+        # we still want to refresh every already-known ticker in that universe. Limiting
+        # the target set to only missing checkpoints would turn an incremental refresh
+        # into a no-op whenever the master endpoint is unavailable.
+        target_tickers = resolve_incremental_target_tickers(output_path, ticker_codes, checkpointed_tickers)
     else:
-        target_tickers = (
-            resolve_incremental_target_tickers(output_path, ticker_codes, checkpointed_tickers)
-            if incremental_mode and not used_fallback_universe
-            else [
-                _normalize_ticker_code(code)
-                for code in ticker_codes
-                if _normalize_ticker_code(code) not in normalized_checkpoint_codes
-            ]
-        )
+        target_tickers = [
+            _normalize_ticker_code(code)
+            for code in ticker_codes
+            if _normalize_ticker_code(code) not in normalized_checkpoint_codes
+        ]
     if int(limit_tickers) > 0:
         target_tickers = target_tickers[: int(limit_tickers)]
 

@@ -118,12 +118,16 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
             }
 
             with patch.object(fetcher, "CHECKPOINT_DIR", temp_dir), patch.object(
+                fetcher,
+                "_ensure_jquants_no_proxy",
+            ) as ensure_no_proxy, patch.object(
                 fetcher.requests,
                 "get",
                 return_value=_FakeResponse(200, payload),
             ):
                 result = fetcher.fetch_ticker_turbo("7203", "dummy-token", "20260515", "20260516")
 
+            ensure_no_proxy.assert_called_once()
             self.assertEqual(result, "SUCCESS:7203")
             merged = pd.read_pickle(os.path.join(temp_dir, "7203.pkl")).sort_values("Date").reset_index(drop=True)
             self.assertEqual(list(pd.to_datetime(merged["Date"]).dt.strftime("%Y-%m-%d")), ["2026-05-14", "2026-05-15", "2026-05-16"])
@@ -380,7 +384,8 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
             with open(output_path, "wb") as handle:
                 pickle.dump(cached, handle)
 
-            with patch.object(fetcher.jquantsapi, "ClientV2", return_value=_Always429Client()), patch.object(
+            with patch.object(fetcher, "_ensure_jquants_no_proxy") as ensure_no_proxy, patch.object(
+                fetcher.jquantsapi, "ClientV2", return_value=_Always429Client()), patch.object(
                 fetcher.time,
                 "sleep",
                 return_value=None,
@@ -392,8 +397,84 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
                     max_retries=2,
                 )
 
+        ensure_no_proxy.assert_called_once()
         self.assertTrue(used_fallback)
         self.assertEqual(ticker_codes, ["1301", "6758", "7203"])
+
+    def test_fetch_jquants_v2_turbo_revelation_refreshes_cached_universe_when_master_falls_back(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_dir = os.path.join(temp_dir, "checkpoints")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            output_path = os.path.join(temp_dir, "jp_mega_cache.pkl")
+            cached = pd.DataFrame(
+                {
+                    ("1301.T", "Open"): [100.0, 101.0],
+                    ("1301.T", "High"): [101.0, 102.0],
+                    ("1301.T", "Low"): [99.0, 100.0],
+                    ("1301.T", "Close"): [100.5, 101.5],
+                    ("1301.T", "Volume"): [1000, 1100],
+                    ("7203.T", "Open"): [200.0, 201.0],
+                    ("7203.T", "High"): [201.0, 202.0],
+                    ("7203.T", "Low"): [199.0, 200.0],
+                    ("7203.T", "Close"): [200.5, 201.5],
+                    ("7203.T", "Volume"): [2000, 2100],
+                },
+                index=pd.to_datetime(["2026-05-14", "2026-05-15"]),
+            )
+            with open(output_path, "wb") as handle:
+                pickle.dump(cached, handle)
+
+            for ticker_code, base_price in [("1301", 100.0), ("7203", 200.0)]:
+                frame = pd.DataFrame(
+                    [
+                        {
+                            "Date": "2026-05-14",
+                            "Code": ticker_code,
+                            "Open": base_price,
+                            "High": base_price + 1.0,
+                            "Low": base_price - 1.0,
+                            "Close": base_price + 0.5,
+                            "Volume": 1000,
+                        },
+                        {
+                            "Date": "2026-05-15",
+                            "Code": ticker_code,
+                            "Open": base_price + 1.0,
+                            "High": base_price + 2.0,
+                            "Low": base_price,
+                            "Close": base_price + 1.5,
+                            "Volume": 1100,
+                        },
+                    ]
+                )
+                frame.to_pickle(os.path.join(checkpoint_dir, f"{ticker_code}.pkl"))
+
+            fetched_codes = []
+
+            def _fetch_stub(ticker_code, api_key, from_date, to_date):
+                fetched_codes.append(ticker_code)
+                return f"SUCCESS:{ticker_code}"
+
+            with patch.object(fetcher, "CHECKPOINT_DIR", checkpoint_dir), patch.object(
+                fetcher,
+                "fetch_ticker_master_with_fallback",
+                return_value=(["1301", "7203"], True),
+            ), patch.object(
+                fetcher,
+                "fetch_ticker_turbo",
+                side_effect=_fetch_stub,
+            ), patch.object(
+                fetcher.os,
+                "getenv",
+                side_effect=lambda key: "dummy-token" if key in {"JQUANTS_REFRESH_TOKEN", "JQUANTS_API_KEY"} else None,
+            ), patch.object(
+                fetcher.time,
+                "sleep",
+                return_value=None,
+            ):
+                fetcher.fetch_jquants_v2_turbo_revelation(output_path=output_path, debug_failure_samples=0)
+
+        self.assertEqual(sorted(fetched_codes), ["1301", "7203"])
 
     def test_load_existing_checkpoint_merges_legacy_and_normalized_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:

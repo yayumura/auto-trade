@@ -5,8 +5,8 @@
 
 ## Current Baseline
 
-- As of 2026-06-07
-- Latest data: 2026-06-05
+- As of 2026-06-22
+- Latest data: 2026-06-19
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
   - 火曜の mid breadth で、失速しやすい `primary` を2種類だけ除外
@@ -14,14 +14,19 @@
   - 火曜の中途半端な寄りギャップ `primary` を除外
   - 火曜の trend 距離が遠すぎる `primary` を除外
   - 火曜の高 breadth / 高スコア / 伸び切り open の `primary` の equity notional 上限は `0.50`
+  - 火曜 / 木曜の mid-breadth / hot-market / score `8-10` の `primary` は selected base leverage を `0.10` に制限する
+  - 火曜の mid breadth / low-score / hot-market continuation は、small-gap pocket を 0.10 に寄せつつ、low market-ratio / positive-gap pocket は no-trade にする
   - 火曜の mid breadth で指数が +1%以上ギャップアップしている `primary` を除外
   - 水曜の小さすぎる寄りギャップ、中途半端な寄りギャップ、または trend 距離が遠すぎる `primary` を除外
+  - 水曜の mid-breadth / hot-market / score `9-12` / breadth `0.60-0.80` / market_ratio `1.07-1.21` の `primary` は selected base leverage を `0.10` に制限する
   - 木曜の mid breadth で、失速しやすい `primary` を2種類だけ除外
   - 木曜の前日大幅上昇 `primary` を除外
   - 木曜の trend 距離が中途半端または失速しやすい `primary` を除外
   - 金曜の mid-high breadth / 弱 RS / 横ばいギャップ `primary` を除外
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade にする
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade にする
+  - `primary` の Monday / Thursday broad hot-market は no-trade にする
+  - `primary` の Monday high-breadth / soft-gap continuation は no-trade にする
   - 木曜の low-score hot-market `primary` の equity notional 上限は `0.50`
   - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の equity notional 上限は `0.25`
   - 水曜の low-breadth / high-gap / high-score / strong-open `primary` の equity notional 上限は `0.25`
@@ -122,17 +127,134 @@
 - 火曜 low-breadth で too-hot な `catchup_rs` は moderate candidate に selector cooling する
 - 水曜 low-breadth の `catchup_rs` は selector から除外する
 - 最新確認値:
-- `FINAL EQUITY: 6,023,918円`
-- `CLOSED TRADES: 627`
-- `WIN RATE: 44.50%`
-- `WEEKS >= +1%: 87/223`
-- `POSITIVE WEEKS: 111/223`
-- `TOTAL RETURN: +502.39%`
-- `PROFIT FACTOR: 1.62`
-- `AVG MONTH ACTIVE RATE: 59.51%`
-- `MONTHS >= 3/4 ACTIVE: 17/52`
-- `WORST DAY: -388,901円`
+- `FINAL EQUITY: 3,374,032円`
+- `CLOSED TRADES: 527`
+- `WIN RATE: 45.16%`
+- `WEEKS >= +1%: 82/225`
+- `POSITIVE WEEKS: 110/225`
+- `TOTAL RETURN: +237.40%`
+- `PROFIT FACTOR: 1.61`
+- `AVG MONTH ACTIVE RATE: 49.91%`
+- `MONTHS >= 50% ACTIVE: 26/52`
+- `MONTHS >= 2/3 ACTIVE: 10/52`
+- `MONTHS >= 3/4 ACTIVE: 7/52`
+- `WORST DAY: -219,199円`
 
+### 2026-06-21: Tuesday / Thursday Mid-Breadth Hot-Market Selected-Leverage Cap Adopted
+
+- 試したこと:
+  - `primary` の Tuesday / Thursday mid-breadth / hot-market / score `8.0-10.0` を、selected base leverage `0.10` に制限した
+  - train で再現した loss pocket `2024-02-15 3984.T` / `2025-10-09 6269.T` / `2025-10-21 6310.T` を shared cap で浅くした
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y3,049,410 / TOTAL RETURN +204.94% / CLOSED TRADES 523 / WIN RATE 45.32% / PROFIT FACTOR 1.54 / WEEKS >= +1% 79/225 / POSITIVE WEEKS 108/225 / MONTHS >= 3/4 ACTIVE 7/52 / WORST DAY -197,986`
+  - `TRAIN WINDOW: FINAL EQUITY Y1,862,911 / TOTAL RETURN +86.29% / CLOSED TRADES 472 / PROFIT FACTOR 1.29 / WEEKS >= +1% 67/199 / POSITIVE WEEKS 92/199 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -117,641`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y3,049,410 / TOTAL RETURN +63.69% / CLOSED TRADES 51 / WIN RATE 50.98% / PROFIT FACTOR 2.46 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 16/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -197,986`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,008,345 / TOTAL RETURN +0.83% / CLOSED TRADES 1 / PROFIT FACTOR inf / WEEKS >= +1% 0/4 / POSITIVE WEEKS 1/4 / WORST DAY 0`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - Thursday / Tuesday mid-breadth hot-market でも score / breadth / market_ratio がさらに低い、train で複数回再現する pocket が見つかった場合だけ
+  - それ以外は broad no-trade を増やすより shared leverage cap で浅くする方針を優先
+
+### 2026-06-22: Wednesday Mid-Breadth Hot-Market Selected-Leverage Cap Adopted
+
+- 試したこと:
+  - `primary` の Wednesday mid-breadth / hot-market / score `9-12` を selected base leverage `0.10` に制限した
+  - train で再現した `2024-01-10 4046.T` / `2024-03-13 4186.T` / `2025-11-26 6525.T` / `2025-12-03 4971.T` の損失 pocket を shared cap で浅くした
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y3,105,209 / TOTAL RETURN +210.52% / CLOSED TRADES 527 / WIN RATE 45.16% / PROFIT FACTOR 1.55 / WEEKS >= +1% 79/225 / POSITIVE WEEKS 107/225 / MONTHS >= 3/4 ACTIVE 7/52 / WORST DAY -197,986`
+  - `TRAIN WINDOW: FINAL EQUITY Y1,915,368 / TOTAL RETURN +91.54% / CLOSED TRADES 476 / PROFIT FACTOR 1.31 / WEEKS >= +1% 67/199 / POSITIVE WEEKS 91/199 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -117,641`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y3,105,209 / TOTAL RETURN +62.12% / CLOSED TRADES 51 / WIN RATE 50.98% / PROFIT FACTOR 2.45 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 16/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -197,986`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,008,345 / TOTAL RETURN +0.83% / CLOSED TRADES 1 / PROFIT FACTOR inf / WEEKS >= +1% 0/4 / POSITIVE WEEKS 1/4 / WORST DAY 0`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - Wednesday の mid-breadth hot-market でも score 8-12 の train 再現 pocket がさらに見つかり、holdout の veto を壊さないときだけ
+
+### 2026-06-22: Tuesday Low-Market Small-Gap Hot-Market Rebalance Adopted
+
+- 試したこと:
+  - `primary` の Tuesday mid-breadth / low-market / low-score / positive-gap pocket を no-trade にした
+  - Tuesday mid-breadth / hot-market の境界を少し引き上げ、small-gap 側は 0.10 に寄せつつ、強い側の 0.50 は維持した
+  - train で再現した `2023-04-18 9107.T` / `2023-04-25 6191.T` / `2023-08-15 6266.T` / `2024-05-14 6361.T` の負け pocket を、shared no-trade と 0.10 cap に分けて浅くした
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y3,374,032 / TOTAL RETURN +237.40% / CLOSED TRADES 527 / WIN RATE 45.16% / PROFIT FACTOR 1.61 / WEEKS >= +1% 82/225 / POSITIVE WEEKS 110/225 / MONTHS >= 3/4 ACTIVE 7/52 / WORST DAY -219,199`
+  - `TRAIN WINDOW: FINAL EQUITY Y2,080,462 / TOTAL RETURN +108.05% / CLOSED TRADES 475 / PROFIT FACTOR 1.36 / WEEKS >= +1% 70/199 / POSITIVE WEEKS 95/199 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -117,641`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y3,374,032 / TOTAL RETURN +62.18% / CLOSED TRADES 52 / WIN RATE 48.08% / PROFIT FACTOR 2.37 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 15/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -219,199`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,008,345 / TOTAL RETURN +0.83% / CLOSED TRADES 1 / PROFIT FACTOR inf / WEEKS >= +1% 0/4 / POSITIVE WEEKS 1/4 / WORST DAY 0`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - Tuesday mid-breadth hot-market で、`market_ratio` と `gap` がさらに弱い pocket が train に複数再現する場合だけ
+  - それ以外は、small-gap の当て込みではなく shared cap / no-trade のどちらかで train-supported に閉じる
+
+### 2026-06-21: J-Quants Proxy Bypass Restored Refresh to 2026-06-19
+
+- 変更:
+  - `jp_jquants_fetcher_v2.py` で `api.jquants.com` を `NO_PROXY` に追加し、`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` が localhost blackhole でも refresh を通すようにした
+  - `fetch_ticker_master_with_fallback(...)` の fallback universe でも incremental refresh が落ちないよう、`resolve_incremental_target_tickers(...)` を維持した
+  - `scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` を再実行し、cache を `2026-06-19` まで更新した
+- 結果:
+  - latest cache day: `2026-06-19`
+  - full: `TOTAL RETURN +193.18% / PROFIT FACTOR 1.51 / WEEKS >= +1% 80/225 / POSITIVE WEEKS 108/225 / WORST DAY -190,915円`
+  - train: `TOTAL RETURN +79.36% / PROFIT FACTOR 1.26 / WEEKS >= +1% 68/199 / POSITIVE WEEKS 92/199 / WORST DAY -117,641円`
+  - holdout: `TOTAL RETURN +63.46% / PROFIT FACTOR 2.44 / WEEKS >= +1% 12/26 / POSITIVE WEEKS 16/26 / WORST DAY -190,915円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.83% / CLOSED TRADES 1 / PROFIT FACTOR inf / WEEKS >= +1% 0/4 / POSITIVE WEEKS 1/4 / WORST DAY 0円`
+- 判断:
+  - 採用（データ更新経路の修正）
+- 再試行するとしたら:
+  - J-Quants 側の proxy 前提が変わったときだけ
+
+### 2026-06-20: Tuesday Mid-Breadth Low-Score Hot-Market Veto Moved Ahead of Neutral-Trend Caps
+
+- 試したこと:
+  - `primary` の Tuesday mid-breadth / low-score / hot-market continuation no-trade を、broader Tuesday neutral-trend caps より前に移動した
+  - train の exact loss pocket `2023-07-11 4385.T` / `2023-07-25 7095.T` / `2024-04-16 3186.T` を no-trade に寄せた
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +190.97% / PROFIT FACTOR 1.50 / WEEKS >= +1% 80/223 / POSITIVE WEEKS 107/223 / WORST DAY -190,915円`
+  - `TRAIN TOTAL RETURN +70.23% / PROFIT FACTOR 1.24 / WEEKS >= +1% 67/197 / POSITIVE WEEKS 91/197 / WORST DAY -117,641円`
+  - `HOLDOUT TOTAL RETURN +70.93% / PROFIT FACTOR 2.42 / WEEKS >= +1% 13/26 / POSITIVE WEEKS 16/26 / WORST DAY -190,915円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.00% / CLOSED TRADES 0 / PROFIT FACTOR N/A / WEEKS >= +1% 0/5 / POSITIVE WEEKS 0/5 / WORST DAY 0円`
+  - `train miss weeks 129/196 | negative 105 | positive_miss 24 | miss_no_trade 13`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - さらに進めるなら、train で複数回再現する新しい residual cluster が見つかったときだけ
+
+### 2026-06-20: Monday / Thursday Broad Hot-Market and Monday Soft-Gap Vetoes Adopted
+
+- 試したこと:
+  - `primary` の Monday / Thursday broad hot-market を no-trade にした
+  - Monday high-breadth の soft-gap continuation を no-trade にした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +106.73% / PROFIT FACTOR 1.28 / WEEKS >= +1% 79/223 / POSITIVE WEEKS 107/223 / WORST DAY -141,419円`
+  - `TRAIN TOTAL RETURN +27.98% / PROFIT FACTOR 1.09 / WEEKS >= +1% 65/197 / POSITIVE WEEKS 91/197 / WORST DAY -99,841円`
+  - `HOLDOUT TOTAL RETURN +61.54% / PROFIT FACTOR 1.97 / WEEKS >= +1% 14/26 / POSITIVE WEEKS 16/26 / WORST DAY -141,419円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.00% / CLOSED TRADES 0 / PROFIT FACTOR N/A / WEEKS >= +1% 0/5 / POSITIVE WEEKS 0/5 / WORST DAY 0円`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - 同じ周辺の hot-market continuation を広げるのではなく、train-supported で別の shared tail-loss pocket が見つかったときだけ
+
+### 2026-06-20: Monday Weak-Market Catchup RS Gap Extension Rejected
+
+- 試したこと:
+  - `catchup_rs` の Monday weak-market pocket について、`gap_pct` 上限を `1.0% -> 1.2% / 1.5%` へ広げる what-if を確認した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL TOTAL RETURN +145.59% / PROFIT FACTOR 1.34 / WEEKS >= +1% 77/223 / POSITIVE WEEKS 108/223 / WORST DAY -169,702円`
+  - `TRAIN TOTAL RETURN +54.94% / PROFIT FACTOR 1.17 / WEEKS >= +1% 64/197 / POSITIVE WEEKS 93/197 / WORST DAY -104,036円`
+  - `HOLDOUT TOTAL RETURN +58.50% / PROFIT FACTOR 1.87 / WEEKS >= +1% 13/26 / POSITIVE WEEKS 15/26 / WORST DAY -169,702円`
+  - `100万円 standalone latest 1m TOTAL RETURN +0.00% / CLOSED TRADES 0 / PROFIT FACTOR N/A / WEEKS >= +1% 0/5 / POSITIVE WEEKS 0/5 / WORST DAY 0円`
+- 判断:
+  - 不採用
+- 再試行するとしたら:
+  - Monday weak-market catchup_rs の別軸が train で明確に再現し、worst day を悪化させずに切れるときだけ
 ### 2026-06-06: Primary Failed-Runup Exit Restored as Shared Logic
 
 - 試したこと:
