@@ -32,20 +32,27 @@
   - 1トレード当たりの equity risk budget と equity notional cap で大負け日を抑える
   - setup ごとの脆弱性が明確なら、shared な setup 別 risk budget で損失集中を下げる
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade に寄せる
+  - `primary` の Wednesday hot-gap / below-SMA では、score `>= 7.5` の tail を no-trade に寄せる
   - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
   - `catchup_rs` の Monday / Friday 高 breadth hot-market は selector から除外する
+  - `catchup_rs` の Monday mid-breadth / stretched-open pocket は selector から除外する
+  - `catchup_rs` の Tuesday low-breadth / weak-market / high-score pocket は selector から除外する
   - `fallback` の high breadth / hot-market pocket は selector から除外する
   - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）は selector から除外する
   - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional は `0.25` に抑える
   - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
   - `primary` の Tuesday high-market mid-breadth では、stop-heavy な low-score / low-RS サブクラスターだけを quarter-size に落とす
   - `primary` の Tuesday mid-breadth / low-score / hot-market continuation は、small-gap pocket を 0.10 に寄せつつ、low market-ratio / positive-gap pocket は no-trade にする
+  - `primary` の Tuesday low-open / mid-breadth / hot-market / weak-open pocket は no-trade にする
+  - `primary` の Tuesday stretched-open / mid-breadth / hot-market / weak-RSI pocket は no-trade にする
+  - `primary` の Wednesday mid-breadth / hot-market / low-prev-return pocket は no-trade にする
   - `primary` の Tuesday high breadth / high-score / stretched open は half-size に落とす
   - `primary` の Tuesday / Thursday mid-breadth / hot-market / score `8-10` は selected base leverage を `0.10` に制限する
   - `strong_oversold` の Tuesday 伸び切り open は selector から除外する
   - `primary` の Monday high-market high-breadth / low-RS は no-trade を許容する
   - `primary` の Monday high-market high-breadth / high-RS / stretched continuation は no-trade を許容する
   - `primary` の Monday / Thursday broad hot-market は no-trade を許容する
+  - `primary` の Monday mid-breadth / moderate-extension は no-trade を許容する
   - `primary` の Monday high-breadth / soft-gap continuation は no-trade を許容する
   - `primary` の Wednesday high-market mid-breadth / high-RS / stretched open は quarter-size に落とす
   - `primary` の Wednesday mid-breadth / hot-market / score `9-12` / breadth `0.60-0.80` / market_ratio `1.07-1.21` は selected base leverage を `0.10` に制限する
@@ -62,54 +69,57 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-22** です。
+最新確認日は **2026-06-23** です。
 使用データの最新日は **2026-06-19** です。
-`python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` の最新確認値:
+最新確認は `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` で行いました。
+train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20` で確認しました。
 
-- `FINAL EQUITY: 3,730,972円`
-- `CLOSED TRADES: 533`
-- `WIN RATE: 45.03%`
-- `WEEKS >= +1%: 80/225`
-- `POSITIVE WEEKS: 109/225`
-- `TOTAL RETURN: +273.10%`
-- `PROFIT FACTOR: 1.67`
-- `AVG MONTH ACTIVE RATE: 50.44%`
-- `MONTHS >= 50% ACTIVE: 28/52`
-- `MONTHS >= 2/3 ACTIVE: 11/52`
-- `MONTHS >= 3/4 ACTIVE: 7/52`
-- `WORST DAY: -226,270円`
+full history の最新確認値:
 
-直近 6ヶ月 holdout `2025-12-22` から `2026-06-19` の確認値:
+- `FINAL EQUITY: 6,296,979円`
+- `CLOSED TRADES: 558`
+- `WIN RATE: 45.52%`
+- `TOTAL RETURN: +529.70%`
+- `PROFIT FACTOR: 2.17`
+- `WEEKS >= +1%: 85/225`
+- `POSITIVE WEEKS: 117/225`
+- `MONTHS >= 3/4 ACTIVE: 26/52`
+- `WORST DAY: -229,944円`
 
-- `START EQUITY: 2,131,217円`
-- `FINAL EQUITY: 3,730,972円`
-- `CLOSED TRADES: 51`
-- `WIN RATE: 50.98%`
-- `TOTAL RETURN: +75.06%`
-- `WEEKS >= +1%: 14/26`
+train window の最新確認値:
+
+- `FINAL EQUITY: 3,456,062円`
+- `CLOSED TRADES: 504`
+- `WIN RATE: 45.04%`
+- `TOTAL RETURN: +245.61%`
+- `PROFIT_FACTOR: 1.82`
+- `WEEKS >= +1%: 69/199`
+- `POSITIVE WEEKS: 100/199`
+- `MONTHS >= 3/4 ACTIVE: 8/45`
+- `WORST DAY: -108,465円`
+
+直近 6ヶ月 holdout `2025-12-22` から `2026-06-19` の確認値（reference / veto 用）:
+
+- `FINAL EQUITY: 6,296,979円`
+- `CLOSED TRADES: 54`
+- `WIN RATE: 50.00%`
+- `TOTAL RETURN: +82.20%`
+- `PROFIT_FACTOR: 2.87`
+- `WEEKS >= +1%: 16/26`
 - `POSITIVE WEEKS: 17/26`
-- `PROFIT FACTOR: 2.61`
-- `WORST DAY: -226,270円`
-- `AVG MONTH ACTIVE RATE: 40.69%`
-- `MONTHS >= 50% ACTIVE: 2/6`
-- `MONTHS >= 2/3 ACTIVE: 0/6`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
+- `WORST DAY: -229,944円`
 
-直近1ヶ月 `100万円 standalone` `2026-05-20` から `2026-06-19` の確認値:
+直近1ヶ月 `100万円 standalone` `2026-05-20` から `2026-06-19` の確認値（reference / veto 用）:
 
 - `START EQUITY: 1,000,000円`
 - `FINAL EQUITY: 1,142,235円`
 - `TOTAL RETURN: +14.22%`
 - `CLOSED TRADES: 4`
-- `PROFIT FACTOR: inf`
+- `PROFIT_FACTOR: inf`
 - `WEEKS >= +1%: 3/4`
 - `POSITIVE WEEKS: 3/4`
 - `WORST DAY: 0円`
-- `TRADE DAY RATE: 17.39%`
-- `AVG MONTH ACTIVE RATE: 13.33%`
-- `MONTHS >= 50% ACTIVE: 0/1`
-- `MONTHS >= 2/3 ACTIVE: 0/1`
-- `MONTHS >= 3/4 ACTIVE: 0/1`
 
 補足:
 
@@ -117,7 +127,7 @@
 - データ更新やロジック変更で数値は変動します
 - 月間 `3/4` 稼働目標は、現時点では未達です
 - 週次 `+1%` は保証値ではなく、改善目標として扱っています
-- 上の holdout と standalone は、すでに改善判断で参照した汚染済み期間です
+- holdout と standalone は、採用の加点材料ではなく、reference / veto 用の確認値です
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
 - 次の `clean holdout` は、現在の使用データ最新日 `2026-06-19` の翌営業日以降、つまり `2026-06-20` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
@@ -485,6 +495,11 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - breadth `0.45-0.65` / `market_ratio 1.05-1.10` / score `<= 6` / gap `<= 1%` `primary` の追加 equity cap
   - breadth `0.63-0.75` / `market_ratio 1.05-1.11` / score `4.0-7.3` / `open_vs_sma_atr >= 0.2` `primary` の half-size equity cap
   - Wednesday low-breadth / high-gap / high-score / strong-open `primary` の追加 equity cap
+  - Wednesday high-breadth / stretched-open `primary` の no-trade guard
+  - Tuesday low-open / mid-breadth / hot-market `primary` の no-trade guard
+  - Tuesday stretched-open / weak-RSI `primary` の no-trade guard
+  - Wednesday mid-breadth / hot-market / low-prev-return `primary` の no-trade guard
+  - Monday mid-breadth / moderate-extension `primary` の no-trade guard
   - breadth `< 0.60` / `market_ratio 1.00-1.05` / gap `>= 2.0%` / RS `<= 50` `primary` の no-trade guard
   - 火曜 mid-high breadth / positive-gap / neutral-trend `primary` の追加 equity cap
   - 火曜 mid-high breadth / 非プラスギャップ `primary` の equity 建玉上限
@@ -494,7 +509,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - 木曜 breadth `0.55-0.70` / 小幅ギャップ continuation `primary` の tighter equity cap
   - 木曜 mid breadth / 小幅ギャップ / continuation `primary` の追加 equity cap
   - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の quarter-size cap
-  - 木曜 high-score / moderate-prev-return / hot-market / stretched open の quarter-size cap
+  - 木曜 mid-breadth / hot-market / stretched-open の no-trade guard
   - 月曜 high breadth / 小幅ギャップ `primary` の equity 建玉上限
   - 高 breadth / mildly crowded market / mid-score `primary` の equity cap
   - 火曜の指数過熱局面 `primary` の equity cap
@@ -512,6 +527,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `fallback` の equity 建玉上限
   - 高 breadth / 前日上昇 / SMA から遠い `fallback` の equity 建玉上限
   - `catchup_rs` の Monday / Friday 高 breadth hot-market selector フィルタ
+  - `catchup_rs` の Monday mid-breadth / stretched-open pocket selector フィルタ
+  - `catchup_rs` の Tuesday low-breadth / weak-market / high-score pocket selector フィルタ
   - `fallback` の hot-market / high-breadth selector フィルタ
   - 火曜 mid-breadth continuation / 水曜 high breadth `fallback` の曜日別 equity cap
   - 水曜 high breadth / gap `> 0.5%` `fallback` の追加 equity cap
@@ -911,4 +928,4 @@ python -m pytest tests/test_order_journal.py
 - 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-22
+Last updated: 2026-06-23
