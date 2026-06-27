@@ -56,6 +56,8 @@ from core.logic import (
     DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT, DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
     DAYTRADE_CATCHUP_RS_STOP_MULT, DAYTRADE_CATCHUP_RS_TARGET_MULT,
     DAYTRADE_CATCHUP_RS_NOTIONAL_PCT, DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT,
+    DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_RISK_BUDGET_PCT,
     DAYTRADE_INVERSE_CODES, DAYTRADE_INVERSE_MIN_TURNOVER, DAYTRADE_INVERSE_MIN_SETUP_SCORE,
     DAYTRADE_INVERSE_STOP_MULT, DAYTRADE_INVERSE_TARGET_MULT,
     DAYTRADE_INVERSE_PULLBACK_STOP_MULT, DAYTRADE_INVERSE_PULLBACK_TARGET_MULT,
@@ -1332,29 +1334,37 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             trade_weekday=curr_time.weekday(),
                             default_pct=DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
                         )
-                    catchup_candidates.append({
-                        "code": ticker,
-                        "s_idx": s_idx,
-                        "score": score,
-                        "gap_pct": catchup_metrics["gap_pct"],
-                        "open": t_open,
-                        "close": t_close,
-                        "high": high_np[i, s_idx],
-                        "low": low_np[i, s_idx],
-                        "atr": prev_atr,
-                    "turnover": t_turnover,
-                    "setup_type": catchup_metrics["setup_type"],
-                    "notional_pct": notional_pct,
-                    "equity_notional_pct": equity_notional_pct,
-                    "stop_mult": stop_mult,
-                    "target_mult": target_mult,
-                    "prev_return": catchup_metrics.get("prev_return"),
-                    "prev_rsi2": catchup_metrics.get("prev_rsi2"),
-                    "open_from_prev_low_atr": catchup_metrics.get("open_from_prev_low_atr"),
-                    "open_vs_sma_atr": catchup_metrics.get("open_vs_sma_atr"),
-                    "rs_alpha": catchup_metrics.get("rs_alpha"),
-                    "symbol_trend_ratio": catchup_metrics.get("symbol_trend_ratio"),
-                })
+                        risk_budget_pct = None
+                        if (
+                            catchup_metrics["setup_type"] == "catchup_rs"
+                            and np.isfinite(notional_pct)
+                            and float(notional_pct) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT
+                        ):
+                            risk_budget_pct = DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_RISK_BUDGET_PCT
+                        catchup_candidates.append({
+                            "code": ticker,
+                            "s_idx": s_idx,
+                            "score": score,
+                            "gap_pct": catchup_metrics["gap_pct"],
+                            "open": t_open,
+                            "close": t_close,
+                            "high": high_np[i, s_idx],
+                            "low": low_np[i, s_idx],
+                            "atr": prev_atr,
+                            "turnover": t_turnover,
+                            "setup_type": catchup_metrics["setup_type"],
+                            "notional_pct": notional_pct,
+                            "equity_notional_pct": equity_notional_pct,
+                            "risk_budget_pct": risk_budget_pct,
+                            "stop_mult": stop_mult,
+                            "target_mult": target_mult,
+                            "prev_return": catchup_metrics.get("prev_return"),
+                            "prev_rsi2": catchup_metrics.get("prev_rsi2"),
+                            "open_from_prev_low_atr": catchup_metrics.get("open_from_prev_low_atr"),
+                            "open_vs_sma_atr": catchup_metrics.get("open_vs_sma_atr"),
+                            "rs_alpha": catchup_metrics.get("rs_alpha"),
+                            "symbol_trend_ratio": catchup_metrics.get("symbol_trend_ratio"),
+                        })
 
             if (
                 (inverse_market_allowed or inverse_pullback_market_allowed)
@@ -1563,6 +1573,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     stop_price=stop_price,
                     notional_pct=candidate.get("notional_pct"),
                     equity_notional_pct=candidate.get("equity_notional_pct"),
+                    risk_budget_pct=candidate.get("risk_budget_pct"),
                 )
                 if shares < 100:
                     continue

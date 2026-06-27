@@ -1082,6 +1082,35 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
     }
 
 
+def resolve_daytrade_entry_shares(
+    item,
+    day_equity,
+    candidate_buying_power,
+    candidate_dynamic_lev,
+    buy_price,
+    stop_price,
+):
+    shares = calculate_lot_size(
+        current_equity=day_equity,
+        atr=float(item.get("atr", 0.0)),
+        sl_mult=5.0,
+        price=buy_price,
+        dynamic_leverage=candidate_dynamic_lev,
+        max_positions=MAX_POSITIONS,
+        buying_power=candidate_buying_power,
+    )
+    return cap_daytrade_position_size(
+        raw_shares=shares,
+        current_equity=day_equity,
+        buying_power=candidate_buying_power,
+        entry_price=buy_price,
+        stop_price=stop_price,
+        notional_pct=item.get("notional_pct"),
+        equity_notional_pct=item.get("equity_notional_pct"),
+        risk_budget_pct=item.get("risk_budget_pct"),
+    )
+
+
 def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffers):
     original_positions = [dict(position) for position in portfolio]
     updated_portfolio, sell_actions, fill_events = manage_positions_live(
@@ -2547,23 +2576,13 @@ def _main_exec():
                     if is_daytrade_inverse_setup_type(item.get("setup_type")):
                         candidate_buying_power = inverse_day_buying_power
                         candidate_dynamic_lev = inverse_buying_power_leverage
-                    shares = calculate_lot_size(
-                        current_equity=day_equity,
-                        atr=float(item.get('atr', 0.0)),
-                        sl_mult=5.0,
-                        price=buy_price,
-                        dynamic_leverage=candidate_dynamic_lev,
-                        max_positions=MAX_POSITIONS,
-                        buying_power=candidate_buying_power,
-                    )
-                    shares = cap_daytrade_position_size(
-                        raw_shares=shares,
-                        current_equity=day_equity,
-                        buying_power=candidate_buying_power,
-                        entry_price=buy_price,
+                    shares = resolve_daytrade_entry_shares(
+                        item=item,
+                        day_equity=day_equity,
+                        candidate_buying_power=candidate_buying_power,
+                        candidate_dynamic_lev=candidate_dynamic_lev,
+                        buy_price=buy_price,
                         stop_price=stop_price,
-                        notional_pct=item.get("notional_pct"),
-                        equity_notional_pct=item.get("equity_notional_pct"),
                     )
                     if shares < 100:
                         continue

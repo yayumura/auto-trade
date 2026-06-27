@@ -75,6 +75,15 @@ DAYTRADE_PRIMARY_TUESDAY_LOW_OPEN_MID_BREADTH_HOT_MARKET_NO_TRADE_BREADTH_MAX = 
 DAYTRADE_PRIMARY_TUESDAY_LOW_OPEN_MID_BREADTH_HOT_MARKET_NO_TRADE_MARKET_RATIO_MIN = 1.15
 DAYTRADE_PRIMARY_TUESDAY_LOW_OPEN_MID_BREADTH_HOT_MARKET_NO_TRADE_MAX_GAP_PCT = 0.015
 DAYTRADE_PRIMARY_TUESDAY_LOW_OPEN_MID_BREADTH_HOT_MARKET_NO_TRADE_MAX_OPEN_VS_SMA_ATR = 1.0
+# Tuesday's low-score / stretched-open / hot-market mid-breadth pocket was
+# loss-only in train, so keep that specific continuation out as well.
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_WEEKDAY = 1
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_BREADTH_MIN = 0.50
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_BREADTH_MAX = 0.60
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MARKET_RATIO_MIN = 1.03
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MAX_GAP_PCT = 0.01
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MAX_SCORE = 5.0
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MIN_OPEN_VS_SMA_ATR = 2.0
 # Tuesday's stretched-open / mid-breadth / hot-market continuation still loses
 # when RSI2 is weak, so keep that fragile continuation out as well.
 DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_WEEKDAY = 1
@@ -83,7 +92,7 @@ DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE
 DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_MARKET_RATIO_MIN = 1.20
 DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_MIN_OPEN_VS_SMA_ATR = 1.50
 DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_MAX_GAP_PCT = 0.005
-DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_MAX_RSI2 = 70.0
+DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_MAX_RSI2 = 71.0
 # Wednesday's mid-breadth / hot-market / low-prev-return continuation also
 # loses in train, so keep that fragile continuation out as well.
 DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_LOW_PREV_RETURN_NO_TRADE_WEEKDAY = 2
@@ -294,6 +303,14 @@ DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MIN = 1.00
 DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_MARKET_RATIO_MAX = 1.15
 DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_SCORE_MAX = 8.0
 DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.10
+# Low-score primary is still tradable, but only at probe size on the weakest
+# weekday slice.
+DAYTRADE_PRIMARY_LOW_SCORE_EQUITY_NOTIONAL_PCT = 0.50
+DAYTRADE_PRIMARY_LOW_SCORE_PROBE_WEEKDAYS = {
+    DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY,
+    DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_WEEKDAY,
+    DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY,
+}
 DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_SMALL_GAP_MAX = 0.01
 # Mid-breadth hot-market primary continuation is still loss-heavy when the
 # open is already stretched enough that the move is no longer a tight chase.
@@ -330,6 +347,19 @@ DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_SCORE_MAX = 8.0
 DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_MIN_GAP_PCT = 0.005
 DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_MAX_OPEN_VS_SMA_ATR = 4.0
 DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.25
+# Monday's near-SMA / low-score / hot-market pocket was loss-only in train.
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_WEEKDAY = 0
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_BREADTH_MIN = 0.65
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_BREADTH_MAX = 0.70
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MARKET_RATIO_MIN = 1.14
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MARKET_RATIO_MAX = 1.16
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_SCORE_MAX = 6.5
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MIN_GAP_PCT = 0.015
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_GAP_PCT = 0.0205
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MIN_PREV_RETURN_PCT = 0.02
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_PREV_RETURN_PCT = 0.04
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_OPEN_VS_SMA_ATR = 0.5
+DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_RS_ALPHA = 10.0
 # Monday still has a medium-score hot-market pocket that keeps losing in train.
 DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_BREADTH_MIN = 0.43
 DAYTRADE_PRIMARY_MONDAY_HOT_MARKET_MARKET_RATIO_MIN = 1.05
@@ -445,7 +475,9 @@ DAYTRADE_PRIMARY_THURSDAY_HIGH_BREADTH_HOT_MARKET_MAX_SCORE = 12.0
 DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_BREADTH = 0.75
 DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MAX_RATIO = 1.20
 DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_MIN_SCORE = 8.0
-DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT = 0.50
+# Non-Tuesday high-breadth / mid-hot-market continuation stayed strong enough in
+# train to size at full default once the weak Tuesday catchup pocket is removed.
+DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT = 1.00
 # Tuesday's broad high-score continuation with a stretched open is still a
 # loss pocket in train. Keep it tradable, but cut size to a probe.
 DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_WEEKDAY = (
@@ -457,7 +489,9 @@ DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_MARKET_RATIO_MAX
 DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_SCORE_MIN = 12.0
 DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_MIN_OPEN_VS_SMA_ATR = 3.5
 DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_MIN_RS_ALPHA = 80.0
-DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_EQUITY_NOTIONAL_PCT = 0.50
+# Tuesday's stretched-open high-breadth / high-score pocket was train-loss-only.
+# Keep it out rather than sizing through a one-off hot regime.
+DAYTRADE_PRIMARY_TUESDAY_HIGH_BREADTH_HIGH_SCORE_STRETCHED_OPEN_EQUITY_NOTIONAL_PCT = 0.0
 DAYTRADE_MIN_RS_ALPHA = 0.0
 DAYTRADE_MIN_RSI2 = 35.0
 DAYTRADE_MAX_RSI2 = 80.0
@@ -508,11 +542,19 @@ DAYTRADE_FALLBACK_TUESDAY_FRIDAY_WEAK_MARKET_MARKET_RATIO_MIN = 1.00
 DAYTRADE_FALLBACK_TUESDAY_FRIDAY_WEAK_MARKET_MARKET_RATIO_MAX = 1.10
 DAYTRADE_FALLBACK_TUESDAY_FRIDAY_WEAK_MARKET_MIN_GAP = 0.0
 DAYTRADE_FALLBACK_TUESDAY_FRIDAY_WEAK_MARKET_EQUITY_NOTIONAL_PCT = 0.50
+DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_WEEKDAYS = (1, 4)
+DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_MIN = 1.00
+DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_MAX = 1.05
 DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_BREADTH_MAX = 0.50
 DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_MARKET_RATIO_MAX = 1.06
 DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_SCORE_MAX = 6.0
 DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_MIN_PREV_RETURN_PCT = 0.02
 DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_MIN_OPEN_VS_SMA_ATR = 2.5
+DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_WEEKDAY = 2
+DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_BREADTH_MAX = 0.45
+DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_MARKET_RATIO_MAX = 1.02
+DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_SCORE_MAX = 6.5
+DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_MIN_OPEN_VS_SMA_ATR = 2.5
 DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_MAX_BREADTH = 0.45
 DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_MIN_PREV_RETURN = 0.02
 DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_MAX_OPEN_VS_SMA_ATR = 1.0
@@ -615,6 +657,7 @@ DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MAX_OPEN_VS_SMA_ATR = 1.0
 DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_SCORE = 10.0
 DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_RS_ALPHA = 60.0
 DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT = 1.00
+DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_RISK_BUDGET_PCT = 0.105
 DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT = 2.00
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_WEEKDAY = 0
 DAYTRADE_CATCHUP_RS_MONDAY_LOW_BREADTH_MAX = 0.45
@@ -644,6 +687,14 @@ DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_WEEKDAY = 1
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_BREADTH_MAX = 0.45
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_MARKET_RATIO_MAX = 1.0
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_MIN_SCORE = 10.0
+# The same Tuesday low-breadth catchup_rs pocket also kept failing when market_ratio
+# was only slightly above 1.0 and the score was still sub-10.
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_WEEKDAY = 1
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_BREADTH_MAX = 0.45
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MARKET_RATIO_MIN = 1.0
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MARKET_RATIO_MAX = 1.05
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MIN_SCORE = 8.0
+DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MAX_SCORE = 10.0
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEEKDAY = 1
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MIN = 0.18
 DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_BREADTH_MAX = 0.36
@@ -1372,6 +1423,27 @@ def resolve_daytrade_primary_equity_notional_pct(
         return 0.0
 
     if (
+        weekday == DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(gap_pct)
+        and not _is_invalid_number(open_vs_sma_atr)
+        and not _is_invalid_number(primary_score)
+        and DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_BREADTH_MIN
+        <= float(breadth_val)
+        < DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_BREADTH_MAX
+        and DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MARKET_RATIO_MIN
+        <= float(market_ratio)
+        and float(gap_pct)
+        <= DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MAX_GAP_PCT
+        and float(primary_score)
+        < DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MAX_SCORE
+        and float(open_vs_sma_atr)
+        >= DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_LOW_SCORE_HOT_MARKET_STRETCHED_OPEN_NO_TRADE_MIN_OPEN_VS_SMA_ATR
+    ):
+        return 0.0
+
+    if (
         weekday == DAYTRADE_PRIMARY_TUESDAY_MID_BREADTH_HOT_MARKET_STRETCHED_OPEN_WEAK_RSI_NO_TRADE_WEEKDAY
         and not _is_invalid_number(breadth_val)
         and not _is_invalid_number(market_ratio)
@@ -1828,6 +1900,36 @@ def resolve_daytrade_primary_equity_notional_pct(
     ):
         return 0.0
     if (
+        weekday == DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_WEEKDAY
+        and not _is_invalid_number(breadth_val)
+        and not _is_invalid_number(market_ratio)
+        and not _is_invalid_number(primary_score)
+        and not _is_invalid_number(gap_pct)
+        and not _is_invalid_number(open_vs_sma_atr)
+        and not _is_invalid_number(prev_return)
+        and not _is_invalid_number(rs_alpha)
+        and DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_BREADTH_MIN
+        <= float(breadth_val)
+        < DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_BREADTH_MAX
+        and DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MARKET_RATIO_MIN
+        <= float(market_ratio)
+        < DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MARKET_RATIO_MAX
+        and float(primary_score)
+        <= DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_SCORE_MAX
+        and DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MIN_GAP_PCT
+        <= float(gap_pct)
+        <= DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_GAP_PCT
+        and DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MIN_PREV_RETURN_PCT
+        <= float(prev_return)
+        <= DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_PREV_RETURN_PCT
+        and float(open_vs_sma_atr)
+        <= DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_OPEN_VS_SMA_ATR
+        and float(rs_alpha)
+        <= DAYTRADE_PRIMARY_MONDAY_LOW_SCORE_MID_HOT_MARKET_NEAR_SMA_MAX_RS_ALPHA
+    ):
+        return 0.0
+
+    if (
         weekday in DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_WEEKDAYS
         and not _is_invalid_number(breadth_val)
         and not _is_invalid_number(market_ratio)
@@ -1845,11 +1947,11 @@ def resolve_daytrade_primary_equity_notional_pct(
         >= DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_MIN_GAP_PCT
         and float(open_vs_sma_atr)
         <= DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_MAX_OPEN_VS_SMA_ATR
-        ):
-            return min(
-                float(default_pct),
-                DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT,
-            )
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+        )
     if (
         weekday == DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY
         and not _is_invalid_number(market_ratio)
@@ -2013,6 +2115,23 @@ def resolve_daytrade_primary_equity_notional_pct(
             float(default_pct),
             DAYTRADE_PRIMARY_FRAGILE_HOT_MARKET_EQUITY_NOTIONAL_PCT,
         )
+    if (
+        weekday in DAYTRADE_PRIMARY_LOW_SCORE_PROBE_WEEKDAYS
+        and not _is_invalid_number(primary_score)
+        and float(primary_score) <= 6.0
+    ):
+        return min(
+            float(default_pct),
+            DAYTRADE_PRIMARY_LOW_SCORE_EQUITY_NOTIONAL_PCT,
+        )
+    # Wednesday's 10-11 continuation stayed loss-only in train, so keep that
+    # narrower score band out entirely.
+    if (
+        weekday == DAYTRADE_PRIMARY_WEDNESDAY_STALL_WEEKDAY
+        and not _is_invalid_number(primary_score)
+        and 10.0 <= float(primary_score) < 11.0
+    ):
+        return 0.0
     if (
         not _is_invalid_number(rs_alpha)
         and float(rs_alpha) < DAYTRADE_PRIMARY_LOW_RS_MAX_RS_ALPHA
@@ -2450,6 +2569,24 @@ def is_daytrade_primary_friday_weak_rs_filtered(
     )
 
 
+
+def is_daytrade_primary_friday_low_open_filtered(
+    open_vs_sma_atr,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    if weekday is None or _is_invalid_number(open_vs_sma_atr):
+        return False
+    # Friday primary stayed loss-only in train when the open was still close
+    # to the moving average instead of decisively extended.
+    return (
+        weekday == DAYTRADE_PRIMARY_FRIDAY_WEAK_RS_WEEKDAY
+        and 0.0 <= float(open_vs_sma_atr) < 0.50
+    )
+
+
+
 def should_replace_primary_with_fallback_tuesday_mid_breadth(
     primary_score,
     fallback_score,
@@ -2788,6 +2925,7 @@ def estimate_daytrade_candidate_execution(
         stop_price=stop_price,
         notional_pct=top_candidate.get("notional_pct"),
         equity_notional_pct=top_candidate.get("equity_notional_pct"),
+        risk_budget_pct=top_candidate.get("risk_budget_pct"),
     )
     return int(capped_shares or 0), float(selected_dynamic_leverage)
 
@@ -2839,6 +2977,36 @@ def is_daytrade_catchup_rs_tuesday_low_breadth_weak_market_filtered(
         and float(breadth_val) < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_BREADTH_MAX
         and float(market_ratio) < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_MARKET_RATIO_MAX
         and float(candidate.get("score")) >= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_WEAK_MARKET_FILTER_MIN_SCORE
+    )
+
+
+def is_daytrade_catchup_rs_tuesday_low_breadth_moderate_market_filtered(
+    candidate,
+    breadth_val,
+    market_ratio,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    score = None if candidate is None else candidate.get("score")
+    if (
+        weekday is None
+        or candidate is None
+        or _is_invalid_number(breadth_val)
+        or _is_invalid_number(market_ratio)
+        or _is_invalid_number(score)
+        or str(candidate.get("setup_type")) != "catchup_rs"
+    ):
+        return False
+    return (
+        weekday == DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_WEEKDAY
+        and float(breadth_val) < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_BREADTH_MAX
+        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MARKET_RATIO_MIN
+        <= float(market_ratio)
+        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MARKET_RATIO_MAX
+        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MIN_SCORE
+        <= float(score)
+        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_MODERATE_MARKET_FILTER_MAX_SCORE
     )
 
 
@@ -2899,6 +3067,55 @@ def is_daytrade_fallback_tuesday_weak_market_high_open_filtered(
         and float(candidate.get("score")) <= DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_SCORE_MAX
         and float(candidate.get("prev_return")) >= DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_MIN_PREV_RETURN_PCT
         and float(candidate.get("open_vs_sma_atr")) >= DAYTRADE_FALLBACK_TUESDAY_WEAK_MARKET_HIGH_OPEN_MIN_OPEN_VS_SMA_ATR
+    )
+
+
+def is_daytrade_fallback_tuesday_friday_mid_market_filtered(
+    candidate,
+    market_ratio,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    if (
+        weekday is None
+        or _is_invalid_number(market_ratio)
+        or str(candidate.get("setup_type")) != "fallback"
+    ):
+        return False
+    # Tuesday / Friday fallback stayed loss-only in train when the market was
+    # only mildly hot rather than decisively strong.
+    return (
+        weekday in DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_WEEKDAYS
+        and DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_MIN
+        <= float(market_ratio)
+        < DAYTRADE_FALLBACK_TUESDAY_FRIDAY_MID_MARKET_MAX
+    )
+
+
+def is_daytrade_fallback_wednesday_low_breadth_high_open_filtered(
+    candidate,
+    breadth_val,
+    market_ratio,
+    trade_date=None,
+    trade_weekday=None,
+):
+    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    if (
+        weekday is None
+        or _is_invalid_number(breadth_val)
+        or _is_invalid_number(market_ratio)
+        or _is_invalid_number(candidate.get("score"))
+        or _is_invalid_number(candidate.get("open_vs_sma_atr"))
+        or str(candidate.get("setup_type")) != "fallback"
+    ):
+        return False
+    return (
+        weekday == DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_WEEKDAY
+        and float(breadth_val) < DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_BREADTH_MAX
+        and float(market_ratio) < DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_MARKET_RATIO_MAX
+        and float(candidate.get("score")) <= DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_SCORE_MAX
+        and float(candidate.get("open_vs_sma_atr")) >= DAYTRADE_FALLBACK_WEDNESDAY_LOW_BREADTH_HIGH_OPEN_MIN_OPEN_VS_SMA_ATR
     )
 
 
@@ -3669,6 +3886,12 @@ def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
             return None
         if open_vs_sma_atr > DAYTRADE_MAX_OPEN_POSITION_ATR:
             return None
+        if is_daytrade_primary_friday_low_open_filtered(
+            open_vs_sma_atr,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        ):
+            return None
         if is_daytrade_primary_tuesday_far_trend_filtered(
             open_vs_sma_atr,
             trade_date=trade_date,
@@ -3852,6 +4075,12 @@ def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
         if open_vs_sma_atr < DAYTRADE_MIN_TREND_GAP_ATR:
             return None
         if open_vs_sma_atr > DAYTRADE_MAX_OPEN_POSITION_ATR:
+            return None
+        if is_daytrade_primary_friday_low_open_filtered(
+            open_vs_sma_atr,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        ):
             return None
         if is_daytrade_primary_tuesday_far_trend_filtered(
             open_vs_sma_atr,
@@ -4535,6 +4764,13 @@ def select_daytrade_candidates(
             trade_date=trade_date,
             trade_weekday=trade_weekday,
         )
+        and not is_daytrade_catchup_rs_tuesday_low_breadth_moderate_market_filtered(
+            item,
+            breadth_val,
+            market_ratio,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        )
         and not is_daytrade_catchup_gapdown_wednesday_negative_trend_filtered(
             item,
             item.get("open_vs_sma_atr"),
@@ -4551,6 +4787,19 @@ def select_daytrade_candidates(
             market_ratio,
         )
         and not is_daytrade_fallback_tuesday_weak_market_high_open_filtered(
+            item,
+            breadth_val,
+            market_ratio,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        )
+        and not is_daytrade_fallback_tuesday_friday_mid_market_filtered(
+            item,
+            market_ratio,
+            trade_date=trade_date,
+            trade_weekday=trade_weekday,
+        )
+        and not is_daytrade_fallback_wednesday_low_breadth_high_open_filtered(
             item,
             breadth_val,
             market_ratio,
@@ -5286,7 +5535,6 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "notional_pct": DAYTRADE_MAX_NOTIONAL_PCT,
                     "equity_notional_pct": primary_equity_notional_pct,
                     "breadth_val": breadth_val,
-                    "market_ratio": market_ratio,
                     "small_account_probe": None,
                 })
                 continue
@@ -5332,6 +5580,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "rs": rs,
                     "rsi2": r2,
                     "adv_yen": turnover_value,
+                    "market_ratio": market_ratio,
                     "gap_pct": strong_oversold_metrics["gap_pct"],
                     "prev_body_atr": None,
                     "recovery_atr": None,
@@ -5483,6 +5732,14 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         default_pct=DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
                     )
 
+                risk_budget_pct = None
+                if (
+                    catchup_metrics["setup_type"] == "catchup_rs"
+                    and not _is_invalid_number(notional_pct)
+                    and float(notional_pct) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT
+                ):
+                    risk_budget_pct = DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_RISK_BUDGET_PCT
+
                 catchup_candidates.append({
                     "code": code_only,
                     "name": name,
@@ -5498,7 +5755,7 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "setup_type": catchup_metrics["setup_type"],
                     "notional_pct": notional_pct,
                     "equity_notional_pct": equity_notional_pct,
-                    "risk_budget_pct": None,
+                    "risk_budget_pct": risk_budget_pct,
                     "prev_return": catchup_metrics.get("prev_return"),
                     "prev_rsi2": catchup_metrics.get("prev_rsi2"),
                     "open_from_prev_low_atr": catchup_metrics.get("open_from_prev_low_atr"),
@@ -5802,6 +6059,7 @@ def cap_daytrade_position_size(
     stop_price,
     notional_pct=None,
     equity_notional_pct=None,
+    risk_budget_pct=None,
 ):
     shares = _floor_lot(raw_shares)
     if shares < 100 or current_equity <= 0 or buying_power <= 0 or entry_price <= 0:
@@ -5811,7 +6069,10 @@ def cap_daytrade_position_size(
     if risk_per_share <= 0:
         return 0
 
-    risk_budget_shares = _floor_lot((float(current_equity) * DAYTRADE_RISK_PER_TRADE_PCT) / risk_per_share)
+    effective_risk_budget_pct = DAYTRADE_RISK_PER_TRADE_PCT
+    if not _is_invalid_number(risk_budget_pct) and float(risk_budget_pct) > 0:
+        effective_risk_budget_pct = float(risk_budget_pct)
+    risk_budget_shares = _floor_lot((float(current_equity) * effective_risk_budget_pct) / risk_per_share)
     effective_notional_pct = DAYTRADE_MAX_NOTIONAL_PCT if notional_pct is None else float(notional_pct)
     notional_cap_shares = _floor_lot((float(buying_power) * effective_notional_pct) / float(entry_price))
     capped_shares = min(shares, risk_budget_shares, notional_cap_shares)

@@ -69,6 +69,35 @@ def test_compute_daytrade_snapshot_calculates_breadth_without_name_error():
     assert snapshot["latest_close_map"]["1000"] > 0
 
 
+
+def test_resolve_daytrade_entry_shares_forwards_risk_budget_pct():
+    captured = {}
+
+    def _capture_cap_daytrade_position_size(*args, **kwargs):
+        captured["risk_budget_pct"] = kwargs.get("risk_budget_pct")
+        return 100
+
+    with patch("auto_trade.calculate_lot_size", return_value=200), patch(
+        "auto_trade.cap_daytrade_position_size", side_effect=_capture_cap_daytrade_position_size
+    ):
+        shares = auto_trade.resolve_daytrade_entry_shares(
+            item={
+                "atr": 2.0,
+                "notional_pct": 1.0,
+                "equity_notional_pct": 2.0,
+                "risk_budget_pct": 0.105,
+            },
+            day_equity=10_000_000,
+            candidate_buying_power=5_000_000,
+            candidate_dynamic_lev=1.0,
+            buy_price=100.0,
+            stop_price=90.0,
+        )
+
+    assert shares == 100
+    assert captured["risk_budget_pct"] == 0.105
+
+
 def test_inverse_only_candidate_set_accepts_inverse_pullback():
     assert is_inverse_only_candidate_set([{"setup_type": "inverse_pullback"}])
     assert is_inverse_only_candidate_set(
