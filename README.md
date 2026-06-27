@@ -33,21 +33,26 @@
   - setup ごとの脆弱性が明確なら、shared な setup 別 risk budget で損失集中を下げる
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade に寄せる
   - `primary` の Wednesday hot-gap / below-SMA では、score `>= 7.5` の tail を no-trade に寄せる
+  - `primary` の Wednesday `10-11` continuation は no-trade にする
   - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
   - `catchup_rs` の Monday / Friday 高 breadth hot-market は selector から除外する
   - `catchup_rs` の Monday mid-breadth / stretched-open pocket は selector から除外する
   - `catchup_rs` の Tuesday low-breadth / weak-market / high-score pocket は selector から除外する
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket（`breadth < 0.45` / `market_ratio 1.00-1.05` / `score 8-10`）は selector から除外する
   - `fallback` の high breadth / hot-market pocket は selector から除外する
   - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）は selector から除外する
   - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional は `0.25` に抑える
   - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
   - `primary` の Tuesday high-market mid-breadth では、stop-heavy な low-score / low-RS サブクラスターだけを quarter-size に落とす
   - `primary` の Tuesday mid-breadth / low-score / hot-market continuation は、small-gap pocket を 0.10 に寄せつつ、low market-ratio / positive-gap pocket は no-trade にする
+  - `primary` の Tuesday mid-breadth / low-score / stretched-open / hot-market pocket は no-trade にする
+  - `primary` の Tuesday stretched-open / mid-breadth / hot-market / weak-RSI pocket は RSI2 `71.0` 未満を no-trade にする
   - `primary` の Tuesday low-open / mid-breadth / hot-market / weak-open pocket は no-trade にする
-  - `primary` の Tuesday stretched-open / mid-breadth / hot-market / weak-RSI pocket は no-trade にする
+
   - `primary` の Wednesday mid-breadth / hot-market / low-prev-return pocket は no-trade にする
   - `primary` の Tuesday high breadth / high-score / stretched open は half-size に落とす
   - `primary` の Tuesday / Thursday mid-breadth / hot-market / score `8-10` は selected base leverage を `0.10` に制限する
+  - `primary` の火曜以外の high breadth / mid-hot market / score `> 8` は equity notional を `1.00` にする
   - `strong_oversold` の Tuesday 伸び切り open は selector から除外する
   - `primary` の Monday high-market high-breadth / low-RS は no-trade を許容する
   - `primary` の Monday high-market high-breadth / high-RS / stretched continuation は no-trade を許容する
@@ -69,57 +74,57 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-23** です。
-使用データの最新日は **2026-06-19** です。
-最新確認は `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` で行いました。
-train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20` で確認しました。
+最新確認日は **2026-06-27** です。
+使用データの最新日は **2026-06-26** です。
+最新確認は `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` で行いました。
+train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20 --output-trades-csv tmp\current_trade_log.csv` で確認しました。
 
 full history の最新確認値:
 
-- `FINAL EQUITY: 6,296,979円`
-- `CLOSED TRADES: 558`
-- `WIN RATE: 45.52%`
-- `TOTAL RETURN: +529.70%`
-- `PROFIT FACTOR: 2.17`
-- `WEEKS >= +1%: 85/225`
-- `POSITIVE WEEKS: 117/225`
-- `MONTHS >= 3/4 ACTIVE: 26/52`
-- `WORST DAY: -229,944円`
+- `FINAL EQUITY: 7,298,768円`
+- `CLOSED TRADES: 532`
+- `WIN RATE: 46.43%`
+- `TOTAL RETURN: +629.88%`
+- `PROFIT_FACTOR: 2.38`
+- `WEEKS >= +1%: 86/226`
+- `POSITIVE WEEKS: 113/226`
+- `MONTHS >= 3/4 ACTIVE: 23/52`
+- `WORST DAY: -225,547円`
 
 train window の最新確認値:
 
-- `FINAL EQUITY: 3,456,062円`
-- `CLOSED TRADES: 504`
-- `WIN RATE: 45.04%`
-- `TOTAL RETURN: +245.61%`
-- `PROFIT_FACTOR: 1.82`
-- `WEEKS >= +1%: 69/199`
-- `POSITIVE WEEKS: 100/199`
-- `MONTHS >= 3/4 ACTIVE: 8/45`
-- `WORST DAY: -108,465円`
+- `FINAL EQUITY: 3,789,298円`
+- `CLOSED TRADES: 481`
+- `WIN RATE: 46.15%`
+- `TOTAL RETURN: +278.93%`
+- `PROFIT_FACTOR: 1.87`
+- `WEEKS >= +1%: 71/200`
+- `POSITIVE WEEKS: 97/200`
+- `MONTHS >= 3/4 ACTIVE: 7/45`
+- `WORST DAY: -174,346円`
 
-直近 6ヶ月 holdout `2025-12-22` から `2026-06-19` の確認値（reference / veto 用）:
+直近 6ヶ月 holdout `2025-12-29` から `2026-06-26` の確認値（reference / veto 用）:
 
-- `FINAL EQUITY: 6,296,979円`
-- `CLOSED TRADES: 54`
-- `WIN RATE: 50.00%`
-- `TOTAL RETURN: +82.20%`
-- `PROFIT_FACTOR: 2.87`
-- `WEEKS >= +1%: 16/26`
-- `POSITIVE WEEKS: 17/26`
+- `FINAL EQUITY: 7,298,768円`
+- `CLOSED TRADES: 51`
+- `WIN RATE: 49.02%`
+- `TOTAL RETURN: +92.62%`
+- `PROFIT_FACTOR: 3.57`
+- `WEEKS >= +1%: 15/26`
+- `POSITIVE WEEKS: 16/26`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
-- `WORST DAY: -229,944円`
+- `WORST DAY: -225,547円`
 
-直近1ヶ月 `100万円 standalone` `2026-05-20` から `2026-06-19` の確認値（reference / veto 用）:
+直近1ヶ月 `100万円 standalone` `2026-05-27` から `2026-06-26` の確認値（reference / veto 用）:
 
 - `START EQUITY: 1,000,000円`
-- `FINAL EQUITY: 1,142,235円`
-- `TOTAL RETURN: +14.22%`
+- `FINAL EQUITY: 1,082,521円`
+- `TOTAL RETURN: +8.25%`
 - `CLOSED TRADES: 4`
-- `PROFIT_FACTOR: inf`
-- `WEEKS >= +1%: 3/4`
-- `POSITIVE WEEKS: 3/4`
-- `WORST DAY: 0円`
+- `PROFIT_FACTOR: 34.11`
+- `WEEKS >= +1%: 2/4`
+- `POSITIVE WEEKS: 2/4`
+- `WORST DAY: -2,493円`
 
 補足:
 
@@ -129,7 +134,7 @@ train window の最新確認値:
 - 週次 `+1%` は保証値ではなく、改善目標として扱っています
 - holdout と standalone は、採用の加点材料ではなく、reference / veto 用の確認値です
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
-- 次の `clean holdout` は、現在の使用データ最新日 `2026-06-19` の翌営業日以降、つまり `2026-06-20` 以降の未観測データです
+- 次の `clean holdout` は、現在の使用データ最新日 `2026-06-26` の翌営業日以降、つまり `2026-06-27` 以降の未観測データです
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 - `RUNTIME_LIVE_ORDER_CONFIG_HASH` は、実行設定に加えて `core.logic` の daytrade 定数、monthly rotation モジュール fingerprint、主要コードファイルの fingerprint も含めた承認マニフェストから計算します
 - LIVE の financial write は、actual `KABUCOM_TEST` fixture provenance、CI artifact 由来の attestation bundle (`contracts/kabucom_live_write_attestation.json` + `.sha256`)、operator ACK、JPX calendar source をまとめて fail closed で判定します。`KABUCOM_LIVE` では operator ACK は `KABUCOM_LIVE_OPERATOR_ACK_CONTEXT` の structured context を必須にし、legacy boolean や explicit 引数だけでは開きません。さらに、`LiveReadinessReport` が protective stop lifecycle / partial fill / execution-ID truth / quote freshness / journal reconciliation / request budget / risk readiness / no-lookahead audit をまとめて fail closed で示し、`execution_ids` の集約ロットや重複 execution_id は truth lot ではなく blocked 扱いにします。`LIVE_RISK_REVIEW_PATH` か `contracts/live_risk_review.json` が無い場合は not_verified のまま閉じます。`no_lookahead_audit` は risk review 自体が ready の場合にだけ ready とみなします。`GITHUB_TOKEN` / `GH_TOKEN` がある場合は GitHub Actions の workflow run と artifact を API で照合し、artifact の digest と zip 内容まで確認します。verification 結果はプロセス内で `GITHUB_ARTIFACT_SOURCE_CACHE_TTL_SEC` 秒だけ再利用し、キャッシュキーには repository / workflow run / head_sha / artifact 名 / local attestation hash / local digest / token fingerprint / session fingerprint を含めます。期限切れ後や token ローテーション後、local attestation 更新後は再検証され、必要なら `clear_live_write_attestation_artifact_source_cache()` で手動クリアできます
@@ -529,6 +534,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `catchup_rs` の Monday / Friday 高 breadth hot-market selector フィルタ
   - `catchup_rs` の Monday mid-breadth / stretched-open pocket selector フィルタ
   - `catchup_rs` の Tuesday low-breadth / weak-market / high-score pocket selector フィルタ
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket selector フィルタ
   - `fallback` の hot-market / high-breadth selector フィルタ
   - 火曜 mid-breadth continuation / 水曜 high breadth `fallback` の曜日別 equity cap
   - 水曜 high breadth / gap `> 0.5%` `fallback` の追加 equity cap
@@ -928,4 +934,4 @@ python -m pytest tests/test_order_journal.py
 - 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-23
+Last updated: 2026-06-27

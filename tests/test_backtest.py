@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from unittest.mock import patch
 
 from backtest import run_backtest_v16_production, run_backtest_v19_monthly_rotation
 from core.monthly_rotation_strategy import get_prod_monthly_rotation_backtest_params
@@ -282,20 +283,27 @@ def test_daytrade_open_entry_does_not_use_same_day_breadth():
 
 def test_daytrade_allows_low_breadth_tuesday_catchup_rs_probe():
     dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle()
-    final_assets, trade_count, monthly, results = run_backtest_v16_production(
-        univ_indices=np.arange(1),
-        bundle_np=bundle_np,
-        timeline=dates,
-        breadth_ratio=np.ones(len(dates)) * 0.30,
-        initial_cash=10_000_000,
-        max_pos=1,
-        sl_mult=5.0,
-        tp_mult=20.0,
-        slippage=0.0,
-        leverage_rate=1.0,
-        breadth_threshold=0.3,
-        max_hold_days=1,
-    )
+
+    def _select_first_available(primary, strong, fallback, catchup, inverse, bull, **kwargs):
+        return catchup[:1] or fallback[:1] or strong[:1] or primary[:1] or inverse[:1] or bull[:1]
+
+    with patch("backtest.select_daytrade_candidates", side_effect=_select_first_available), patch(
+        "backtest.cap_daytrade_position_size", return_value=100
+    ):
+        final_assets, trade_count, monthly, results = run_backtest_v16_production(
+            univ_indices=np.arange(1),
+            bundle_np=bundle_np,
+            timeline=dates,
+            breadth_ratio=np.ones(len(dates)) * 0.30,
+            initial_cash=10_000_000,
+            max_pos=1,
+            sl_mult=5.0,
+            tp_mult=20.0,
+            slippage=0.0,
+            leverage_rate=1.0,
+            breadth_threshold=0.3,
+            max_hold_days=1,
+        )
 
     assert trade_count == 1
     assert len(results) == 1
@@ -323,6 +331,44 @@ def test_daytrade_filters_low_breadth_friday_catchup_rs_probe():
     assert trade_count == 0
     assert len(results) == 0
     assert final_assets == 10_000_000.0
+
+
+def test_daytrade_catchup_rs_strong_continuation_forwards_risk_budget_pct():
+    dates, bundle_np = _build_low_breadth_tuesday_catchup_bundle()
+    captured = {}
+
+    def _select_first_available(primary, strong, fallback, catchup, inverse, bull, **kwargs):
+        return catchup[:1] or fallback[:1] or strong[:1] or primary[:1] or inverse[:1] or bull[:1]
+
+    def _capture_cap_daytrade_position_size(*args, **kwargs):
+        captured["risk_budget_pct"] = kwargs.get("risk_budget_pct")
+        return 100
+
+    with patch("backtest.select_daytrade_candidates", side_effect=_select_first_available), patch(
+        "backtest.resolve_daytrade_catchup_notional_pct", return_value=1.0
+    ), patch("backtest.resolve_daytrade_catchup_equity_notional_pct", return_value=2.0), patch(
+        "backtest.cap_daytrade_position_size", side_effect=_capture_cap_daytrade_position_size
+    ):
+        final_assets, trade_count, monthly, results = run_backtest_v16_production(
+            univ_indices=np.arange(1),
+            bundle_np=bundle_np,
+            timeline=dates,
+            breadth_ratio=np.ones(len(dates)) * 0.30,
+            initial_cash=10_000_000,
+            max_pos=1,
+            sl_mult=5.0,
+            tp_mult=20.0,
+            slippage=0.0,
+            leverage_rate=1.0,
+            breadth_threshold=0.3,
+            max_hold_days=1,
+        )
+
+    assert trade_count == 1
+    assert len(results) == 1
+    assert results[0] > 0
+    assert captured["risk_budget_pct"] == 0.105
+    assert final_assets > 10_000_000.0
 
 
 def test_daytrade_tries_next_candidate_when_top_is_too_large():

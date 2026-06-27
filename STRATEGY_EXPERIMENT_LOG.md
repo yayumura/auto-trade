@@ -5,7 +5,7 @@
 
 ## Current Baseline
 
-- As of 2026-06-23
+- As of 2026-06-24
 - Latest data: 2026-06-19
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
@@ -13,9 +13,11 @@
   - 火曜の mid breadth で、弱い `primary` より少し強い `fallback` がある場合は差し替え
   - 火曜の中途半端な寄りギャップ `primary` を除外
   - 火曜の trend 距離が遠すぎる `primary` を除外
-  - 火曜の高 breadth / 高スコア / 伸び切り open の `primary` の equity notional 上限は `0.50`
+  - 火曜の高 breadth / 高スコア / 伸び切り open の `primary` は no-trade にする
   - 火曜 / 木曜の mid-breadth / hot-market / score `8-10` の `primary` は selected base leverage を `0.10` に制限する
   - 火曜の mid breadth / low-score / hot-market continuation は、small-gap pocket を 0.10 に寄せつつ、low market-ratio / positive-gap pocket は no-trade にする
+  - 火曜の mid breadth / low-score / stretched-open / hot-market pocket は no-trade にする
+  - 火曜の stretched-open / mid-breadth / hot-market / weak-RSI pocket は RSI2 `71.0` 未満を no-trade にする
   - 火曜の mid breadth で指数が +1%以上ギャップアップしている `primary` を除外
   - 水曜の小さすぎる寄りギャップ、中途半端な寄りギャップ、または trend 距離が遠すぎる `primary` を除外
   - 水曜の mid-breadth / hot-market / score `9-12` / breadth `0.60-0.80` / market_ratio `1.07-1.21` の `primary` は selected base leverage を `0.10` に制限する
@@ -29,13 +31,14 @@
   - `primary` の Monday / Thursday broad hot-market は no-trade にする
   - `primary` の Monday mid-breadth / moderate-extension は no-trade にする
   - `primary` の Monday high-breadth / soft-gap continuation は no-trade にする
+  - 月曜の near-SMA / low-score / hot-market pocket は no-trade にする
   - 木曜の low-score hot-market `primary` の equity notional 上限は `0.50`
   - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の equity notional 上限は `0.25`
   - 水曜の low-breadth / high-gap / high-score / strong-open `primary` の equity notional 上限は `0.25`
   - 木曜の high-score / moderate-prev-return / hot-market / stretched open `primary` の equity notional 上限は `0.25`
   - 月曜の hot-market medium-score `primary`（`market_ratio 1.05-1.10` / `score <= 10`）の equity notional 上限は `0.50`
   - tepid market / strong prior-day / mid-high-score `primary` の equity notional 上限は `0.25`
-  - high breadth / mid-hot market / mid-high-score `primary` の equity notional 上限は `0.50`
+  - high breadth / mid-hot market / mid-high-score `primary` の equity notional 上限は `1.00`
   - 月曜の mid-gap / far-trend `primary` の equity notional 上限は `0.50`
   - 月曜の breadth `0.50-0.55` / gap `>= 2.0%` / near-SMA `primary` の equity notional 上限は `1.00`
   - 月曜の breadth `0.50-0.65` / `market_ratio 1.00-1.05` / 非マイナス gap / 前日上昇 `>= 6%` / trend `>= 1.0 ATR` `primary` の equity notional 上限は `1.00`
@@ -63,12 +66,14 @@
   - `catchup_rs` の Monday weak-market / moderate-gap pocket を selector から除外する
   - `catchup_rs` の Monday mid-breadth / stretched-open pocket を selector から除外する
   - `catchup_rs` の Tuesday low-breadth / weak-market / high-score pocket を selector から除外する
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket（`breadth < 0.45` / `market_ratio 1.00-1.05` / `score 8-10`）を selector から除外する
   - `catchup_rs` の Monday / Friday 高 breadth hot-market を selector から除外する
   - `catchup_rs` の Friday low breadth / modest market pocket（`market_ratio 1.00-1.10` / `breadth < 0.55`）を selector から除外する
   - `catchup_gapdown` の Wednesday negative-trend pocket を selector から除外する
   - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional を `0.25` に抑える
   - `fallback` の high breadth / hot-market pocket を selector から除外する
   - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
+  - `fallback` の Wednesday low-breadth / high-open pocket は selector から除外する
   - 月曜の breadth `0.35-0.45` / gap `-2.0%~-1.5%` / below-SMA `catchup_gapdown` の equity notional 上限は `0.25`
   - 火曜の breadth `0.35-0.45` / gap `-1.0%~-0.6%` / neutral-trend `catchup_gapdown` の equity notional 上限は `0.10`
   - 火曜の breadth `0.35-0.45` / gap `-1.5%~-0.6%` `catchup_gapdown` の equity notional 上限は `0.25`
@@ -131,18 +136,18 @@
 - 火曜 low-breadth で too-hot な `catchup_rs` は moderate candidate に selector cooling する
 - 水曜 low-breadth の `catchup_rs` は selector から除外する
 - 最新確認値:
-- `FINAL EQUITY: 6,296,979円`
-- `CLOSED TRADES: 558`
-- `WIN RATE: 45.52%`
-- `WEEKS >= +1%: 85/225`
-- `POSITIVE WEEKS: 117/225`
-- `TOTAL RETURN: +529.70%`
-- `PROFIT FACTOR: 2.17`
-- `AVG MONTH ACTIVE RATE: 52.87%`
-- `MONTHS >= 50% ACTIVE: 26/52`
-- `MONTHS >= 2/3 ACTIVE: 15/52`
+- `FINAL EQUITY: 6,649,462円`
+- `CLOSED TRADES: 533`
+- `WIN RATE: 45.78%`
+- `WEEKS >= +1%: 87/225`
+- `POSITIVE WEEKS: 112/225`
+- `TOTAL RETURN: +564.95%`
+- `PROFIT_FACTOR: 2.30`
+- `AVG MONTH ACTIVE RATE: 50.46%`
+- `MONTHS >= 50% ACTIVE: 25/52`
+- `MONTHS >= 2/3 ACTIVE: 13/52`
 - `MONTHS >= 3/4 ACTIVE: 8/52`
-- `WORST DAY: -229,944円`
+- `WORST DAY: -239,096円`
 
 ### 2026-06-21: Tuesday / Thursday Mid-Breadth Hot-Market Selected-Leverage Cap Adopted
 
@@ -8720,3 +8725,92 @@
 - 再試行するとしたら:
   - Wednesday hot-gap / below-SMA でも、score 帯と open 方向がさらに一貫して loss-only になる train 再現 pocket が見つかった場合だけ
   - それ以外は、すでに mixed だった shared pocket へ追加の当て込みをしない
+
+### 2026-06-24: Tuesday Mid-Breadth Low-Score Stretched-Open and Weak-RSI Pocket Tightened
+
+- 試したこと:
+  - `primary` の Tuesday mid-breadth / low-score / stretched-open / hot-market pocket を no-trade にした
+  - `primary` の Tuesday stretched-open / mid-breadth / hot-market / weak-RSI pocket の RSI2 上限を `71.0` に引き上げた
+  - train で再現した `2023-04-11 8136.T` / `2023-12-05 8848.T` / `2024-05-21 7740.T` / `2025-11-11 1893.T` の損失 pocket を shared no-trade で浅くした
+  - `primary` の Monday near-SMA / low-score / hot-market pocket を no-trade にした
+  - `primary` の Tuesday high-breadth / high-score / stretched-open pocket を no-trade にした
+  - `DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT` を `0.50 -> 1.00` に引き上げた
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket（`breadth < 0.45` / `market_ratio 1.00-1.05` / `score 8-10`）を selector から除外した
+  - `fallback` の Wednesday low-breadth / high-open pocket を selector から除外した
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y6,730,780 / TOTAL RETURN +573.08% / CLOSED TRADES 555 / WIN RATE 45.95% / PROFIT_FACTOR 2.24 / WEEKS >= +1% 88/225 / POSITIVE WEEKS 117/225 / MONTHS >= 3/4 ACTIVE 8/52 / WORST DAY -244,816`
+  - `TRAIN WINDOW: FINAL EQUITY Y3,688,258 / TOTAL RETURN +268.83% / CLOSED TRADES 500 / PROFIT_FACTOR 1.89 / WEEKS >= +1% 72/199 / POSITIVE WEEKS 100/199 / MONTHS >= 3/4 ACTIVE 8/45 / WORST DAY -108,253`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y6,730,780 / TOTAL RETURN +82.49% / CLOSED TRADES 55 / WIN RATE 49.09% / PROFIT_FACTOR 2.90 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -244,816`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,142,235 / TOTAL RETURN +14.22% / CLOSED TRADES 4 / PROFIT_FACTOR inf / WEEKS >= +1% 3/4 / POSITIVE WEEKS 3/4 / WORST DAY 0`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - Tuesday mid-breadth / stretched-open continuation で、train で複数回再現し、holdout を壊さない pocket がさらに見つかった場合だけ
+
+### 2026-06-24: Primary High-Breadth Mid-Hot-Market Size-Up + Tuesday Catchup RS Moderate-Market Broadening Rejected
+
+- 試したこと:
+  - `DAYTRADE_PRIMARY_HIGH_BREADTH_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT` を `0.50 -> 1.00` に引き上げた
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket（`breadth < 0.45` / `market_ratio 1.00-1.05` / `score < 12`）を shared selector から除外しようとした
+  - 低 breadth Tuesday の残差 pocket は loss-only に寄っていたが、score `< 12` まで広げると 2025-W34 が positive から negative に崩れた
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y7,203,734 / TOTAL RETURN +620.37% / CLOSED TRADES 558 / WIN RATE 46.06% / PROFIT_FACTOR 2.34 / WEEKS >= +1% 86/225 / POSITIVE WEEKS 118/225 / MONTHS >= 3/4 ACTIVE 27/52 / WORST DAY -260,832`
+    - `TRAIN WINDOW: FINAL EQUITY Y3,931,966 / TOTAL RETURN +293.20% / CLOSED TRADES 503 / WIN RATE 45.53% / PROFIT_FACTOR 1.98 / WEEKS >= +1% 70/199 / POSITIVE WEEKS 101/199 / MONTHS >= 3/4 ACTIVE 8/45 / WORST DAY -108,253`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y7,203,734 / TOTAL RETURN +83.21% / CLOSED TRADES 55 / WIN RATE 50.91% / PROFIT_FACTOR 3.00 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -260,832`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,142,235 / TOTAL RETURN +14.22% / CLOSED TRADES 4 / PROFIT_FACTOR inf / WEEKS >= +1% 3/4 / POSITIVE WEEKS 3/4 / WORST DAY 0`
+- 判断:
+  - 不採用
+  - train の `WEEKS >= +1%` が 1 本落ち、full の `WORST DAY` も悪化して `2025-W34` が `+1.03%` から `-3.18%` に崩れたので、shared strategy としては採らなかった
+- 再試行するとしたら:
+  - 低 breadth Tuesday の moderate-market pocket を広げるなら、少なくとも weekly hit を落とさない別の shared offset が同時に見つかったときだけ
+  - high breadth / mid-hot market は、まず week stability を崩さない範囲で別の train-supported factor が出たときだけ再検討する
+
+### 2026-06-24: Catchup RS Strong-Continuation Risk Budget Forwarding Restored
+
+- 試したこと:
+  - `backtest.py` の `catchup_rs` strong-continuation candidate で、shared logic が持っていた `risk_budget_pct` を本番相当の backtest path へ正しく forward するように戻した
+  - これにより、`DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_RISK_BUDGET_PCT` が backtest でも 10% デフォルトへ落ちず、shared sizing と同じ強度で評価されるようにした
+- 結果:
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y6,649,462 / TOTAL RETURN +564.95% / CLOSED TRADES 533 / WIN RATE 45.78% / PROFIT_FACTOR 2.30 / WEEKS >= +1% 87/225 / POSITIVE WEEKS 112/225 / MONTHS >= 3/4 ACTIVE 8/52 / WORST DAY -239,096`
+  - `TRAIN WINDOW: FINAL EQUITY Y3,587,087 / TOTAL RETURN +258.71% / CLOSED TRADES 480 / WIN RATE 45.21% / PROFIT_FACTOR 1.91 / WEEKS >= +1% 71/199 / POSITIVE WEEKS 95/199 / MONTHS >= 3/4 ACTIVE 8/45 / WORST DAY -108,253`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y6,649,462 / TOTAL RETURN +85.37% / CLOSED TRADES 53 / WIN RATE 50.94% / PROFIT_FACTOR 3.03 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -239,096`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,150,581 / TOTAL RETURN +15.06% / CLOSED TRADES 4 / PROFIT_FACTOR inf / WEEKS >= +1% 3/4 / POSITIVE WEEKS 3/4 / WORST DAY 0`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - もし将来 train-only 分析でこの strong-continuation のサイズアップが weekly stability を崩すと分かった場合だけ、risk budget ではなく gate 自体を見直す
+
+### 2026-06-27: Wednesday 10-11 Continuation No-Trade Adopted
+
+- 試したこと:
+  - `primary` の Wednesday `10.0 <= score < 11.0` continuation を no-trade にした
+  - train-only で loss-only に見えた小さな残差 pocket を、shared no-trade として切った
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y7,298,768 / TOTAL RETURN +629.88% / CLOSED TRADES 532 / WIN RATE 46.43% / PROFIT_FACTOR 2.38 / WEEKS >= +1% 86/226 / POSITIVE WEEKS 113/226 / MONTHS >= 3/4 ACTIVE 23/52 / WORST DAY -225,547`
+    - `TRAIN WINDOW: FINAL EQUITY Y3,789,298 / TOTAL RETURN +278.93% / CLOSED TRADES 481 / WIN RATE 46.15% / PROFIT_FACTOR 1.87 / WEEKS >= +1% 71/200 / POSITIVE WEEKS 97/200 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -174,346`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y7,298,768 / TOTAL RETURN +92.62% / CLOSED TRADES 51 / WIN RATE 49.02% / PROFIT_FACTOR 3.57 / WEEKS >= +1% 15/26 / POSITIVE WEEKS 16/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -225,547`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 採用
+  - train で再現した Wednesday の loss-only pocket を shared no-trade にでき、full / train / holdout を壊さずに baseline を維持できた
+- 再試行するとしたら:
+  - 10-11 以外の Wednesday continuation を score だけで広げるのではなく、新しい train-supported shared factor が見つかったときだけ
+
+### 2026-06-27: Wednesday Extreme-Open Pocket No-Trade Rejected
+
+- 試したこと:
+  - Wednesday の low-score / stretched-open / hot-market pocket を no-trade 化して、train の loss-only cluster をさらに削る案を試した
+  - `open_vs_sma_atr` が極端な pocket に絞って train-only diagnostics を見たところ、isolated trade log では loss-only に見えた
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `train-only の isolated pocket は消えたが、full validation では total return / PF / worst day が accepted baseline より悪化`
+    - `holdout` と `standalone` も含めた shared validation で改善が続かなかったため、採用しなかった
+- 判断:
+  - 不採用
+  - 共有戦略としては、同じ Wednesday の近傍をさらに細かく刻むだけでは回復せず、replacement / selection effects で全体が悪化した
+- 再試行するとしたら:
+  - この pocket の閾値をさらに刻むのではなく、別の train-supported shared factor が見つかった場合だけ
