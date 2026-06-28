@@ -23,6 +23,7 @@ from core.logic import (
     has_daytrade_rebound_confirmation,
     is_daytrade_catchup_market_allowed,
     is_daytrade_catchup_rs_high_breadth_filtered,
+    is_daytrade_catchup_rs_low_breadth_high_market_ratio_filtered,
     is_daytrade_catchup_rs_friday_low_breadth_filtered,
     is_daytrade_catchup_rs_monday_mid_breadth_stretched_open_filtered,
     is_daytrade_catchup_rs_tuesday_low_breadth_weak_market_filtered,
@@ -41,6 +42,7 @@ from core.logic import (
     is_daytrade_market_allowed,
     is_daytrade_strong_oversold_market_allowed,
     is_daytrade_strong_oversold_tuesday_stretched_open_filtered,
+    is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered,
     is_daytrade_weekly_profit_guard_active,
     is_daytrade_bull_etf_price_allowed,
     resolve_daytrade_intraday_stop_mult,
@@ -1040,7 +1042,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_sma_atr=1.8,
                 trade_weekday=1,
             ),
-            0.75,
+            0.25,
         )
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
@@ -1109,13 +1111,39 @@ class TestLogic(unittest.TestCase):
                 breadth_val=0.685732,
                 gap_pct=0.028163,
                 market_ratio=1.171012,
-                open_vs_sma_atr=0.481463,
+                open_vs_sma_atr=1.481463,
                 primary_score=9.32145,
                 prev_return=0.031827,
                 rs_alpha=52.644149,
                 trade_weekday=2,
             ),
             DAYTRADE_PRIMARY_HOT_MARKET_MID_BREADTH_MID_SCORE_MODERATE_PREV_RETURN_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.703331,
+                gap_pct=0.028163,
+                market_ratio=1.171012,
+                open_vs_sma_atr=0.481463,
+                primary_score=9.32145,
+                prev_return=0.031827,
+                rs_alpha=52.644149,
+                trade_weekday=2,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.619736,
+                gap_pct=-0.001676,
+                market_ratio=1.194038,
+                open_vs_sma_atr=-1.912983,
+                primary_score=9.350689,
+                prev_return=0.066922,
+                rs_alpha=45.590798,
+                trade_weekday=2,
+            ),
+            0.0,
         )
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
@@ -1205,7 +1233,7 @@ class TestLogic(unittest.TestCase):
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
                 breadth_val=0.72,
-                gap_pct=0.007,
+                gap_pct=0.0,
                 open_vs_sma_atr=1.1,
                 market_ratio=1.20,
                 primary_score=11.0,
@@ -1213,6 +1241,106 @@ class TestLogic(unittest.TestCase):
             ),
             DAYTRADE_PRIMARY_TUESDAY_OVERHEATED_EQUITY_NOTIONAL_PCT,
         )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.737901,
+                gap_pct=0.002619,
+                open_vs_sma_atr=1.096432,
+                market_ratio=1.119219,
+                primary_score=8.3232,
+                trade_weekday=4,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.745443,
+                gap_pct=0.016726,
+                open_vs_sma_atr=1.079632,
+                market_ratio=1.221709,
+                primary_score=8.054856,
+                trade_weekday=3,
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.676304,
+                gap_pct=0.0,
+                open_vs_sma_atr=-1.468652,
+                market_ratio=1.220428,
+                primary_score=8.460589,
+                trade_weekday=4,
+            ),
+            DAYTRADE_PRIMARY_MAX_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.436204,
+                gap_pct=-0.002725,
+                open_vs_sma_atr=-0.338223,
+                market_ratio=1.00354,
+                primary_score=3.560024,
+                trade_weekday=0,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.710874,
+                gap_pct=0.00974,
+                open_vs_sma_atr=2.73,
+                market_ratio=1.096044,
+                primary_score=6.483152,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.706474,
+                gap_pct=0.0,
+                open_vs_sma_atr=2.788099,
+                market_ratio=1.088991,
+                primary_score=6.343471,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.651163,
+                gap_pct=0.0,
+                open_vs_sma_atr=0.9,
+                market_ratio=1.127503,
+                primary_score=4.72867,
+                trade_weekday=1,
+            ),
+            DAYTRADE_PRIMARY_MONDAY_TUESDAY_LOW_SCORE_MID_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+        )
+        self.assertAlmostEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.625393,
+                gap_pct=-0.003757,
+                open_vs_sma_atr=2.203357,
+                market_ratio=1.218976,
+                primary_score=4.678518,
+                trade_weekday=1,
+            ),
+            0.75,
+        )
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(
+                breadth_val=0.706474,
+                gap_pct=0.0,
+                open_vs_sma_atr=2.788099,
+                market_ratio=1.088991,
+                primary_score=6.6,
+                trade_weekday=1,
+            ),
+            0.0,
+        )
+
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
                 breadth_val=0.64,
@@ -1736,7 +1864,7 @@ class TestLogic(unittest.TestCase):
             ),
             0.0,
         )
-        self.assertAlmostEqual(
+        self.assertEqual(
             resolve_daytrade_primary_equity_notional_pct(
                 breadth_val=0.68,
                 gap_pct=0.004,
@@ -1745,7 +1873,7 @@ class TestLogic(unittest.TestCase):
                 primary_score=7.0,
                 trade_weekday=1,
             ),
-            DAYTRADE_PRIMARY_LOW_SCORE_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+            0.0,
         )
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
@@ -1756,7 +1884,7 @@ class TestLogic(unittest.TestCase):
                 primary_score=7.0,
                 trade_weekday=1,
             ),
-            DAYTRADE_PRIMARY_MID_BREADTH_HOT_MARKET_EQUITY_NOTIONAL_PCT,
+            0.0,
         )
         self.assertAlmostEqual(
             resolve_daytrade_primary_equity_notional_pct(
@@ -2282,6 +2410,48 @@ class TestLogic(unittest.TestCase):
             "trade_weekday": 1,
         }
         slightly_safer_candidate = dict(loss_candidate, open_vs_sma_atr=1.05)
+
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(**loss_candidate),
+            0.0,
+        )
+        self.assertGreater(
+            resolve_daytrade_primary_equity_notional_pct(**slightly_safer_candidate),
+            0.0,
+        )
+
+    def test_daytrade_primary_tuesday_low_score_hot_market_no_trade(self):
+        loss_candidate = {
+            "breadth_val": 0.668762,
+            "gap_pct": 0.007334,
+            "market_ratio": 1.052975,
+            "open_vs_sma_atr": 1.357409,
+            "prev_return": 0.030411,
+            "primary_score": 5.061363,
+            "trade_weekday": 1,
+        }
+        slightly_safer_candidate = dict(loss_candidate, market_ratio=1.10, open_vs_sma_atr=0.9)
+
+        self.assertEqual(
+            resolve_daytrade_primary_equity_notional_pct(**loss_candidate),
+            0.0,
+        )
+        self.assertGreater(
+            resolve_daytrade_primary_equity_notional_pct(**slightly_safer_candidate),
+            0.0,
+        )
+
+    def test_daytrade_primary_monday_thursday_friday_low_score_hot_market_no_trade(self):
+        loss_candidate = {
+            "breadth_val": 0.609051,
+            "gap_pct": -0.002500,
+            "market_ratio": 1.105121,
+            "open_vs_sma_atr": 0.669960,
+            "prev_return": 0.017488,
+            "primary_score": 4.720600,
+            "trade_weekday": 0,
+        }
+        slightly_safer_candidate = dict(loss_candidate, primary_score=6.6)
 
         self.assertEqual(
             resolve_daytrade_primary_equity_notional_pct(**loss_candidate),
@@ -3718,6 +3888,62 @@ class TestLogic(unittest.TestCase):
             )
         )
 
+    def test_daytrade_candidate_selection_filters_monday_low_breadth_hot_market_strong_oversold(self):
+        strong_oversold = [{"code": "3696", "score": 22.367028, "setup_type": "strong_oversold"}]
+
+        self.assertTrue(
+            is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered(
+                strong_oversold[0],
+                0.628536,
+                1.042601,
+                trade_weekday=0,
+            )
+        )
+        self.assertTrue(
+            is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered(
+                strong_oversold[0],
+                0.618479,
+                1.031988,
+                trade_weekday=0,
+            )
+        )
+        self.assertTrue(
+            is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered(
+                strong_oversold[0],
+                0.730358,
+                1.023806,
+                trade_weekday=0,
+            )
+        )
+        self.assertFalse(
+            is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered(
+                strong_oversold[0],
+                0.551226,
+                1.011402,
+                trade_weekday=0,
+            )
+        )
+        self.assertFalse(
+            is_daytrade_strong_oversold_monday_low_breadth_hot_market_filtered(
+                strong_oversold[0],
+                0.684475,
+                1.127905,
+                trade_weekday=0,
+            )
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                strong_oversold,
+                [],
+                [],
+                breadth_val=0.628536,
+                market_ratio=1.042601,
+                trade_weekday=0,
+                max_count=1,
+            ),
+            [],
+        )
     def test_daytrade_candidate_selection_can_replace_weak_primary(self):
         primary = [{"code": "1000", "score": 5.0, "setup_type": "primary"}]
         medium_primary = [{"code": "1100", "score": 6.5, "setup_type": "primary"}]
@@ -4322,6 +4548,32 @@ class TestLogic(unittest.TestCase):
 
         self.assertEqual(selected[0]["setup_type"], "catchup_gapdown")
 
+    def test_daytrade_candidate_selection_filters_low_breadth_high_market_ratio_catchup_rs(self):
+        catchup = [{"code": "1963", "score": 6.1, "setup_type": "catchup_rs", "gap_pct": -0.000272}]
+
+        self.assertTrue(
+            is_daytrade_catchup_rs_low_breadth_high_market_ratio_filtered(catchup[0], 0.538655, 1.195596, trade_weekday=2)
+        )
+        self.assertTrue(
+            is_daytrade_catchup_rs_low_breadth_high_market_ratio_filtered(catchup[0], 0.546826, 1.160304, trade_weekday=1)
+        )
+        self.assertFalse(
+            is_daytrade_catchup_rs_low_breadth_high_market_ratio_filtered(catchup[0], 0.546826, 1.200304, trade_weekday=4)
+        )
+        self.assertEqual(
+            select_daytrade_candidates(
+                [],
+                [],
+                [],
+                catchup,
+                breadth_val=0.538655,
+                market_ratio=1.195596,
+                trade_weekday=2,
+                max_count=1,
+            ),
+            [],
+        )
+
     def test_daytrade_candidate_selection_filters_friday_low_breadth_catchup_rs(self):
         catchup = [{"code": "6101", "score": 11.2, "setup_type": "catchup_rs", "gap_pct": 0.008}]
 
@@ -4596,6 +4848,13 @@ class TestLogic(unittest.TestCase):
         )
 
     def test_daytrade_candidate_selection_filters_tuesday_low_breadth_moderate_market_catchup_rs(self):
+        lower_score_loss_candidate = {
+            "code": "6857",
+            "score": 6.751721,
+            "setup_type": "catchup_rs",
+            "gap_pct": 0.005501,
+            "open_vs_sma_atr": 3.143705,
+        }
         loss_candidate = {
             "code": "3064",
             "score": 8.889436,
@@ -4611,6 +4870,14 @@ class TestLogic(unittest.TestCase):
             "open_vs_sma_atr": 0.85426,
         }
 
+        self.assertTrue(
+            is_daytrade_catchup_rs_tuesday_low_breadth_moderate_market_filtered(
+                lower_score_loss_candidate,
+                0.409805,
+                1.020335,
+                trade_weekday=1,
+            )
+        )
         self.assertTrue(
             is_daytrade_catchup_rs_tuesday_low_breadth_moderate_market_filtered(
                 loss_candidate,
@@ -4632,7 +4899,7 @@ class TestLogic(unittest.TestCase):
                 [],
                 [],
                 [],
-                [loss_candidate, survivor_candidate],
+                [lower_score_loss_candidate, loss_candidate, survivor_candidate],
                 breadth_val=0.409805,
                 market_ratio=1.020335,
                 trade_weekday=1,

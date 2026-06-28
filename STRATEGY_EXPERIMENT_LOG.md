@@ -5,8 +5,8 @@
 
 ## Current Baseline
 
-- As of 2026-06-24
-- Latest data: 2026-06-19
+- As of 2026-06-28
+- Latest data: 2026-06-26
 - 採用中ロジック:
   - 月曜の高 breadth / 高ギャップ / 前日過熱 `primary` を除外
   - 火曜の mid breadth で、失速しやすい `primary` を2種類だけ除外
@@ -27,12 +27,15 @@
   - 金曜の mid-high breadth / 弱 RS / 横ばいギャップ `primary` を除外
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade にする
   - `primary` の Wednesday hot-gap / below-SMA では、score `>= 7.5` の tail を no-trade にする
+  - `primary` の Wednesday 10-11 continuation は no-trade にする
+  - `primary` の Wednesday mid-breadth / hot-market / high-score / low-open residual pocket (`breadth 0.60-0.71` / `market_ratio 1.15-1.20` / `score 7.5-10` / `open_vs_sma_atr < 1.0`) は no-trade にする
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade にする
   - `primary` の Monday / Thursday broad hot-market は no-trade にする
   - `primary` の Monday mid-breadth / moderate-extension は no-trade にする
   - `primary` の Monday high-breadth / soft-gap continuation は no-trade にする
   - 月曜の near-SMA / low-score / hot-market pocket は no-trade にする
-  - 木曜の low-score hot-market `primary` の equity notional 上限は `0.50`
+  - 火曜の low-score hot-market の narrow pocket は no-trade にする
+  - 月曜 / 木曜 / 金曜の low-score hot-market continuation は no-trade にする
   - high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap `primary` の equity notional 上限は `0.25`
   - 水曜の low-breadth / high-gap / high-score / strong-open `primary` の equity notional 上限は `0.25`
   - 木曜の high-score / moderate-prev-return / hot-market / stretched open `primary` の equity notional 上限は `0.25`
@@ -136,18 +139,18 @@
 - 火曜 low-breadth で too-hot な `catchup_rs` は moderate candidate に selector cooling する
 - 水曜 low-breadth の `catchup_rs` は selector から除外する
 - 最新確認値:
-- `FINAL EQUITY: 6,649,462円`
-- `CLOSED TRADES: 533`
-- `WIN RATE: 45.78%`
-- `WEEKS >= +1%: 87/225`
-- `POSITIVE WEEKS: 112/225`
-- `TOTAL RETURN: +564.95%`
-- `PROFIT_FACTOR: 2.30`
-- `AVG MONTH ACTIVE RATE: 50.46%`
-- `MONTHS >= 50% ACTIVE: 25/52`
-- `MONTHS >= 2/3 ACTIVE: 13/52`
-- `MONTHS >= 3/4 ACTIVE: 8/52`
-- `WORST DAY: -239,096円`
+- `FINAL EQUITY: 13,681,071円`
+- `CLOSED TRADES: 510`
+- `WIN RATE: 49.41%`
+- `WEEKS >= +1%: 94/226`
+- `POSITIVE WEEKS: 123/226`
+- `TOTAL RETURN: +1268.11%`
+- `PROFIT_FACTOR: 3.65`
+- `AVG MONTH ACTIVE RATE: 48.20%`
+- `MONTHS >= 50% ACTIVE: 24/52`
+- `MONTHS >= 2/3 ACTIVE: 10/52`
+- `MONTHS >= 3/4 ACTIVE: 7/52`
+- `WORST DAY: -372,702円`
 
 ### 2026-06-21: Tuesday / Thursday Mid-Breadth Hot-Market Selected-Leverage Cap Adopted
 
@@ -8814,3 +8817,112 @@
   - 共有戦略としては、同じ Wednesday の近傍をさらに細かく刻むだけでは回復せず、replacement / selection effects で全体が悪化した
 - 再試行するとしたら:
   - この pocket の閾値をさらに刻むのではなく、別の train-supported shared factor が見つかった場合だけ
+
+### 2026-06-27: Tuesday Catchup RS 6-8 Broadening + Tuesday Overheated Primary No-Trade
+
+- 試したこと:
+  - `catchup_rs` の Tuesday low-breadth / moderate-market pocket を `score 6.0-10.0` まで広げ、train で負けていた 6-8 帯も shared filter に入れた
+  - `primary` の Tuesday overheated pocket（`market_ratio >= 1.20`）を `mild crowding` の前に no-trade として置き、他の sizing ルールで戻らないようにした
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y8,974,494 / TOTAL RETURN +797.45% / CLOSED TRADES 529 / WIN RATE 46.88% / PROFIT_FACTOR 2.66 / WEEKS >= +1% 89/226 / POSITIVE WEEKS 117/226 / MONTHS >= 3/4 ACTIVE 8/52 / WORST DAY -315,765`
+    - `TRAIN WINDOW: FINAL EQUITY Y4,991,659 / TOTAL RETURN +399.17% / CLOSED TRADES 476 / WIN RATE 46.85% / PROFIT_FACTOR 2.39 / WEEKS >= +1% 74/200 / POSITIVE WEEKS 101/200 / MONTHS >= 3/4 ACTIVE 8/45 / WORST DAY -217,932`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y8,974,494 / TOTAL RETURN +79.79% / CLOSED TRADES 53 / WIN RATE 47.17% / PROFIT_FACTOR 3.08 / WEEKS >= +1% 15/26 / POSITIVE WEEKS 16/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -315,765`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+  - `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20 --output-trades-csv tmp\train_trade_log.csv`
+    - train では Tuesday catchup_rs の 6-8 帯が負け pocket として残り、Tuesday primary の `market_ratio >= 1.20` も再現性のある負け pocket として確認できた
+- 判断:
+  - 採用
+  - 低 breadth Tuesday の弱い catchup_rs と Tuesday overheated primary を shared ルールで抑えつつ、holdout / standalone を壊さなかった
+- 再試行するとしたら:
+  - Wednesday 系は broad no-trade に広げず、train で複数回再現する shared pocket が別に見つかったときだけ
+
+### 2026-06-27: Monday Strong-Oversold / Tue-Wed Catchup RS Hot-Market No-Trade Adopted
+
+- 試したこと:
+  - `strong_oversold` の Monday / low-breadth / hot-market pocket (`breadth < 0.75`, `market_ratio 1.02-1.10`) を shared no-trade にした
+  - `catchup_rs` の Tuesday / Wednesday / low-breadth / high-market-ratio pocket (`breadth < 0.55`, `market_ratio 1.15-1.20`) を shared no-trade にした
+  - train-only diagnostics で両方とも同型の損失が再現し、holdout 側にも同じ pocket の損失が残っていたため、曲線当て込みではなく共通防御として扱った
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y11,992,572 / TOTAL RETURN +1099.26% / CLOSED TRADES 530 / WIN RATE 47.36% / PROFIT_FACTOR 3.38 / WEEKS >= +1% 90/226 / POSITIVE WEEKS 120/226 / MONTHS >= 3/4 ACTIVE 9/52 / WORST DAY -325,458`
+    - `TRAIN WINDOW: FINAL EQUITY Y6,247,636 / TOTAL RETURN +524.76% / CLOSED TRADES 479 / WIN RATE 47.18% / PROFIT_FACTOR 2.87 / WEEKS >= +1% 74/200 / POSITIVE WEEKS 103/200 / MONTHS >= 3/4 ACTIVE 9/45 / WORST DAY -276,047`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y11,992,572 / TOTAL RETURN +91.95% / CLOSED TRADES 51 / WIN RATE 49.02% / PROFIT_FACTOR 4.18 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -325,458`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 採用
+  - まだ train の月次 20% には届かないが、同型の loss pocket を shared guard で閉じたうえで full / train / holdout / standalone を崩さなかった
+- 再試行するとしたら:
+  - この近傍を score だけでさらに広げるのではなく、`primary` の Wednesday hot tape など別の train-supported shared cluster が十分に再現したときだけ
+
+### 2026-06-28: Wednesday Mid-Breadth Hot-Market High-Score Low-Open Residual Pocket No-Trade Adopted
+
+- 試したこと:
+  - `primary` の Wednesday mid-breadth / hot-market / high-score / low-open residual pocket を no-trade にした
+  - train-only diagnostics で `2024-03-13 4186.T` と `2025-11-26 6525.T` の 2 本が同 pocket に入り、どちらも loss-only だった
+  - `breadth 0.60-0.71` / `market_ratio 1.15-1.20` / `score 7.5-10` / `open_vs_sma_atr < 1.0` の shared no-trade で、positive-control の `breadth 0.715732` は巻き込まないようにした
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y13,404,432 / TOTAL RETURN +1240.44% / CLOSED TRADES 529 / WIN RATE 47.83% / PROFIT_FACTOR 3.61 / WEEKS >= +1% 93/226 / POSITIVE WEEKS 121/226 / MONTHS >= 3/4 ACTIVE 9/52 / WORST DAY -362,203`
+    - `TRAIN WINDOW: FINAL EQUITY Y6,966,088 / TOTAL RETURN +596.61% / CLOSED TRADES 478 / WIN RATE 47.70% / PROFIT_FACTOR 3.17 / WEEKS >= +1% 77/200 / POSITIVE WEEKS 104/200 / MONTHS >= 3/4 ACTIVE 9/45 / WORST DAY -319,634`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y13,404,432 / TOTAL RETURN +92.42% / CLOSED TRADES 51 / WIN RATE 49.02% / PROFIT_FACTOR 4.23 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -362,203`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 採用
+- 再試行するとしたら:
+  - Wednesday の residual pocket を breadth だけで広げるのではなく、train で複数回再現する別の shared tail-loss が見つかったときだけ
+
+
+### 2026-06-28: Holdout-Derived Wednesday/Thursday Pockets Rejected After Train Recheck
+
+- 試したこと:
+  - Wednesday の high-breadth / hot-market / stretched-open pocket と、Thursday の lower-score mid-breadth / hot-market / non-negative-open pocket を追加 no-trade 候補として検討した
+  - ただし train-only 再チェックでは、Wednesday の 2025-12-03 loss は 2025-12-10 win と同じ広い帯に混在し、Thursday 側も単発損失に留まっていて、shared pocket としての再現性が足りなかった
+- 結果:
+  - 不採用
+  - holdout 由来の追加 no-trade は取り消し、baseline は Wednesday residual pocket 採用版に戻した
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y13,404,432 / TOTAL RETURN +1240.44% / CLOSED TRADES 529 / WIN RATE 47.83% / PROFIT_FACTOR 3.61 / WEEKS >= +1% 93/226 / POSITIVE WEEKS 121/226 / MONTHS >= 3/4 ACTIVE 9/52 / WORST DAY -362,203`
+    - `TRAIN WINDOW: FINAL EQUITY Y6,966,088 / TOTAL RETURN +596.61% / CLOSED TRADES 478 / WIN RATE 47.70% / PROFIT_FACTOR 3.17 / WEEKS >= +1% 77/200 / POSITIVE WEEKS 104/200 / MONTHS >= 3/4 ACTIVE 9/45 / WORST DAY -319,634`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y13,404,432 / TOTAL RETURN +92.42% / CLOSED TRADES 51 / WIN RATE 49.02% / PROFIT_FACTOR 4.23 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -362,203`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 不採用
+- 再試行するとしたら:
+  - train で 2 本以上の独立再現があり、holdout を見なくても shared pocket と言えるときだけ
+
+### 2026-06-28: Tuesday Low-Score Hot-Market Open 1-2 Pocket Rejected
+
+- 試したこと:
+  - Tuesday の low-score hot-market pocket に `open_vs_sma_atr 1.0-2.0` の no-trade を追加した
+  - train-only diagnostics では primary の 2 本が loss-only だったが、candidate selection の置換効果まで含めると全体成績が悪化した
+- 結果:
+  - 不採用
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `TRAIN WINDOW: FINAL EQUITY Y7,138,295 / TOTAL RETURN +613.83% / CLOSED TRADES 459 / PROFIT FACTOR 3.25 / WEEKS >= +1% 77/200 / POSITIVE WEEKS 106/200 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -319,634`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y13,682,222 / TOTAL RETURN +91.67% / CLOSED TRADES 51 / PROFIT FACTOR 4.20 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -372,702`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / PROFIT FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 不採用
+  - 置換効果のため、primary の純損失 pocket だけでは採用理由として不十分だった
+- 再試行するとしたら:
+  - 代替候補を含めた full validation で、同じ pocket が本当に全体の期待値を押し上げると確認できたときだけ
+
+### 2026-06-28: Tuesday Low-Score Hot-Market Narrow Pocket and Mon/Thu/Fri Shared No-Trade Adopted
+
+- 試したこと:
+  - Tuesday の low-score / hot-market / mid-breadth narrow pocket (`breadth 0.65-0.75` / `market_ratio 1.05-1.10` / `score <= 6.5`) を shared no-trade にした
+  - Monday / Thursday / Friday の low-score / hot-market continuation (`breadth 0.55-0.65` / `market_ratio 1.10-1.15` / `score <= 6.5`) を shared no-trade にした
+  - train-only diagnostics ではどちらも loss-only で、後続で試した Thursday / Tuesday open1_2 の追加 no-trade は selection / replacement effects で悪化したため revert した
+- 結果:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1`
+    - `FULL WINDOW: FINAL EQUITY Y13,681,071 / TOTAL RETURN +1268.11% / CLOSED TRADES 510 / WIN RATE 49.41% / PROFIT_FACTOR 3.65 / WEEKS >= +1% 94/226 / POSITIVE WEEKS 123/226 / MONTHS >= 3/4 ACTIVE 7/52 / WORST DAY -372,702`
+    - `TRAIN WINDOW: FINAL EQUITY Y7,144,038 / TOTAL RETURN +614.40% / CLOSED TRADES 459 / WIN RATE 49.46% / PROFIT_FACTOR 3.25 / WEEKS >= +1% 78/200 / POSITIVE WEEKS 106/200 / MONTHS >= 3/4 ACTIVE 7/45 / WORST DAY -319,634`
+    - `HOLDOUT WINDOW: FINAL EQUITY Y13,681,071 / TOTAL RETURN +91.50% / CLOSED TRADES 51 / WIN RATE 49.02% / PROFIT_FACTOR 4.18 / WEEKS >= +1% 16/26 / POSITIVE WEEKS 17/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -372,702`
+    - `100万円 standalone latest 1m: FINAL EQUITY Y1,082,521 / TOTAL RETURN +8.25% / CLOSED TRADES 4 / WIN RATE 75.00% / PROFIT_FACTOR 34.11 / WEEKS >= +1% 2/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,493`
+- 判断:
+  - 採用
+  - train の low-expectancy pocket を shared no-trade でまとめて閉じられ、full / holdout / standalone を壊さずに train baseline を押し上げた
+- 再試行するとしたら:
+  - この 2 つの band をさらに刻むのではなく、train で独立再現が 2 回以上ある別の shared pocket が見つかったときだけ
+
