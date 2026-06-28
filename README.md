@@ -34,6 +34,7 @@
   - `primary` の hot-gap chase では、train で再現した low-score / broad warm / overheated low-breadth の損失クラスターを no-trade に寄せる
   - `primary` の Wednesday hot-gap / below-SMA では、score `>= 7.5` の tail を no-trade に寄せる
   - `primary` の Wednesday `10-11` continuation は no-trade にする
+  - `primary` の Wednesday mid-breadth / hot-market / high-score / low-open residual pocket (`breadth 0.60-0.71` / `market_ratio 1.15-1.20` / `score 7.5-10` / `open_vs_sma_atr < 1.0`) は no-trade にする
   - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
   - `catchup_rs` の Monday / Friday 高 breadth hot-market は selector から除外する
   - `catchup_rs` の Monday mid-breadth / stretched-open pocket は selector から除外する
@@ -64,6 +65,8 @@
   - `primary` の high market-ratio / mid-breadth / mid-score / moderate-prev-return / positive-gap は quarter-size に落とす
   - `primary` の Wednesday low-breadth / high-gap / high-score / strong-open は quarter-size に落とす
   - `primary` の Thursday high-score / moderate-prev-return / hot-market / stretched open は quarter-size に落とす
+  - 火曜の low-score / hot-market の narrow pocket は no-trade にする
+  - 月曜 / 木曜 / 金曜の low-score / hot-market continuation は no-trade にする
   - `primary` の very hot / low-breadth / negative-gap / strong-prior-day continuation は no-trade を許容する
   - リスク、流動性、スリッページ、急落時損失を無視した過大建玉は採らない
 
@@ -74,46 +77,46 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-06-27** です。
+最新確認日は **2026-06-28** です。
 使用データの最新日は **2026-06-26** です。
 最新確認は `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` で行いました。
-train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20 --output-trades-csv tmp\current_trade_log.csv` で確認しました。
+train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20 --output-trades-csv tmp\train_trade_log.csv` で確認しました。
 
 full history の最新確認値:
 
-- `FINAL EQUITY: 7,298,768円`
-- `CLOSED TRADES: 532`
-- `WIN RATE: 46.43%`
-- `TOTAL RETURN: +629.88%`
-- `PROFIT_FACTOR: 2.38`
-- `WEEKS >= +1%: 86/226`
-- `POSITIVE WEEKS: 113/226`
-- `MONTHS >= 3/4 ACTIVE: 23/52`
-- `WORST DAY: -225,547円`
+- `FINAL EQUITY: 13,681,071円`
+- `CLOSED TRADES: 510`
+- `WIN RATE: 49.41%`
+- `TOTAL RETURN: +1268.11%`
+- `PROFIT_FACTOR: 3.65`
+- `WEEKS >= +1%: 94/226`
+- `POSITIVE WEEKS: 123/226`
+- `MONTHS >= 3/4 ACTIVE: 7/52`
+- `WORST DAY: -372,702円`
 
 train window の最新確認値:
 
-- `FINAL EQUITY: 3,789,298円`
-- `CLOSED TRADES: 481`
-- `WIN RATE: 46.15%`
-- `TOTAL RETURN: +278.93%`
-- `PROFIT_FACTOR: 1.87`
-- `WEEKS >= +1%: 71/200`
-- `POSITIVE WEEKS: 97/200`
+- `FINAL EQUITY: 7,144,038円`
+- `CLOSED TRADES: 459`
+- `WIN RATE: 49.46%`
+- `TOTAL RETURN: +614.40%`
+- `PROFIT_FACTOR: 3.25`
+- `WEEKS >= +1%: 78/200`
+- `POSITIVE WEEKS: 106/200`
 - `MONTHS >= 3/4 ACTIVE: 7/45`
-- `WORST DAY: -174,346円`
+- `WORST DAY: -319,634円`
 
 直近 6ヶ月 holdout `2025-12-29` から `2026-06-26` の確認値（reference / veto 用）:
 
-- `FINAL EQUITY: 7,298,768円`
+- `FINAL EQUITY: 13,681,071円`
 - `CLOSED TRADES: 51`
 - `WIN RATE: 49.02%`
-- `TOTAL RETURN: +92.62%`
-- `PROFIT_FACTOR: 3.57`
-- `WEEKS >= +1%: 15/26`
-- `POSITIVE WEEKS: 16/26`
+- `TOTAL RETURN: +91.50%`
+- `PROFIT_FACTOR: 4.18`
+- `WEEKS >= +1%: 16/26`
+- `POSITIVE WEEKS: 17/26`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
-- `WORST DAY: -225,547円`
+- `WORST DAY: -372,702円`
 
 直近1ヶ月 `100万円 standalone` `2026-05-27` から `2026-06-26` の確認値（reference / veto 用）:
 
@@ -160,7 +163,6 @@ structured operator ACK の例:
 `KABUCOM_LIVE_OPERATOR_ACK=true` の legacy boolean は local test / shadow 用のみに留め、`KABUCOM_LIVE` の live gate では structured context を使ってください。
 - `LiveReadinessReport` は startup log と entry authorization で参照され、risk review artifact が欠けている間は live entry を止めます。
 - 不一致または未設定の場合でも、監視・保護逆指値・決済は継続します
-
 ## リポジトリ構成
 
 ```text
@@ -934,4 +936,6 @@ python -m pytest tests/test_order_journal.py
 - 実地取得や外部状態確認が必要で今回のコード差分に入れない項目は [docs/kabucom_live_deferred_external_tasks.md](docs/kabucom_live_deferred_external_tasks.md) に整理します
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-06-27
+Last updated: 2026-06-28
+
+
