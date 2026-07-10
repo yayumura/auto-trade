@@ -75,6 +75,7 @@ def test_resolve_daytrade_entry_shares_forwards_risk_budget_pct():
 
     def _capture_cap_daytrade_position_size(*args, **kwargs):
         captured["risk_budget_pct"] = kwargs.get("risk_budget_pct")
+        captured["size_multiplier"] = kwargs.get("size_multiplier")
         return 100
 
     with patch("auto_trade.calculate_lot_size", return_value=200), patch(
@@ -86,6 +87,7 @@ def test_resolve_daytrade_entry_shares_forwards_risk_budget_pct():
                 "notional_pct": 1.0,
                 "equity_notional_pct": 2.0,
                 "risk_budget_pct": 0.105,
+                "size_multiplier": 1.5,
             },
             day_equity=10_000_000,
             candidate_buying_power=5_000_000,
@@ -96,6 +98,7 @@ def test_resolve_daytrade_entry_shares_forwards_risk_budget_pct():
 
     assert shares == 100
     assert captured["risk_budget_pct"] == 0.105
+    assert captured["size_multiplier"] == 1.5
 
 
 def test_inverse_only_candidate_set_accepts_inverse_pullback():
