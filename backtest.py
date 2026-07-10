@@ -33,9 +33,15 @@ from core.logic import (
     resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_catchup_notional_pct,
     resolve_daytrade_primary_equity_notional_pct,
+    resolve_daytrade_primary_notional_pct,
+    resolve_daytrade_primary_risk_budget_pct,
+    resolve_daytrade_primary_size_multiplier,
     resolve_daytrade_fallback_notional_pct,
     resolve_daytrade_fallback_equity_notional_pct,
     resolve_daytrade_catchup_equity_notional_pct,
+    resolve_daytrade_strong_oversold_notional_pct,
+    resolve_daytrade_strong_oversold_equity_notional_pct,
+    resolve_daytrade_strong_oversold_size_multiplier,
     DAYTRADE_MAX_DAILY_LOSS_PCT, DAYTRADE_MAX_GAP, DAYTRADE_MAX_RSI2,
     DAYTRADE_MIN_SETUP_SCORE,
     DAYTRADE_MIN_PREV_DAY_RETURN_PCT, DAYTRADE_MAX_PREV_DAY_RETURN_PCT,
@@ -84,10 +90,8 @@ from core.jquants_margin_cache import get_eligible_margin_codes_for_date
 MIN_SETUP_SCORE = DAYTRADE_MIN_SETUP_SCORE
 MAX_DAILY_LOSS_PCT = DAYTRADE_MAX_DAILY_LOSS_PCT
 
-
 def _floor_lot(shares):
     return max(0, (int(shares) // 100) * 100)
-
 
 def _apply_profit_tax(realized_pnl, tax_rate=TAX_RATE):
     pnl = float(realized_pnl)
@@ -95,7 +99,6 @@ def _apply_profit_tax(realized_pnl, tax_rate=TAX_RATE):
         return pnl, 0.0
     tax = pnl * float(tax_rate)
     return pnl - tax, tax
-
 
 def _apply_margin_interest(cash, positions, close_np, row_idx, annual_interest_rate):
     if not positions or annual_interest_rate <= 0:
@@ -111,7 +114,6 @@ def _apply_margin_interest(cash, positions, close_np, row_idx, annual_interest_r
     daily_interest = borrowed_notional * (float(annual_interest_rate) / 365.0)
     return float(cash) - float(daily_interest), float(daily_interest)
 
-
 def _cap_shares_by_liquidity(desired_shares, execution_price, turnover_value, liquidity_limit):
     shares = int(desired_shares)
     if shares < 100 or execution_price <= 0 or liquidity_limit <= 0:
@@ -122,7 +124,6 @@ def _cap_shares_by_liquidity(desired_shares, execution_price, turnover_value, li
     max_notional = float(turnover_value) * float(liquidity_limit)
     max_shares = _floor_lot(max_notional // float(execution_price))
     return min(_floor_lot(shares), max_shares)
-
 
 def _resolve_intraday_exit(
     entry_price,
@@ -151,12 +152,10 @@ def _resolve_intraday_exit(
         allow_close_exit=True,
     )
 
-
 def _resolve_execution_slippage(rate, override):
     if override is None:
         return float(rate)
     return float(override)
-
 
 def run_backtest_v17_swing(univ_indices, bundle_np, timeline, breadth_ratio,
                            initial_cash=1000000, max_pos=3,
@@ -387,7 +386,6 @@ def run_backtest_v17_swing(univ_indices, bundle_np, timeline, breadth_ratio,
     final = cash + sum(np.nan_to_num(close_np[-1, p["s_idx"]]) * p["shares"] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results
 
-
 def run_backtest_v18_pullback(univ_indices, bundle_np, timeline, breadth_ratio,
                               initial_cash=1000000, max_pos=1,
                               sl_mult=1.5, tp_mult=4.0, leverage_rate=1.0, breadth_threshold=0.65,
@@ -585,7 +583,6 @@ def run_backtest_v18_pullback(univ_indices, bundle_np, timeline, breadth_ratio,
 
     final = cash + sum(np.nan_to_num(close_np[-1, p["s_idx"]]) * p["shares"] for p in portfolio)
     return float(final), trade_count, monthly_assets, trade_results
-
 
 def run_backtest_v19_monthly_rotation(univ_indices, bundle_np, timeline, breadth_ratio,
                                       initial_cash=1000000, max_pos=3,
@@ -1150,9 +1147,45 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 breadth_val=entry_breadth,
                                 gap_pct=metrics.get("gap_pct"),
                                 open_vs_sma_atr=metrics.get("open_vs_sma_atr"),
+                                open_from_prev_low_atr=metrics.get("open_from_prev_low_atr"),
                                 market_ratio=market_ratio,
                                 primary_score=score,
                                 rs_alpha=t_rs,
+                                trade_weekday=curr_time.weekday(),
+                                prev_return=metrics.get("prev_return"),
+                                prev_rsi2=prev_rsi2,
+                            )
+                            primary_notional_pct = resolve_daytrade_primary_notional_pct(
+                                breadth_val=entry_breadth,
+                                gap_pct=metrics.get("gap_pct"),
+                                open_vs_sma_atr=metrics.get("open_vs_sma_atr"),
+                                open_from_prev_low_atr=metrics.get("open_from_prev_low_atr"),
+                                market_ratio=market_ratio,
+                                primary_score=score,
+                                rs_alpha=t_rs,
+                                trade_weekday=curr_time.weekday(),
+                                prev_return=metrics.get("prev_return"),
+                                prev_rsi2=prev_rsi2,
+                            )
+                            primary_risk_budget_pct = resolve_daytrade_primary_risk_budget_pct(
+                                breadth_val=entry_breadth,
+                                gap_pct=metrics.get("gap_pct"),
+                                open_vs_sma_atr=metrics.get("open_vs_sma_atr"),
+                                open_from_prev_low_atr=metrics.get("open_from_prev_low_atr"),
+                                market_ratio=market_ratio,
+                                primary_score=score,
+                                primary_equity_notional_pct=primary_equity_notional_pct,
+                                rs_alpha=t_rs,
+                                trade_weekday=curr_time.weekday(),
+                                prev_return=metrics.get("prev_return"),
+                                prev_rsi2=prev_rsi2,
+                            )
+                            primary_size_multiplier = resolve_daytrade_primary_size_multiplier(
+                                breadth_val=entry_breadth,
+                                gap_pct=metrics.get("gap_pct"),
+                                open_vs_sma_atr=metrics.get("open_vs_sma_atr"),
+                                market_ratio=market_ratio,
+                                primary_score=score,
                                 trade_weekday=curr_time.weekday(),
                                 prev_return=metrics.get("prev_return"),
                                 prev_rsi2=prev_rsi2,
@@ -1168,8 +1201,10 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 "atr": prev_atr,
                                 "turnover": t_turnover,
                                 "setup_type": "primary",
-                                "notional_pct": DAYTRADE_MAX_NOTIONAL_PCT,
+                                "notional_pct": primary_notional_pct,
                                 "equity_notional_pct": primary_equity_notional_pct,
+                                "risk_budget_pct": primary_risk_budget_pct,
+                                "size_multiplier": primary_size_multiplier,
                                 "gap_pct": metrics.get("gap_pct"),
                                 "prev_return": metrics.get("prev_return"),
                                 "prev_rsi2": prev_rsi2,
@@ -1212,8 +1247,30 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             "atr": prev_atr,
                         "turnover": t_turnover,
                         "setup_type": "strong_oversold",
-                        "notional_pct": DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT,
-                        "equity_notional_pct": DAYTRADE_STRONG_OVERSOLD_EQUITY_NOTIONAL_PCT,
+                        "notional_pct": resolve_daytrade_strong_oversold_notional_pct(
+                            breadth_val=entry_breadth,
+                            gap_pct=strong_oversold_metrics.get("gap_pct"),
+                            market_ratio=market_ratio,
+                            score=score,
+                            open_vs_trend_atr=strong_oversold_metrics.get("open_vs_trend_atr"),
+                            trade_weekday=curr_time.weekday(),
+                        ),
+                        "equity_notional_pct": resolve_daytrade_strong_oversold_equity_notional_pct(
+                            breadth_val=entry_breadth,
+                            gap_pct=strong_oversold_metrics.get("gap_pct"),
+                            market_ratio=market_ratio,
+                            score=score,
+                            open_vs_trend_atr=strong_oversold_metrics.get("open_vs_trend_atr"),
+                            trade_weekday=curr_time.weekday(),
+                        ),
+                        "size_multiplier": resolve_daytrade_strong_oversold_size_multiplier(
+                            breadth_val=entry_breadth,
+                            gap_pct=strong_oversold_metrics.get("gap_pct"),
+                            market_ratio=market_ratio,
+                            score=score,
+                            open_vs_trend_atr=strong_oversold_metrics.get("open_vs_trend_atr"),
+                            trade_weekday=curr_time.weekday(),
+                        ),
                         "stop_mult": DAYTRADE_STRONG_OVERSOLD_STOP_MULT,
                         "target_mult": DAYTRADE_STRONG_OVERSOLD_TARGET_MULT,
                         "gap_pct": strong_oversold_metrics.get("gap_pct"),
@@ -1574,6 +1631,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     notional_pct=candidate.get("notional_pct"),
                     equity_notional_pct=candidate.get("equity_notional_pct"),
                     risk_budget_pct=candidate.get("risk_budget_pct"),
+                    size_multiplier=candidate.get("size_multiplier"),
                 )
                 if shares < 100:
                     continue

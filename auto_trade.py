@@ -1108,6 +1108,7 @@ def resolve_daytrade_entry_shares(
         notional_pct=item.get("notional_pct"),
         equity_notional_pct=item.get("equity_notional_pct"),
         risk_budget_pct=item.get("risk_budget_pct"),
+        size_multiplier=item.get("size_multiplier"),
     )
 
 

@@ -367,13 +367,14 @@ def test_daytrade_catchup_rs_strong_continuation_forwards_risk_budget_pct():
     assert trade_count == 1
     assert len(results) == 1
     assert results[0] > 0
-    assert captured["risk_budget_pct"] == 0.105
+    assert captured["risk_budget_pct"] == 0.3
     assert final_assets > 10_000_000.0
 
 
 def test_daytrade_tries_next_candidate_when_top_is_too_large():
     T = 104
     dates = pd.date_range("2024-01-07", periods=T)
+    captured = {}
     close_data = np.full((T, 2), [8_500.0, 1_000.0])
     open_data = close_data.copy()
     high_data = close_data * 1.01
@@ -408,21 +409,65 @@ def test_daytrade_tries_next_candidate_when_top_is_too_large():
         "tickers": ["9000.T", "1000.T"],
     }
 
-    final_assets, trade_count, monthly, results = run_backtest_v16_production(
-        univ_indices=np.arange(2),
-        bundle_np=bundle_np,
-        timeline=dates,
-        breadth_ratio=np.ones(len(dates)) * 0.8,
-        initial_cash=1_000_000,
-        max_pos=1,
-        slippage=0.0,
-        leverage_rate=1.0,
-        breadth_threshold=0.3,
-    )
+    top_candidate = {
+        "code": "9000.T",
+        "setup_type": "primary",
+        "score": 10.0,
+        "open": 8_500.0,
+        "close": 8_800.0,
+        "high": 8_900.0,
+        "low": 8_400.0,
+        "atr": 80.0,
+        "turnover": 2_000_000_000.0,
+        "notional_pct": 0.20,
+        "equity_notional_pct": 3.0,
+        "risk_budget_pct": 0.30,
+        "size_multiplier": 1.5,
+    }
+    next_candidate = {
+        "code": "1000.T",
+        "setup_type": "primary",
+        "score": 9.0,
+        "open": 1_000.0,
+        "close": 1_025.0,
+        "high": 1_030.0,
+        "low": 995.0,
+        "atr": 10.0,
+        "turnover": 2_000_000_000.0,
+        "notional_pct": 0.15,
+        "equity_notional_pct": 1.0,
+        "risk_budget_pct": 0.10,
+        "size_multiplier": 1.0,
+    }
+
+    def _select_two_candidates(primary, strong, fallback, catchup, inverse, bull, **kwargs):
+        return [top_candidate, next_candidate]
+
+    def _skip_too_large_candidate(*args, **kwargs):
+        entry_price = kwargs.get("entry_price", 0.0)
+        if entry_price >= 5_000.0:
+            captured["size_multiplier"] = kwargs.get("size_multiplier")
+        return 0 if entry_price >= 5_000.0 else 100
+
+    with patch("backtest.select_daytrade_candidates", side_effect=_select_two_candidates), patch(
+        "backtest.cap_daytrade_position_size", side_effect=_skip_too_large_candidate
+    ):
+        final_assets, trade_count, monthly, results = run_backtest_v16_production(
+            univ_indices=np.arange(2),
+            bundle_np=bundle_np,
+            timeline=dates,
+            breadth_ratio=np.ones(len(dates)) * 0.8,
+            initial_cash=1_000_000,
+            max_pos=1,
+            slippage=0.0,
+            leverage_rate=1.0,
+            breadth_threshold=0.3,
+        )
 
     assert trade_count == 1
     assert final_assets > 1_000_000
     assert len(results) == 1
+    assert captured["size_multiplier"] == 1.5
 
 
 def test_daytrade_can_trade_inverse_on_riskoff_day():
