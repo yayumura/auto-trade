@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from core.logic import (
     calculate_dynamic_leverage, calculate_lot_size, calculate_position_stops,
+    normalize_tick_size,
     evaluate_daytrade_open_setup, score_daytrade_open_setup,
     evaluate_daytrade_fallback_open_setup, score_daytrade_fallback_open_setup,
     evaluate_daytrade_bull_etf_open_setup, score_daytrade_bull_etf_open_setup,
@@ -32,6 +33,7 @@ from core.logic import (
     cap_daytrade_position_size,
     resolve_daytrade_breadth_exposure_scale,
     resolve_daytrade_catchup_notional_pct,
+    resolve_daytrade_catchup_size_multiplier,
     resolve_daytrade_primary_equity_notional_pct,
     resolve_daytrade_primary_notional_pct,
     resolve_daytrade_primary_risk_budget_pct,
@@ -911,6 +913,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 evaluation_start_date=None,
                                 return_daily_stats=False,
                                 return_trade_log=False,
+                                return_candidate_log=False,
                                 verbose=False):
     """
     Day-trade production backtest:
@@ -927,7 +930,73 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
     trade_results = []
     daily_stats = {}
     trade_log = []
-    
+    candidate_log = {"days": [], "candidates": []}
+
+    def _log_float(value):
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return np.nan
+        return result if np.isfinite(result) else np.nan
+
+    def _record_candidate_day(
+        day_key,
+        curr_time,
+        reason,
+        *,
+        day_start_equity,
+        end_equity=None,
+        day_pnl=0.0,
+        trade_count=0,
+        entry_breadth=np.nan,
+        market_ratio=np.nan,
+        market_flags=None,
+        candidate_counts=None,
+        scan_stats=None,
+        setup_stats=None,
+        selected_count=0,
+        opened_count=0,
+    ):
+        if not return_candidate_log:
+            return
+        flags = market_flags or {}
+        counts = candidate_counts or {}
+        scan = scan_stats or {}
+        setup = setup_stats or {}
+        end_value = float(day_start_equity) if end_equity is None else float(end_equity)
+        row = {
+            "day_key": day_key,
+            "week_key": get_daytrade_week_key(curr_time),
+            "month_key": str(day_key)[:7],
+            "weekday": int(curr_time.weekday()),
+            "reason": reason,
+            "start_equity": float(day_start_equity),
+            "end_equity": end_value,
+            "day_pnl": float(day_pnl),
+            "trade_count": int(trade_count),
+            "breadth": _log_float(entry_breadth),
+            "market_ratio": _log_float(market_ratio),
+            "primary_market_allowed": bool(flags.get("primary", False)),
+            "strong_oversold_market_allowed": bool(flags.get("strong_oversold", False)),
+            "fallback_market_allowed": bool(flags.get("fallback", False)),
+            "catchup_market_allowed": bool(flags.get("catchup", False)),
+            "inverse_market_allowed": bool(flags.get("inverse", False)),
+            "inverse_pullback_market_allowed": bool(flags.get("inverse_pullback", False)),
+            "bull_etf_market_allowed": bool(flags.get("bull_etf", False)),
+            "primary_candidates": int(counts.get("primary", 0)),
+            "strong_oversold_candidates": int(counts.get("strong_oversold", 0)),
+            "fallback_candidates": int(counts.get("fallback", 0)),
+            "catchup_candidates": int(counts.get("catchup", 0)),
+            "inverse_candidates": int(counts.get("inverse", 0)),
+            "bull_etf_candidates": int(counts.get("bull_etf", 0)),
+            "total_candidates": int(sum(counts.values())) if counts else 0,
+            "selected_count": int(selected_count),
+            "opened_count": int(opened_count),
+        }
+        row.update({f"scan_{key}": int(value) for key, value in scan.items()})
+        row.update({f"setup_{key}": int(value) for key, value in setup.items()})
+        candidate_log["days"].append(row)
+
     close_np = bundle_np['Close']
     open_np = bundle_np['Open']
     high_np = bundle_np['High']
@@ -968,6 +1037,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             trade_results = []
             daily_stats = {}
             trade_log = []
+            candidate_log = {"days": [], "candidates": []}
             current_month = ""
             month_start_equity = float(initial_cash)
             month_done = False
@@ -993,6 +1063,14 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             month_done = True
 
         if i + 1 >= T or month_done:
+            skip_reason = "monthly_risk_blocked" if month_done else "last_day_without_next_session"
+            _record_candidate_day(
+                day_key,
+                curr_time,
+                skip_reason,
+                day_start_equity=day_start_equity,
+                end_equity=cash,
+            )
             daily_stats[day_key] = {
                 "equity": float(cash),
                 "day_pnl": 0.0,
@@ -1039,6 +1117,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             prev_market_close=prev_market_close,
         )
         bull_etf_market_allowed = is_daytrade_bull_etf_rebound_market_allowed(entry_breadth)
+        market_flags = {
+            "primary": primary_market_allowed,
+            "strong_oversold": strong_oversold_market_allowed,
+            "fallback": fallback_market_allowed,
+            "catchup": catchup_market_allowed,
+            "inverse": inverse_market_allowed,
+            "inverse_pullback": inverse_pullback_market_allowed,
+            "bull_etf": bull_etf_market_allowed,
+        }
         if not (
             primary_market_allowed
             or strong_oversold_market_allowed
@@ -1048,6 +1135,15 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             or inverse_pullback_market_allowed
             or bull_etf_market_allowed
         ):
+            _record_candidate_day(
+                day_key,
+                curr_time,
+                "market_gate_blocked",
+                day_start_equity=day_start_equity,
+                end_equity=cash,
+                entry_breadth=entry_breadth,
+                market_flags=market_flags,
+            )
             daily_stats[day_key] = {
                 "equity": float(cash),
                 "day_pnl": 0.0,
@@ -1065,6 +1161,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             current_equity=cash,
             current_time=curr_time,
         ):
+            _record_candidate_day(
+                day_key,
+                curr_time,
+                "weekly_profit_guard",
+                day_start_equity=day_start_equity,
+                end_equity=cash,
+                entry_breadth=entry_breadth,
+                market_ratio=market_ratio,
+                market_flags=market_flags,
+            )
             daily_stats[day_key] = {
                 "equity": float(cash),
                 "day_pnl": 0.0,
@@ -1079,9 +1185,21 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         catchup_candidates = []
         inverse_candidates = []
         bull_etf_candidates = []
+        scan_stats = {
+            "universe": 0,
+            "raw_nan": 0,
+            "invalid_price_atr": 0,
+            "price_blocked": 0,
+            "turnover_nonpositive": 0,
+            "turnover_blocked": 0,
+            "liquidity_blocked": 0,
+            "passed_scan": 0,
+        }
+        setup_stats = {"no_setup_candidate_after_scan": 0}
         inverse_code_set = {ticker if str(ticker).endswith(".T") else f"{ticker}.T" for ticker in DAYTRADE_INVERSE_CODES}
         bull_etf_code_set = {ticker if str(ticker).endswith(".T") else f"{ticker}.T" for ticker in DAYTRADE_BULL_ETF_CODES}
         for s_idx in univ_indices:
+            scan_stats["universe"] += 1
             ticker = bundle_np["tickers"][s_idx]
             t_close = close_np[i, s_idx]
             t_open = open_np[i, s_idx]
@@ -1102,17 +1220,32 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 prev_sma_trend
             ]
             if np.any(np.isnan(raw_values)):
+                scan_stats["raw_nan"] += 1
                 continue
             if prev_atr <= 0 or t_open <= 0 or prev_close <= 0:
+                scan_stats["invalid_price_atr"] += 1
                 continue
             if t_open < MIN_PRICE or not is_daytrade_bull_etf_price_allowed(t_open, ticker, entry_breadth):
+                scan_stats["price_blocked"] += 1
                 continue
             if t_turnover <= 0:
+                scan_stats["turnover_nonpositive"] += 1
                 continue
             if t_turnover < resolve_daytrade_scan_min_turnover(ticker, entry_breadth):
+                scan_stats["turnover_blocked"] += 1
                 continue
             if liquidity_limit > 0 and (t_open * 100.0) > (t_turnover * liquidity_limit):
+                scan_stats["liquidity_blocked"] += 1
                 continue
+            scan_stats["passed_scan"] += 1
+            setup_candidate_count_before = (
+                len(candidates)
+                + len(strong_oversold_candidates)
+                + len(fallback_candidates)
+                + len(catchup_candidates)
+                + len(inverse_candidates)
+                + len(bull_etf_candidates)
+            )
             prev_day_return = (prev_close / prev_prev_close) - 1.0
             primary_trend_allowed = is_daytrade_trend_allowed(prev_close, prev_sma_trend)
             fallback_trend_allowed = is_daytrade_trend_allowed(
@@ -1413,6 +1546,16 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             "notional_pct": notional_pct,
                             "equity_notional_pct": equity_notional_pct,
                             "risk_budget_pct": risk_budget_pct,
+                            "size_multiplier": resolve_daytrade_catchup_size_multiplier(
+                                setup_type=catchup_metrics["setup_type"],
+                                breadth_val=entry_breadth,
+                                gap_pct=catchup_metrics["gap_pct"],
+                                market_ratio=market_ratio,
+                                score=score,
+                                rs_alpha=t_rs,
+                                open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                                trade_weekday=curr_time.weekday(),
+                            ),
                             "stop_mult": stop_mult,
                             "target_mult": target_mult,
                             "prev_return": catchup_metrics.get("prev_return"),
@@ -1515,14 +1658,30 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             "open_vs_sma_atr": bull_etf_metrics.get("open_vs_sma_atr"),
                         })
 
-        if (
-            candidates
-            or strong_oversold_candidates
-            or fallback_candidates
-            or catchup_candidates
-            or inverse_candidates
-            or bull_etf_candidates
-        ):
+            setup_candidate_count_after = (
+                len(candidates)
+                + len(strong_oversold_candidates)
+                + len(fallback_candidates)
+                + len(catchup_candidates)
+                + len(inverse_candidates)
+                + len(bull_etf_candidates)
+            )
+            if setup_candidate_count_after == setup_candidate_count_before:
+                setup_stats["no_setup_candidate_after_scan"] += 1
+
+        candidate_groups = [
+            ("primary", candidates),
+            ("strong_oversold", strong_oversold_candidates),
+            ("fallback", fallback_candidates),
+            ("catchup", catchup_candidates),
+            ("inverse", inverse_candidates),
+            ("bull_etf", bull_etf_candidates),
+        ]
+        candidate_counts = {label: len(group) for label, group in candidate_groups}
+        selected = []
+        candidate_log_index_by_id = {}
+
+        if sum(candidate_counts.values()) > 0:
             selected = select_daytrade_candidates(
                 candidates,
                 strong_oversold_candidates,
@@ -1556,7 +1715,103 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 current_time=curr_time,
             )
             selected_dynamic_lev *= resolve_daytrade_breadth_exposure_scale(entry_breadth)
+            if return_candidate_log:
+                selected_rank_by_id = {id(item): rank for rank, item in enumerate(selected, start=1)}
+                for source_bucket, group in candidate_groups:
+                    for candidate in group:
+                        candidate_id = id(candidate)
+                        selected_rank = selected_rank_by_id.get(candidate_id)
+                        effective_sl_mult = candidate.get("stop_mult")
+                        if effective_sl_mult is None:
+                            effective_sl_mult = resolve_daytrade_intraday_stop_mult(sl_mult)
+                        effective_tp_mult = candidate.get("target_mult")
+                        if effective_tp_mult is None:
+                            effective_tp_mult = resolve_daytrade_intraday_target_mult(tp_mult)
+                        modeled_entry = normalize_tick_size(float(candidate["open"]) * (1.0 + buy_slippage), is_buy=True)
+                        modeled_stop = max(0.01, modeled_entry - (float(candidate["atr"]) * float(effective_sl_mult)))
+                        modeled_target = modeled_entry + (float(candidate["atr"]) * float(effective_tp_mult))
+                        modeled_raw_exit, modeled_exit_reason = _resolve_intraday_exit(
+                            entry_price=modeled_entry,
+                            open_price=float(candidate["open"]),
+                            high_price=float(candidate["high"]),
+                            low_price=float(candidate["low"]),
+                            close_price=float(candidate["close"]),
+                            stop_price=modeled_stop,
+                            target_price=modeled_target,
+                            setup_type=candidate.get("setup_type"),
+                        )
+                        modeled_exit = normalize_tick_size(float(modeled_raw_exit) * (1.0 - sell_slippage), is_buy=False)
+                        modeled_gross_per_100 = (modeled_exit - modeled_entry) * 100.0
+                        modeled_net_per_100, _modeled_tax = _apply_profit_tax(
+                            modeled_gross_per_100 - float(explicit_trade_cost),
+                            tax_rate=profit_tax_rate,
+                        )
+                        candidate_log_index_by_id[candidate_id] = len(candidate_log["candidates"])
+                        candidate_log["candidates"].append({
+                            "day_key": day_key,
+                            "week_key": get_daytrade_week_key(curr_time),
+                            "month_key": day_key[:7],
+                            "weekday": int(curr_time.weekday()),
+                            "source_bucket": source_bucket,
+                            "setup_type": candidate.get("setup_type"),
+                            "code": candidate.get("code"),
+                            "score": _log_float(candidate.get("score")),
+                            "selected": selected_rank is not None,
+                            "selection_rank": selected_rank,
+                            "opened": False,
+                            "execution_status": "selected_pending" if selected_rank is not None else "not_selected",
+                            "block_reason": "",
+                            "breadth": _log_float(entry_breadth),
+                            "market_ratio": _log_float(market_ratio),
+                            "selected_dynamic_leverage": _log_float(selected_dynamic_lev),
+                            "open": _log_float(candidate.get("open")),
+                            "close": _log_float(candidate.get("close")),
+                            "high": _log_float(candidate.get("high")),
+                            "low": _log_float(candidate.get("low")),
+                            "atr": _log_float(candidate.get("atr")),
+                            "turnover": _log_float(candidate.get("turnover")),
+                            "gap_pct": _log_float(candidate.get("gap_pct")),
+                            "prev_return": _log_float(candidate.get("prev_return")),
+                            "prev_rsi2": _log_float(candidate.get("prev_rsi2")),
+                            "open_from_prev_low_atr": _log_float(candidate.get("open_from_prev_low_atr")),
+                            "open_vs_sma_atr": _log_float(candidate.get("open_vs_sma_atr")),
+                            "rs_alpha": _log_float(candidate.get("rs_alpha")),
+                            "symbol_trend_ratio": _log_float(candidate.get("symbol_trend_ratio")),
+                            "notional_pct": _log_float(candidate.get("notional_pct")),
+                            "equity_notional_pct": _log_float(candidate.get("equity_notional_pct")),
+                            "risk_budget_pct": _log_float(candidate.get("risk_budget_pct")),
+                            "size_multiplier": _log_float(candidate.get("size_multiplier")),
+                            "stop_mult": _log_float(effective_sl_mult),
+                            "target_mult": _log_float(effective_tp_mult),
+                            "modeled_entry_price": _log_float(modeled_entry),
+                            "modeled_exit_price": _log_float(modeled_exit),
+                            "modeled_exit_reason": modeled_exit_reason,
+                            "modeled_net_pnl_per_100": _log_float(modeled_net_per_100),
+                            "modeled_return_pct": _log_float(((modeled_exit / modeled_entry) - 1.0) * 100.0) if modeled_entry > 0 else np.nan,
+                        })
             if selected_dynamic_lev <= 0 and not inverse_only:
+                if return_candidate_log:
+                    for candidate in selected:
+                        log_idx = candidate_log_index_by_id.get(id(candidate))
+                        if log_idx is not None:
+                            candidate_log["candidates"][log_idx].update({
+                                "execution_status": "blocked",
+                                "block_reason": "selected_leverage_zero",
+                            })
+                _record_candidate_day(
+                    day_key,
+                    curr_time,
+                    "selected_leverage_blocked",
+                    day_start_equity=day_start_equity,
+                    end_equity=cash,
+                    entry_breadth=entry_breadth,
+                    market_ratio=market_ratio,
+                    market_flags=market_flags,
+                    candidate_counts=candidate_counts,
+                    scan_stats=scan_stats,
+                    setup_stats=setup_stats,
+                    selected_count=len(selected),
+                )
                 daily_stats[day_key] = {
                     "equity": float(cash),
                     "day_pnl": 0.0,
@@ -1584,13 +1839,31 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
             committed_capital = 0.0
             day_pnl = 0.0
             day_loss_limit = day_start_equity * MAX_DAILY_LOSS_PCT
-            for candidate in selected:
+
+            def _update_candidate_execution(candidate, **updates):
+                if not return_candidate_log:
+                    return
+                log_idx = candidate_log_index_by_id.get(id(candidate))
+                if log_idx is not None:
+                    candidate_log["candidates"][log_idx].update(updates)
+
+            for selected_rank, candidate in enumerate(selected, start=1):
                 if day_trade_count >= max_pos:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="max_positions_reached",
+                    )
                     break
                 if -day_pnl >= day_loss_limit:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="daily_loss_limit_reached",
+                    )
                     break
 
-                real_buy = candidate["open"] * (1.0 + buy_slippage)
+                real_buy = normalize_tick_size(candidate["open"] * (1.0 + buy_slippage), is_buy=True)
                 candidate_buying_power = day_buying_power
                 candidate_dynamic_lev = selected_dynamic_lev
                 if is_daytrade_inverse_setup_type(candidate.get("setup_type")):
@@ -1598,6 +1871,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     candidate_dynamic_lev = inverse_buying_power_leverage
                 remaining_buying_power = max(0.0, candidate_buying_power - committed_capital)
                 if remaining_buying_power <= 0:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="no_remaining_buying_power",
+                    )
                     break
 
                 effective_sl_mult = candidate.get("stop_mult")
@@ -1620,6 +1898,12 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     turnover=candidate["turnover"]
                 )
                 if shares < 100:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="raw_lot_below_100",
+                        raw_shares=int(shares),
+                    )
                     continue
 
                 shares = cap_daytrade_position_size(
@@ -1634,10 +1918,24 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     size_multiplier=candidate.get("size_multiplier"),
                 )
                 if shares < 100:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="capped_lot_below_100",
+                        capped_shares=int(shares),
+                    )
                     continue
 
                 trade_notional = real_buy * shares
                 if trade_notional > remaining_buying_power:
+                    _update_candidate_execution(
+                        candidate,
+                        execution_status="blocked",
+                        block_reason="notional_above_buying_power",
+                        capped_shares=int(shares),
+                        notional=float(trade_notional),
+                        remaining_buying_power=float(remaining_buying_power),
+                    )
                     continue
 
                 raw_exit, _exit_reason = _resolve_intraday_exit(
@@ -1650,7 +1948,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     target_price=target_price,
                     setup_type=candidate.get("setup_type"),
                 )
-                real_sell = raw_exit * (1.0 - sell_slippage)
+                real_sell = normalize_tick_size(raw_exit * (1.0 - sell_slippage), is_buy=False)
                 gross_pnl = (real_sell - real_buy) * shares
                 explicit_cost = float(explicit_trade_cost)
                 net_pnl, tax = _apply_profit_tax(
@@ -1662,12 +1960,25 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 trade_results.append(net_pnl)
                 trade_count += 1
                 day_trade_count += 1
+                _update_candidate_execution(
+                    candidate,
+                    opened=True,
+                    execution_status="opened",
+                    block_reason="",
+                    raw_shares=int(shares),
+                    capped_shares=int(shares),
+                    notional=float(trade_notional),
+                    remaining_buying_power=float(remaining_buying_power),
+                    entry_price=float(real_buy),
+                    exit_price=float(real_sell),
+                    net_pnl=float(net_pnl),
+                )
                 if return_trade_log:
                     trade_log.append({
                         "day_key": day_key,
                         "week_key": get_daytrade_week_key(curr_time),
                         "trade_index": int(day_trade_count),
-                        "selection_rank": int(selected.index(candidate)) if candidate in selected else None,
+                        "selection_rank": int(selected_rank),
                         "setup_type": candidate.get("setup_type"),
                         "code": candidate.get("code"),
                         "score": float(candidate.get("score", np.nan)),
@@ -1692,7 +2003,43 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         "symbol_trend_ratio": candidate.get("symbol_trend_ratio"),
                     })
 
+            if return_candidate_log:
+                for candidate in selected:
+                    log_idx = candidate_log_index_by_id.get(id(candidate))
+                    if log_idx is not None and candidate_log["candidates"][log_idx].get("execution_status") == "selected_pending":
+                        candidate_log["candidates"][log_idx].update({
+                            "execution_status": "blocked",
+                            "block_reason": "not_reached_after_prior_break",
+                        })
+
             cash += day_pnl
+
+        if return_candidate_log:
+            if sum(candidate_counts.values()) <= 0:
+                candidate_day_reason = "no_candidates"
+            elif day_trade_count > 0:
+                candidate_day_reason = "opened"
+            elif selected:
+                candidate_day_reason = "selected_not_opened"
+            else:
+                candidate_day_reason = "not_selected"
+            _record_candidate_day(
+                day_key,
+                curr_time,
+                candidate_day_reason,
+                day_start_equity=day_start_equity,
+                end_equity=cash,
+                day_pnl=float(cash - day_start_equity),
+                trade_count=day_trade_count,
+                entry_breadth=entry_breadth,
+                market_ratio=market_ratio,
+                market_flags=market_flags,
+                candidate_counts=candidate_counts,
+                scan_stats=scan_stats,
+                setup_stats=setup_stats,
+                selected_count=len(selected),
+                opened_count=day_trade_count,
+            )
 
         daily_stats[day_key] = {
             "equity": float(cash),
@@ -1703,10 +2050,11 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         monthly_assets[current_month] = float(cash)
 
     final = float(cash)
-    if return_daily_stats and return_trade_log:
-        return final, trade_count, monthly_assets, trade_results, daily_stats, trade_log
+    outputs = [final, trade_count, monthly_assets, trade_results]
     if return_daily_stats:
-        return final, trade_count, monthly_assets, trade_results, daily_stats
+        outputs.append(daily_stats)
     if return_trade_log:
-        return final, trade_count, monthly_assets, trade_results, trade_log
-    return final, trade_count, monthly_assets, trade_results
+        outputs.append(trade_log)
+    if return_candidate_log:
+        outputs.append(candidate_log)
+    return tuple(outputs)

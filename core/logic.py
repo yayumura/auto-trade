@@ -40,7 +40,7 @@ DAYTRADE_PRIMARY_HOT_CONTINUATION_MIN_GAP = 0.015
 DAYTRADE_PRIMARY_HOT_CONTINUATION_MAX_OPEN_VS_SMA_ATR = 1.5
 DAYTRADE_PRIMARY_HOT_CONTINUATION_MIN_PREV_RETURN_PCT = 0.05
 DAYTRADE_PRIMARY_HOT_CONTINUATION_MIN_RSI2 = 60.0
-DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT = 0.02
+DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT = 0.00
 DAYTRADE_PRIMARY_HOT_CONTINUATION_EQUITY_NOTIONAL_PCT = 0.60
 DAYTRADE_PRIMARY_LOW_RS_MAX_RS_ALPHA = 10.0
 DAYTRADE_PRIMARY_LOW_RS_EQUITY_NOTIONAL_PCT = 1.00
@@ -7954,8 +7954,13 @@ def is_daytrade_primary_failed_runup_exit(
         return False
     if float(buy_price) <= 0 or float(current_price) <= 0 or float(session_high) <= 0:
         return False
-    runup_threshold = float(buy_price) * (1.0 + float(min_session_runup_pct))
-    return float(session_high) >= runup_threshold and float(current_price) <= float(buy_price)
+    runup_pct = float(min_session_runup_pct)
+    runup_threshold = float(buy_price) * (1.0 + runup_pct)
+    if runup_pct <= 0.0:
+        runup_reached = float(session_high) > float(buy_price)
+    else:
+        runup_reached = float(session_high) >= runup_threshold
+    return runup_reached and float(current_price) <= float(buy_price)
 def resolve_daytrade_live_exit_decision(
     setup_type,
     buy_price,
@@ -10838,6 +10843,17 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "notional_pct": notional_pct,
                     "equity_notional_pct": equity_notional_pct,
                     "risk_budget_pct": risk_budget_pct,
+                    "size_multiplier": resolve_daytrade_catchup_size_multiplier(
+                        setup_type=catchup_metrics["setup_type"],
+                        breadth_val=breadth_val,
+                        gap_pct=catchup_metrics["gap_pct"],
+                        market_ratio=market_ratio,
+                        score=score,
+                        rs_alpha=rs,
+                        open_vs_sma_atr=catchup_metrics.get("open_vs_sma_atr"),
+                        trade_date=trade_date,
+                        trade_weekday=trade_weekday,
+                    ),
                     "prev_return": catchup_metrics.get("prev_return"),
                     "prev_rsi2": catchup_metrics.get("prev_rsi2"),
                     "open_from_prev_low_atr": catchup_metrics.get("open_from_prev_low_atr"),
@@ -11136,14 +11152,6 @@ def cap_daytrade_position_size(
         equity_cap_shares = _floor_lot((float(current_equity) * float(equity_notional_pct) * size_multiplier) / float(entry_price))
         capped_shares = min(capped_shares, equity_cap_shares)
     return capped_shares if capped_shares >= 100 else 0
-
-
-
-
-
-
-
-
 
 
 

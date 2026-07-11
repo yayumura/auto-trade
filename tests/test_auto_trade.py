@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -26,6 +27,11 @@ from core.kabucom_order_state import CancelResult, CancelStatus, CancelTerminalS
 from core.kabucom_order_state import StockOrderAction
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_trade, "DAYTRADE_DECISION_LOG_FILE", str(tmp_path / "daytrade_decisions.csv"))
+    monkeypatch.setattr(auto_trade, "DAYTRADE_EXIT_LOG_FILE", str(tmp_path / "daytrade_exit_log.csv"))
+    monkeypatch.setattr(auto_trade, "INTRADAY_SNAPSHOT_FILE", str(tmp_path / "intraday_snapshots.csv"))
 def _side_from_action(action):
     if action == StockOrderAction.MARGIN_CLOSE_LONG:
         return "1"
@@ -67,6 +73,64 @@ def test_compute_daytrade_snapshot_calculates_breadth_without_name_error():
     assert snapshot["top_candidates"][0]["code"] == "1000"
     assert snapshot["breadth"] == 1.0
     assert snapshot["latest_close_map"]["1000"] > 0
+
+
+
+def test_daytrade_decision_log_records_shared_candidate_context():
+    candidates = [
+        {
+            "code": "1000",
+            "name": "Foo",
+            "setup_type": "primary",
+            "candidate_rank": 2,
+            "score": 8.5,
+            "gap_pct": 0.004,
+            "open_vs_sma_atr": 1.2,
+            "rs_alpha": 35.0,
+        }
+    ]
+    rows = auto_trade.build_daytrade_decision_log_rows(
+        candidates,
+        decision="selected_for_sizing",
+        event_time="2026-07-10 09:31:00",
+        reason="entry_review_passed",
+        breadth=0.62,
+        market_ratio=1.04,
+        selected_count=1,
+        dynamic_leverage=1.5,
+        is_simulation=False,
+        trade_mode="KABUCOM_TEST",
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["time"] == "2026-07-10 09:31:00"
+    assert row["trade_mode"] == "KABUCOM_TEST"
+    assert row["is_simulation"] is False
+    assert row["decision"] == "selected_for_sizing"
+    assert row["candidate_rank"] == 2
+    assert row["selected_count"] == 1
+    assert row["code"] == "1000"
+    assert row["setup_type"] == "primary"
+    assert row["breadth"] == 0.62
+    assert row["market_ratio"] == 1.04
+
+    with patch("auto_trade.append_csv_rows") as append_rows, patch(
+        "auto_trade.rotate_csv_if_large"
+    ) as rotate:
+        recorded = auto_trade.record_daytrade_decision(
+            candidates,
+            decision="scan_candidate",
+            event_time="2026-07-10 09:30:00",
+            breadth=0.62,
+            market_ratio=1.04,
+            is_simulation=True,
+            trade_mode="SIM",
+        )
+
+    assert recorded[0]["decision"] == "scan_candidate"
+    append_rows.assert_called_once_with(auto_trade.DAYTRADE_DECISION_LOG_FILE, recorded)
+    rotate.assert_called_once_with(auto_trade.DAYTRADE_DECISION_LOG_FILE, max_size_mb=20)
 
 
 

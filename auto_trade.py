@@ -86,6 +86,7 @@ from core.config import (
     PROJECT_ROOT, DATA_ROOT,
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE,
     EXECUTION_LOG_FILE, TARGET_MARKETS, DAYTRADE_EXIT_LOG_FILE,
+    DAYTRADE_DECISION_LOG_FILE,
     DEBUG_MODE, TRADE_MODE, RUNTIME_LIVE_ORDER_CONFIG_HASH,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
     SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
@@ -1038,6 +1039,98 @@ def build_daytrade_exit_log_row(
 
 def append_daytrade_exit_log(row):
     append_csv_rows(DAYTRADE_EXIT_LOG_FILE, [row])
+
+
+def build_daytrade_decision_log_rows(
+    candidates,
+    *,
+    decision,
+    event_time,
+    reason="",
+    breadth=None,
+    market_ratio=None,
+    selected_count=0,
+    dynamic_leverage=None,
+    shares=None,
+    entry_price=None,
+    is_simulation=True,
+    trade_mode=None,
+):
+    if hasattr(event_time, "strftime"):
+        timestamp = event_time.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        timestamp = str(event_time or "")
+    mode = TRADE_MODE if trade_mode is None else str(trade_mode)
+    rows = []
+    for fallback_rank, candidate in enumerate(candidates or [], start=1):
+        item = dict(candidate or {})
+        rows.append(
+            {
+                "time": timestamp,
+                "trade_mode": mode,
+                "is_simulation": bool(is_simulation),
+                "decision": str(decision),
+                "reason": str(reason or ""),
+                "candidate_rank": item.get("candidate_rank", fallback_rank),
+                "selected_count": int(selected_count),
+                "code": str(item.get("code", "")),
+                "name": item.get("name", ""),
+                "setup_type": item.get("setup_type", ""),
+                "breadth": breadth,
+                "market_ratio": market_ratio,
+                "score": item.get("score"),
+                "gap_pct": item.get("gap_pct"),
+                "live_gap_pct": item.get("live_gap_pct", item.get("gap_pct")),
+                "prev_return": item.get("prev_return"),
+                "open_vs_sma_atr": item.get("open_vs_sma_atr"),
+                "rs_alpha": item.get("rs_alpha"),
+                "prev_rsi2": item.get("prev_rsi2"),
+                "notional_pct": item.get("notional_pct"),
+                "equity_notional_pct": item.get("equity_notional_pct"),
+                "risk_budget_pct": item.get("risk_budget_pct"),
+                "size_multiplier": item.get("size_multiplier"),
+                "dynamic_leverage": dynamic_leverage,
+                "shares": shares,
+                "entry_price": entry_price,
+            }
+        )
+    return rows
+
+
+def record_daytrade_decision(
+    candidates,
+    *,
+    decision,
+    event_time,
+    reason="",
+    breadth=None,
+    market_ratio=None,
+    selected_count=0,
+    dynamic_leverage=None,
+    shares=None,
+    entry_price=None,
+    is_simulation=True,
+    trade_mode=None,
+):
+    rows = build_daytrade_decision_log_rows(
+        candidates,
+        decision=decision,
+        event_time=event_time,
+        reason=reason,
+        breadth=breadth,
+        market_ratio=market_ratio,
+        selected_count=selected_count,
+        dynamic_leverage=dynamic_leverage,
+        shares=shares,
+        entry_price=entry_price,
+        is_simulation=is_simulation,
+        trade_mode=trade_mode,
+    )
+    if rows:
+        append_csv_rows(DAYTRADE_DECISION_LOG_FILE, rows)
+        rotate_csv_if_large(DAYTRADE_DECISION_LOG_FILE, max_size_mb=20)
+    return rows
+
 
 
 def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
@@ -2468,7 +2561,28 @@ def _main_exec():
                     top_candidates = snapshot["top_candidates"]
                     print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")
                     print(f"✅ Shared daytrade scan found {len(top_candidates)} candidates.")
+                    record_daytrade_decision(
+                        top_candidates,
+                        decision="scan_candidate",
+                        event_time=server_datetime,
+                        reason="shared_scan",
+                        breadth=breadth_val,
+                        market_ratio=snapshot.get("market_ratio"),
+                        dynamic_leverage=dynamic_lev,
+                        is_simulation=is_sim,
+                    )
+
                     if weekly_profit_guard_active:
+                        record_daytrade_decision(
+                            top_candidates,
+                            decision="skipped_review_cap",
+                            event_time=server_datetime,
+                            reason="weekly_profit_guard",
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            dynamic_leverage=dynamic_lev,
+                            is_simulation=is_sim,
+                        )
                         top_candidates = []
                         print("🛡️ [DayTrade] Weekly profit guard active. Skipping new entries for late-week protection.")
                 else:
@@ -2535,6 +2649,17 @@ def _main_exec():
 
                     selected_candidates.append(item)
 
+                record_daytrade_decision(
+                    selected_candidates,
+                    decision="selected_for_sizing",
+                    event_time=server_datetime,
+                    reason="entry_review_passed",
+                    breadth=breadth_val,
+                    market_ratio=snapshot.get("market_ratio"),
+                    selected_count=len(selected_candidates),
+                    dynamic_leverage=selected_dynamic_lev,
+                    is_simulation=is_sim,
+                )
                 current_exposure = _portfolio_market_value(portfolio)
                 day_equity = _resolve_account_equity(account, portfolio, is_sim)
                 day_buying_power = resolve_daytrade_buying_power(
@@ -2586,6 +2711,19 @@ def _main_exec():
                         stop_price=stop_price,
                     )
                     if shares < 100:
+                        record_daytrade_decision(
+                            [item],
+                            decision="skipped_size_floor",
+                            event_time=server_datetime,
+                            reason="capped_lot_below_100",
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            selected_count=len(selected_candidates),
+                            dynamic_leverage=candidate_dynamic_lev,
+                            shares=shares,
+                            entry_price=buy_price,
+                            is_simulation=is_sim,
+                        )
                         continue
 
                     if is_sim:
@@ -2606,6 +2744,19 @@ def _main_exec():
                                 )
                             )
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
+                        record_daytrade_decision(
+                            [item],
+                            decision="opened_sim",
+                            event_time=server_datetime,
+                            reason="simulated_entry",
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            selected_count=len(selected_candidates),
+                            dynamic_leverage=candidate_dynamic_lev,
+                            shares=shares,
+                            entry_price=exec_p,
+                            is_simulation=True,
+                        )
                         opened_count += 1
                     else:
                         details = broker.execute_chase_order(
@@ -2618,6 +2769,19 @@ def _main_exec():
                         unresolved_entry = bool(isinstance(details, dict) and details.get("unresolved"))
                         if actual_qty > 0:
                             exec_p = float(details.get("average_price", details.get("Price", 0)) or buy_price)
+                            record_daytrade_decision(
+                                [item],
+                                decision="opened_live",
+                                event_time=server_datetime,
+                                reason="entry_filled",
+                                breadth=breadth_val,
+                                market_ratio=snapshot.get("market_ratio"),
+                                selected_count=len(selected_candidates),
+                                dynamic_leverage=candidate_dynamic_lev,
+                                shares=actual_qty,
+                                entry_price=exec_p,
+                                is_simulation=False,
+                            )
                             execution_ids = details.get("execution_ids") or ()
                             execution_id = details.get("execution_id")
                             if execution_id is None and execution_ids:
