@@ -3,7 +3,9 @@ import pandas as pd
 from unittest.mock import patch
 
 from backtest import run_backtest_v16_production, run_backtest_v19_monthly_rotation
+from core.config import SLIPPAGE
 from core.monthly_rotation_strategy import get_prod_monthly_rotation_backtest_params
+from core.logic import normalize_tick_size
 
 
 def _build_daytrade_bundle(exit_mode="close"):
@@ -37,8 +39,8 @@ def _build_daytrade_bundle(exit_mode="close"):
     sma20_data[102, 0] = 100.0
 
     if exit_mode == "close":
-        close_data[102, 0] = 106.5
-        high_data[102, 0] = 106.8
+        close_data[102, 0] = 108.5
+        high_data[102, 0] = 108.8
         low_data[102, 0] = 104.8
     elif exit_mode == "stop":
         close_data[102, 0] = 103.0
@@ -232,6 +234,26 @@ def test_daytrade_supports_asymmetric_execution_slippage():
     assert asymmetric_assets != symmetric_assets
 
 
+def test_daytrade_execution_uses_directional_tick_rounding():
+    _, trade_count, _, _, trade_log = _run_single_trade_backtest(
+        "close",
+        return_trade_log=True,
+    )
+
+    assert trade_count == 1
+    assert trade_log[0]["entry_price"] == normalize_tick_size(
+        105.0 * 1.002,
+        is_buy=True,
+    )
+    assert trade_log[0]["exit_reason"] == "intraday_target"
+    assert trade_log[0]["exit_price"] == normalize_tick_size(
+        trade_log[0]["modeled_exit_price"] * (1.0 - SLIPPAGE),
+        is_buy=False,
+    )
+    assert trade_log[0]["entry_price"] == 106.0
+    assert trade_log[0]["exit_price"] == 107.0
+
+
 def test_daytrade_can_return_daily_stats():
     dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
     final_assets, trade_count, monthly, results, daily_stats = run_backtest_v16_production(
@@ -256,6 +278,46 @@ def test_daytrade_can_return_daily_stats():
     assert daily_stats["2024-04-18"]["day_pnl"] > 0
     assert daily_stats["2024-04-18"]["trade_count"] == 1
 
+def test_daytrade_can_return_candidate_log():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    final_assets, trade_count, monthly, results, daily_stats, trade_log, candidate_log = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        sl_mult=5.0,
+        tp_mult=20.0,
+        leverage_rate=1.0,
+        breadth_threshold=0.3,
+        max_hold_days=1,
+        return_daily_stats=True,
+        return_trade_log=True,
+        return_candidate_log=True,
+    )
+
+    assert trade_count == 1
+    assert final_assets > 10_000_000
+    assert isinstance(candidate_log, dict)
+    assert candidate_log["days"]
+    assert candidate_log["candidates"]
+
+    opened_days = [row for row in candidate_log["days"] if row["reason"] == "opened"]
+    assert opened_days
+    assert opened_days[0]["selected_count"] == 1
+    assert opened_days[0]["opened_count"] == 1
+    assert opened_days[0]["scan_universe"] == 1
+    assert opened_days[0]["scan_passed_scan"] == 1
+    assert "setup_no_setup_candidate_after_scan" in opened_days[0]
+
+    opened_candidates = [row for row in candidate_log["candidates"] if row["opened"]]
+    assert len(opened_candidates) == 1
+    opened_candidate = opened_candidates[0]
+    assert opened_candidate["execution_status"] == "opened"
+    assert opened_candidate["selection_rank"] == 1
+    assert opened_candidate["modeled_exit_reason"] == trade_log[0]["exit_reason"]
+    assert opened_candidate["net_pnl"] == results[0]
 
 def test_daytrade_open_entry_does_not_use_same_day_breadth():
     dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
@@ -618,10 +680,10 @@ def test_daytrade_can_trade_inverse_pullback_in_bear_market():
     high_data[101] = [104.5, 99.2]
     low_data[101] = [102.8, 98.0]
 
-    open_data[102] = [102.8, 98.0]
-    close_data[102] = [103.8, 97.8]
-    high_data[102] = [104.3, 98.1]
-    low_data[102] = [102.4, 97.2]
+    open_data[102] = [103.0, 98.0]
+    close_data[102] = [104.0, 99.0]
+    high_data[102] = [105.0, 100.0]
+    low_data[102] = [102.5, 98.0]
 
     bundle_np = {
         "Close": close_data,

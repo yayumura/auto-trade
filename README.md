@@ -192,61 +192,63 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-07-09** です。
+最新確認日は **2026-07-10** です。
 
-使用データの最新日は **2026-07-07** です。
+使用データの最新日は **2026-07-09** です。
 
-最新確認は `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` で行いました。
+データ更新と標準確認は `python scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` で行いました。
 
-train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20 --output-trades-csv tmp\train_trade_log.csv` で確認しました。
+採用 baseline の確認は `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` で行いました。
+
+train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 30 --output-trades-csv tmp\train_trade_log.csv` で確認しました。
 
 full history の最新確認値:
 
-- `FINAL EQUITY: 566,879,383円`
-- `CLOSED TRADES: 402`
-- `WIN RATE: 74.38%`
-- `TOTAL RETURN: +56587.94%`
-- `PROFIT_FACTOR: 27.07`
-- `WEEKS >= +1%: 105/228`
-- `POSITIVE WEEKS: 160/228`
+- `FINAL EQUITY: 476,117,832円`
+- `CLOSED TRADES: 403`
+- `WIN RATE: 67.00%`
+- `TOTAL RETURN: +47511.78%`
+- `PROFIT_FACTOR: 21.48`
+- `WEEKS >= +1%: 103/228`
+- `POSITIVE WEEKS: 159/228`
 - `MONTHS >= 3/4 ACTIVE: 1/53`
-- `WORST DAY: -6,667,531円`
+- `WORST DAY: -6,425,000円`
 
 train window の最新確認値:
 
-- `FINAL EQUITY: 211,114,042円`
-- `CLOSED TRADES: 360`
-- `WIN RATE: 74.17%`
-- `TOTAL RETURN: +21011.40%`
-- `PROFIT_FACTOR: 64.18`
-- `WEEKS >= +1%: 90/201`
-- `POSITIVE WEEKS: 139/201`
+- `FINAL EQUITY: 192,641,350円`
+- `CLOSED TRADES: 361`
+- `WIN RATE: 66.76%`
+- `TOTAL RETURN: +19164.13%`
+- `PROFIT_FACTOR: 49.63`
+- `WEEKS >= +1%: 89/202`
+- `POSITIVE WEEKS: 139/202`
 - `MONTHS >= 3/4 ACTIVE: 1/46`
-- `WORST DAY: -1,172,417円`
-- `MONTHS >= 20% (full calendar months inside train): 17/55`
+- `WORST DAY: -1,130,500円`
+- `MONTHS >= 20% (full calendar months inside train): 15/55`
 
-直近 6ヶ月 holdout `2026-01-08` から `2026-07-07` の確認値（reference / veto 用）:
+直近 6ヶ月 holdout `2026-01-13` から `2026-07-09` の確認値（reference / veto 用）:
 
-- `FINAL EQUITY: 566,879,383円`
+- `FINAL EQUITY: 476,117,832円`
 - `CLOSED TRADES: 42`
-- `WIN RATE: 76.19%`
-- `TOTAL RETURN: +168.52%`
-- `PROFIT_FACTOR: 20.36`
+- `WIN RATE: 69.05%`
+- `TOTAL RETURN: +147.15%`
+- `PROFIT_FACTOR: 15.72`
 - `WEEKS >= +1%: 14/26`
 - `POSITIVE WEEKS: 20/26`
 - `MONTHS >= 3/4 ACTIVE: 0/6`
-- `WORST DAY: -6,667,531円`
+- `WORST DAY: -6,425,000円`
 
-直近1ヶ月 `100万円 standalone` `2026-06-08` から `2026-07-07` の確認値（reference / veto 用）:
+直近1ヶ月 `100万円 standalone` `2026-06-10` から `2026-07-09` の確認値（reference / veto 用）:
 
 - `START EQUITY: 1,000,000円`
-- `FINAL EQUITY: 1,200,562円`
-- `TOTAL RETURN: +20.06%`
+- `FINAL EQUITY: 1,197,033円`
+- `TOTAL RETURN: +19.70%`
 - `CLOSED TRADES: 3`
-- `PROFIT_FACTOR: 99.73`
-- `WEEKS >= +1%: 1/5`
-- `POSITIVE WEEKS: 2/5`
-- `WORST DAY: -2,031円`
+- `PROFIT_FACTOR: 94.83`
+- `WEEKS >= +1%: 1/4`
+- `POSITIVE WEEKS: 2/4`
+- `WORST DAY: -2,100円`
 補足:
 
 - これは将来成績を保証するものではありません
@@ -261,7 +263,7 @@ train window の最新確認値:
 
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
 
-- 次の `clean holdout` は、現在の使用データ最新日 `2026-07-07` の翌営業日以降、つまり `2026-07-08` 以降の未観測データです
+- 次の `clean holdout` は、現在の使用データ最新日 `2026-07-09` の翌営業日以降、つまり `2026-07-10` 以降の未観測データです
 
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 
@@ -392,6 +394,7 @@ auto-trade/
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
 
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
+  scan のたびに shared strategy が生成した候補、sizing 対象、board lot 不成立、simulation / live の entry を `data/.../daytrade_decisions.csv` へ記録します。各行には `TRADE_MODE` と `is_simulation` を残すため、`KABUCOM_TEST` や simulation の記録を本番由来の clean holdout と混同しません。
 
 - `backtest.py`
 
@@ -519,9 +522,9 @@ auto-trade/
 
 現時点の運用メモ:
 
-- 現在の `6m holdout` `2026-01-08` から `2026-07-07` は `contaminated holdout` として扱う
+- 現在の `6m holdout` `2026-01-13` から `2026-07-09` は `contaminated holdout` として扱う
 
-- 次の `clean holdout` は `2026-07-06` 以降の未観測データで積み上げる
+- 次の `clean holdout` は `2026-07-10` 以降の未観測データで積み上げる
 
 - それまでは `train` と `jp_walkforward.py` を採用判断の主軸にし、既存 holdout は `veto` 専用で使う
 
@@ -761,6 +764,13 @@ python analyze_backtest_trade_log.py --holdout-months 6 --top-n 20
 
 ```
 
+backtest candidate log 分析:
+
+```bash
+
+python analyze_daytrade_candidate_log.py --holdout-months 6 --top-n 20
+
+```
 intraday ログ分析:
 
 ```bash
@@ -1015,17 +1025,21 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - 候補選択、買付余力、サイズ計算、risk budget cap
 
+  - `primary` の failed-runup exit が、建値を上回った後の建値割れだけで発動し、建値ちょうどの初期値では発動しないこと
+
 - `tests/test_backtest.py`
 
   - `backtest.py` から shared logic を参照したときの売買フロー
 
-  - 日中決済、stop/target、inverse 系を含むバックテスト挙動
+  - 日中決済、stop/target、JPX tick の buy/sell 方向丸め、inverse 系を含むバックテスト挙動
 
   - open エントリーで同日 breadth を見ない no-lookahead 回帰
 
   - `primary` の intraday failed-runup exit を trade_log の `exit_reason` として記録すること
 
   - `trade_log` の `exit_reason`、stop/target、OHLC fade 監査列
+
+  - `candidate_log` の日次 summary、scan / setup counters、selected / not_selected / opened / blocked 診断列
 
   - 火曜 low breadth `catchup_rs` の probe 約定フロー
 
@@ -1115,7 +1129,7 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - スナップショット計算
 
-  - scan 候補と live entry 判断ログの行生成
+  - scan 候補、sizing 対象、board lot 不成立、simulation / live entry の判断ログと `TRADE_MODE` 分離
 
   - server time ベースの月次 state / 月初資産ロールオーバー
 
@@ -1627,10 +1641,4 @@ python -m pytest tests/test_order_journal.py
 
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-07-09
-
-
-
-
-
-
+Last updated: 2026-07-10

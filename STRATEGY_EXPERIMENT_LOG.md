@@ -17919,3 +17919,263 @@
   - current baseline の再確認
 - 再試行するとしたら:
   - `2022-12` など 20% から遠い月を単独で狙わず、train で 2〜3 回以上独立再現する shared pocket が見つかったときだけ
+
+### 2026-07-10: Catchup RS Size Multiplier Wiring Adopted
+
+- 試したこと:
+  - 最新キャッシュを `2026-07-09` まで更新し、直近6ヶ月を `2026-01-13` から `2026-07-09` の reference / veto holdout として切り直した
+  - 既存の `resolve_daytrade_catchup_size_multiplier()` が unit test では確認済みだった一方、実際の `catchup_rs` 候補 dict に `size_multiplier` が渡っていなかったため、共有戦略候補生成と backtest 実行側の両方に配線した
+  - 新しい backtest 専用条件や個別銘柄条件は追加せず、既存の Tuesday low-breadth / high-RS shared helper を実際の sizing に反映させた
+- 結果:
+  - `python -m pytest tests\test_logic.py -q`: `143 passed`
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y651,856,198 / TOTAL RETURN +65085.62% / CLOSED TRADES 403 / WIN RATE 73.95% / PROFIT_FACTOR 20.28 / WEEKS >= +1% 105/228 / POSITIVE WEEKS 161/228 / MONTHS >= 3/4 ACTIVE 1/53 / WORST DAY -8,549,403`
+  - `TRAIN WINDOW: FINAL EQUITY Y260,106,451 / TOTAL RETURN +25910.65% / CLOSED TRADES 361 / WIN RATE 73.96% / PROFIT_FACTOR 69.65 / WEEKS >= +1% 91/202 / POSITIVE WEEKS 141/202 / MONTHS >= 3/4 ACTIVE 1/46 / WORST DAY -1,366,042`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y651,856,198 / TOTAL RETURN +150.61% / CLOSED TRADES 42 / WIN RATE 73.81% / PROFIT_FACTOR 14.07 / WEEKS >= +1% 14/26 / POSITIVE WEEKS 20/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -8,549,403`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,200,562 / TOTAL RETURN +20.06% / CLOSED TRADES 3 / PROFIT_FACTOR 99.73 / WEEKS >= +1% 1/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,031`
+  - train full calendar months の `MONTHS >= 20%` は `17/55 -> 19/55` に改善した
+  - `2022-12` と `2024-10` が 20% 超へ乗った一方、train worst day は `-1,172,417円 -> -1,366,042円` に悪化した
+- 判断:
+  - 採用
+  - 理由は、新規の当て込み条件ではなく、既存の共有 helper が実候補に届いていなかった根本的な配線漏れの修正であり、train の月次20%件数、総リターン、positive weeks が改善したため
+  - ただし損失集中は悪化しているため、次の改善はさらなる size-up ではなく、未達月・未達週の候補不足や warmup / no-trade 原因の分析を優先する
+- 再試行するとしたら:
+  - `catchup_rs` をさらに太らせるのではなく、未選択候補を含む train-only 分布で複数月に再現する別の shared edge が見つかったときだけ
+  - holdout の見た目改善を理由に閾値を詰めない
+
+### 2026-07-10: Rejected - Residual Selected-Trade Broad Size-Up
+
+- 試したこと:
+  - 修正後の train trade log から、残る 20% 未達月に効きうる selected-trade の曜日、setup、breadth、gap、market_ratio、score、RS family を再集計した
+  - `primary Wednesday gap 1.5%-2.0%`、`primary market_ratio 1.0-1.05 / prev_return 3%-5%`、`fallback Monday`、`catchup_rs Tuesday` などの候補を確認した
+- 結果:
+  - `primary Wednesday gap 1.5%-2.0%` は `12 trades / 11 wins / net +6,353,309` と強いが、既に Wednesday hot-gap 系は過去に探索済みで、残る月次20%未達の大半を解決するには不足していた
+  - `fallback Monday` と広めの `catchup_rs Tuesday` は過去ログで近傍探索済み、または broad 化すると既存の損失も同時に太るため、今回の配線修正後に重ねる根拠が弱かった
+  - 残る未達月には `2021-06` から `2022-02` の warmup / 集計除外影響が強い月と、`2022-03` 以降の実 no-trade / 低頻度月が混在し、現在の 200 日系指標と backtest warmup 前提では sizing だけで到達できない
+- 判断:
+  - 不採用
+  - selected-trade の追加 size-up は、月次20%件数を大きく増やすよりも損失集中と既探索の重複を増やすリスクが高い
+- 再試行するとしたら:
+  - 未選択候補を含めた train-only candidate log を作り、warmup 後の no-trade 月や未達月に共通する entry quality の欠落を確認してから
+  - 早期 warmup 月を評価対象に含めるなら、過去データ開始を前倒しして signal 用の前史を確保する
+
+### 2026-07-10: Rejected - Candidate Log Broad Expansion / Loss Guard Search
+
+- 試したこと:
+  - `run_backtest_v16_production(..., return_candidate_log=True)` を追加し、戦略挙動を変えずに日次 reason と generated candidate の `selected / not_selected / opened / blocked` を記録できるようにした
+  - `analyze_daytrade_candidate_log.py --holdout-months 6 --top-n 30` で train-only の未選択候補、blocked 候補、no-trade day reason を確認した
+  - 事前に観測できる `setup_type`、曜日、breadth、market_ratio、gap、prev_return、RSI、RS、score、open_vs_sma_atr だけで粗い regime bin を作り、複数月に再現する shared edge が残っているか確認した
+- 結果:
+  - train 診断: `TRAIN DAYS 946 / TRAIN CANDIDATES 28,554 / TRAIN TRADES 361`
+  - 日次 reason: `opened 361`, `selected_not_opened 208`, `selected_leverage_blocked 206`, `no_candidates 82`, `weekly_profit_guard 71`, `market_gate_blocked 18`
+  - broad な未選択候補はすべて平均マイナス: `strong_oversold not_selected avg -1,224円/100株`, `catchup_rs not_selected avg -1,603円/100株`, `fallback not_selected avg -1,606円/100株`, `primary not_selected avg -568円/100株`
+  - 粗い bin で唯一それらしいプラス群は `catchup_rs / Thursday / score 8-10 / RS 40-60` の `40 candidates / 22 months / avg +383円/100株 / win 55.0% / worst -13,165円/100株` 程度で、月次20%を押し上げるには弱く、損失側も浅くない
+  - opened trade の損失集中は `2026-01-06 primary -1,366,042円` が突出したが、同じ hot-market primary family は train 全体で大きな利益源でもあり、火曜 hot-market を broad に削ると利益側を壊す可能性が高かった
+  - `python -m pytest tests\test_logic.py tests\test_backtest.py tests\test_analyze_backtest_trade_log.py tests\test_jp_backtest.py -q`: `178 passed`
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` は採用 baseline と同じ `FULL RETURN +65085.62% / TRAIN RETURN +25910.65% / HOLDOUT RETURN +150.61% / standalone +20.06%`
+- 判断:
+  - 不採用
+  - 未選択候補を broad に足す案は、期待値が崩れている候補を大量に拾うため、月次20%より損失集中を増やすリスクが高い
+  - 損失集中 guard も、現時点の粗い shared regime では利益源を削る副作用の方が大きく、採用できない
+- 再試行するとしたら:
+  - same-day の結果を条件に使わず、未選択候補の中で事前特徴だけから `min 2-3 independent months` 以上、かつ平均損益・worst trade・negative month が明確に改善する shared subfamily が出たときだけ
+  - no-candidate / market-gate 月をさらに掘る場合は、scan 前の reject reason と market gate の内訳を別ログ化して、候補生成以前に何が欠けているかを見る
+
+### 2026-07-10: Rejected - No-Candidate Broad ETF Probe
+
+- 試したこと:
+  - `candidate_log` の日次 summary に `scan_*` と `setup_*` counters を追加し、`no_candidates` / `market_gate_blocked` の内訳を train-only で確認した
+  - `no_candidates` 日に既存 ETF universe（inverse ETF と bull ETF）を open-close で仮に入れた場合の方向性を確認した
+  - 実装前の仮説確認として、1321.T を `no_candidates` 日だけ `10% / 25% / 50% / 100%` equity で足した場合の概算月次も確認した
+- 結果:
+  - `no_candidates` は流動性だけで全滅しているわけではなく、多くの日で `600-900` 銘柄程度が scan を通ったあと、既存 setup quality に届いていなかった
+  - no-trade 日の主な内訳は `scan_turnover_blocked 410,714`, `setup_no_setup_candidate_after_scan 336,567`, `scan_raw_nan 16,832`, `scan_price_blocked 9,797`
+  - `market_gate_blocked` は `2022-03` の warmup / market_ratio NaN が中心で、戦略拡張対象ではなかった
+  - `no_candidates` 日の inverse ETF は平均マイナスだった: 例 `1459.T avg -0.66%`, `1360.T avg -0.67%`, `1357.T avg -0.52%`
+  - bull ETF は平均プラスだったが、レバ ETF は worst が深く、低ボラの `1321.T` でも `avg +0.28% / worst -6.92%`
+  - `1321.T` を `no_candidates` 日に足す概算では、`10% / 25% / 50% / 100%` equity のいずれも train full months `>=20%` は `19/47` のまま改善せず、`2022-04` や `2023-12` の低リターン月を悪化させた
+- 判断:
+  - 不採用
+  - ETF probe は総資産を少し押し上げる可能性はあるが、月次20%件数の改善にはつながらず、目的に対してリスク対効果が弱い
+  - inverse ETF は no-candidate 日の broad fallback としては期待値が崩れており、採用不可
+- 再試行するとしたら:
+  - no-candidate 日を一律に埋めるのではなく、setup quality に届かなかった銘柄群の中で、事前特徴だけから複数月に再現する明確な intraday edge が出たときだけ
+  - それが出ない限り、低頻度月を無理に埋めるより、既存 selected trade の risk-adjusted sizing と損失集中抑制を優先する
+
+### 2026-07-10: Rejected - Setup-Miss Near-Candidate Expansion
+
+- 試したこと:
+  - `no_candidates` 日だけを対象に、scan は通過したが primary / fallback / strong_oversold / catchup / ETF / inverse setup に届かなかった銘柄を train-only で再構成した
+  - 事前に観測可能な `weekday`、`breadth`、`market_ratio`、`gap_pct`、`prev_return`、`prev_rsi2`、`rs_alpha`、`open_vs_sma_atr`、既存 score proxy で粗い bin を作り、同日 open entry / 当日 exit の保守的な損益ラベルを確認した
+  - same-day 損益は条件には使わず、entry 前特徴で説明できる shared edge があるかだけを見た
+- 結果:
+  - 対象は `no_candidate_days 82` のうち train 内 `setup_miss_rows 56,891`
+  - 全体は `avg -724.6円/100株 / total -41,222,719円/100株 / win 42.6% / worst -47,979円/100株`
+  - 一部の曜日 / breadth / gap bin は平均プラスだったが、`days 4-9` 程度の単発寄りで、厳しめ条件 `n>=25 / months>=5 / avg>200円 / worst>-12,000円` では採用候補なし
+  - 既存 score proxy で日別 top 1 を選んでも、`primary_proxy top: 81日 / avg -2,395円 / win 33.3% / worst -28,878円`、`fallback_proxy top: 81日 / avg -1,000円 / win 44.4% / worst -28,878円`
+- 判断:
+  - 不採用
+  - setup に届かなかった scan 通過銘柄は、薄い日を埋める候補ではなく、品質基準で正しく落ちている側だった
+  - 月次20%未達を埋めるためにここを広げると、候補数は増えるが損失期待値を大量に足す可能性が高い
+- 再試行するとしたら:
+  - setup miss 全体ではなく、外部から説明できる新しい pre-entry regime 指標が追加され、その指標だけで複数月・複数日・浅い worst を満たすときだけ
+  - 今回見た粗い `breadth / market_ratio / gap / RS / RSI / open_vs_sma` 近傍を同じ形で再探索しない
+
+### 2026-07-10: Rejected - Selected-Blocked / Weekly-Lock Rescue Recheck
+
+- 試したこと:
+  - `selected_not_opened` / `selected_leverage_blocked` 日について、選ばれたが約定しなかった候補の modeled 損益を train-only で再確認した
+  - `block_reason`、setup、曜日、月、`market_ratio`、score bin で、board-lot rescue や weekly lock 解除に値する shared edge が残っているかを確認した
+  - 20%未達月を月次で分解し、`no_candidates`、weekly guard、selected blocked、opened trade、worst day のどれが主因かを確認した
+- 結果:
+  - selected blocked は全体として弱い: `not_reached_after_prior_break 2,516件 avg -969円/100株`, `capped_lot_below_100 1,537件 avg -2,667円/100株`, `selected_leverage_zero 1,314件 avg -1,445円/100株`, `max_positions_reached 304件 avg -1,368円/100株`
+  - 一見プラスだった `primary / Tuesday / selected_leverage_zero` は候補単位 `78件 / avg +1,037円` だったが、日別 rank1 では `8日 / avg -2,117円 / win 25.0% / worst -8,371円` に崩れた
+  - 実現 trade の損失側で見える broad な悪化帯は `primary / Tuesday / market_ratio 1.20+` と `primary / Tuesday / score 5-6` だが、前者は `5 trades / 4 months / total -908,952円` のうち `2026-01-06` 単日損失の寄与が大きく、同じ high market family の別曜日は大きな利益源でもあった
+  - train post-warmup 月次は `47ヶ月中 19ヶ月 >= +20%`。20%未達月に `10%-20%` の近接月はなく、多くは `0%-9%` 台かマイナスで、週次 profit guard が主因ではなかった
+- 判断:
+  - 不採用
+  - selected blocked を rescue する broad 施策は、約定しなかったことで避けられている負け候補を戻す形になりやすい
+  - 火曜 high-market primary の単発損失だけを消す guard は train 1日への当て込み色が強く、同じ family の profit source を削るリスクが高い
+- 再試行するとしたら:
+  - selected blocked 側ではなく、実現 trade の損失集中に対して、複数年・複数月に再現する pre-entry risk feature が見つかったときだけ
+  - 月次20%全月化を狙うなら、既存 gate 緩和ではなく、別の独立した intraday edge を追加できるデータソースや特徴量が必要
+
+### 2026-07-10: Adopted - Primary Breakeven Failed-Runup Exit
+
+- 試したこと:
+  - `primary` の failed-runup exit を、従来の「entry 後に `+2.0%` 以上走ってから建値以下へ戻ったら撤退」から、「一度でも建値を上回った後に建値以下へ戻ったら撤退」へ変更した
+  - これは個別銘柄や特定月の条件ではなく、全 `primary` に共通する intraday risk management として扱った
+  - daily OHLC backtest では stop / target を先に優先し、stop に触れた日は従来通り stop を採用するため、損失側を都合よく消す専用分岐にはしていない
+- 結果:
+  - `python -m pytest tests\test_logic.py tests\test_backtest.py -q`: `166 passed`
+  - `python -m pytest tests -q`: `397 passed, 38 subtests passed`
+  - `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1`
+  - `FULL WINDOW: FINAL EQUITY Y708,232,830 / TOTAL RETURN +70723.28% / CLOSED TRADES 404 / WIN RATE 74.01% / PROFIT_FACTOR 25.18 / WEEKS >= +1% 105/228 / POSITIVE WEEKS 166/228 / MONTHS >= 3/4 ACTIVE 1/53 / WORST DAY -9,278,045`
+  - `TRAIN WINDOW: FINAL EQUITY Y279,561,337 / TOTAL RETURN +27856.13% / CLOSED TRADES 362 / WIN RATE 74.03% / PROFIT_FACTOR 118.20 / WEEKS >= +1% 91/202 / POSITIVE WEEKS 146/202 / MONTHS >= 3/4 ACTIVE 1/46 / WORST DAY -396,859`
+  - `HOLDOUT WINDOW: FINAL EQUITY Y708,232,830 / TOTAL RETURN +153.34% / CLOSED TRADES 42 / WIN RATE 73.81% / PROFIT_FACTOR 16.95 / WEEKS >= +1% 14/26 / POSITIVE WEEKS 20/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -9,278,045`
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,200,562 / TOTAL RETURN +20.06% / CLOSED TRADES 3 / PROFIT_FACTOR 99.73 / WEEKS >= +1% 1/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,031`
+  - train full calendar months の `MONTHS >= 20%` は `19/55` のまま、目標の全月20%には未達
+  - train の `negative full calendar months` は `3 -> 1`、train `WORST DAY` は `-1,366,042円 -> -396,859円`、train PF は `69.65 -> 118.20` に改善
+- 判断:
+  - 採用
+  - 理由は、特定銘柄・特定月に合わせた entry 条件ではなく、建値を一度上回った primary が再び建値割れしたら損失を浅くするという本番監視でも再現可能な shared exit であり、train の損失集中と PF を大きく改善したため
+  - holdout は contaminated / veto 用だが、PF と total return は改善し、悪化 veto には該当しない。ただし full / holdout の absolute worst day は資産増加に伴って大きくなっているため、次は absolute notional / drawdown の抑制を別途見る
+- 再試行するとしたら:
+  - failed-runup 閾値を細かく `0.5%`, `0.75%`, `1.0%` などで追わない。今回の採用理由は閾値最適化ではなく、建値回復後の損失化を避ける shared risk rule として説明できる点にある
+  - さらに改善するなら、entry 条件ではなく、absolute notional cap / volatility-aware size / 大資産時の損失額制御を train-only で見る
+
+### 2026-07-10: Rejected - Tuesday Primary Residual Hot-Market Guard
+
+- 試したこと:
+  - 廉価 explorer と並行して、realized losing trades を train post-warmup で再分解し、`primary / Tuesday` の残余損失 pocket を確認した
+  - 候補条件は `primary AND Tuesday AND score 4-7 AND gap_pct 0-1% AND prev_rsi2 50-75`、またはより hot-market 寄りの `market_ratio >= 1.1` 追加
+- 結果:
+  - 広い pocket は `22 trades / 19 months / total -1,108,792円` だが、損失の大半は `2026-01-06` の単日事故に寄っていた
+  - `market_ratio >= 1.1` 追加では `11 trades / 9 months / total -1,228,133円` と利益側副作用は小さいが、trade 数が薄く、既存 Tuesday guard のすき間をさらに細かく埋める形になる
+  - failed-runup exit 採用後は、同じ `2026-01-06` の損失集中が大きく浅くなり、この pocket を entry 側で削る必要性が下がった
+- 判断:
+  - 不採用
+  - 火曜 primary の残余 guard は説明可能性はあるが、採用根拠が単日損失に寄りすぎており、既存 Tuesday guard 群への細かい追加としてカーブフィット色が強い
+- 再試行するとしたら:
+  - 同じ条件をさらに細かく詰めない
+  - 複数年・複数局面で同じ pre-entry risk が、failed-runup exit 適用後にも再現する場合だけ再検討する
+
+### 2026-07-10: Rejected - Broad Absolute Notional Cap
+
+- 試したこと:
+  - failed-runup exit 採用後の残課題として、資産増加後の absolute worst day を抑えるため、全 setup に broad な trade notional cap を仮に追加した what-if を確認した
+  - cap は `500M / 300M / 200M / 100M / 50M` 円で比較し、entry 条件や exit 条件は変えなかった
+- 結果:
+  - cap なし baseline: `FULL RETURN +70723.28% / TRAIN RETURN +27856.13% / HOLDOUT RETURN +153.34% / FULL PF 25.18 / TRAIN PF 118.20 / HOLDOUT PF 16.95 / FULL WORST DAY -9,278,045 / TRAIN WORST DAY -396,859`
+  - `500M cap`: `FULL RETURN +41718.83% / TRAIN RETURN +23077.76% / HOLDOUT RETURN +80.43% / HOLDOUT PF 12.63 / FULL WORST DAY -5,464,817 / TRAIN WORST DAY -330,647`
+  - `300M cap`: `FULL RETURN +30581.39% / TRAIN RETURN +18845.16% / HOLDOUT RETURN +61.95% / HOLDOUT PF 6.27 / FULL WORST DAY -10,631,120`
+  - `100M cap`: `FULL RETURN +14940.99% / TRAIN RETURN +10569.34% / HOLDOUT RETURN +40.97% / FULL WORST DAY -3,542,388`
+  - cap を厳しくすると absolute worst は下がる局面があるが、利益源と compounding を大きく削り、holdout PF / return も明確に悪化した
+- 判断:
+  - 不採用
+  - broad notional cap は「最小限のマイナス」には効くが、月次20%目標と最大利益の主目的を大きく壊す。特に `500M cap` でも holdout return がほぼ半減し、採用するには副作用が大きすぎる
+  - absolute loss control をやるなら、全 setup 一律 cap ではなく、setup / regime / liquidity / volatility に応じた risk-adjusted cap を train-only で別途設計する必要がある
+- 再試行するとしたら:
+  - 全体 cap ではなく、損失寄与が大きく、かつ利益源ではない narrow shared regime に限定できるときだけ
+  - cap の目的を「absolute worst day」だけにせず、月次20%件数、PF、positive weeks、holdout veto を同時に満たせるかで判断する
+
+### 2026-07-10: Rejected - Zero-Base Sizing Dependency Audit
+
+- 試したこと: 現行 entry 候補は固定し、primary の個別 equity/notional/risk/size 例外と selected leverage の個別例外を、既定の shared sizing に置き換えた診断 replay を train-only で実施した。
+- 結果:
+  - 簡素化 replay は `TRAIN RETURN +556.43% / PF 1.96 / WEEKS >= +1% 76/202 / POSITIVE WEEKS 100/202 / WORST DAY -203,415 / CLOSED TRADES 554` となった。
+  - 現行 baseline は `TRAIN RETURN +27856.13% / PF 118.20 / WEEKS >= +1% 91/202 / POSITIVE WEEKS 146/202 / WORST DAY -396,859 / CLOSED TRADES 362` であり、成績差は細分化した sizing / leverage 例外への依存が大きいことを示した。
+- 判断:
+  - 不採用。簡素化はカーブフィットを下げる方向だが、現在の daily OHLC データと既存 entry のままでは、月次20%目標や週次目標に届かない。
+- 再試行するとしたら:
+  - 個別例外を少しずつ復活させない。分足・約定・板などの新しい事前情報を追加し、独立した edge をゼロベースで構築できる場合だけ再設計する。
+
+### 2026-07-10: Rejected - Post-Size Liquidity Participation Cap
+
+- 試したこと: 本番・backtest 共通の `cap_daytrade_position_size()` に、前日売買代金の `2.5%` を board lot 単位で上限化する generic な post-size cap を追加して検証した。
+- 結果:
+  - `python -m pytest tests\\test_logic.py tests\\test_backtest.py -q`: `166 passed`。
+  - `TRAIN RETURN +7595.37% / PF 15.14 / WEEKS >= +1% 86/202 / POSITIVE WEEKS 145/202 / WORST DAY -2,213,221 / CLOSED TRADES 370` と baseline を大きく下回り、最悪日も悪化した。standalone 最新1ヶ月は `+20.06%` のまま。
+- 判断:
+  - 不採用。流動性制約は実運用上正しいが、lot 未満になった上位候補を次順位候補へ差し替える既存 shared selection と相互作用し、経路を悪化させた。
+- 再試行するとしたら:
+  - 上位候補が participation cap を満たさない日は lower-ranked candidate へ差し替えず no-trade にする、という shared execution policy を独立に検証する場合だけ。ただしこれは稼働率を下げるため、月次20%目標への寄与を先に train-only で確認する。
+### 2026-07-10: Data Capability Audit / Future Clean-Holdout Instrumentation
+
+- 試したこと:
+  - J-Quants 取得器、kabu.com の quote / broker 実装、日中ログ、注文ジャーナルを監査し、ゼロベースの intraday edge を検証できる履歴の有無を確認した。
+  - 将来の観測用に、shared strategy が生成した候補、sizing 対象、board lot 不成立、simulation / live の実エントリーを `daytrade_decisions.csv` へ記録するようにした。
+  - テスト時は decision / exit / snapshot の runtime log を一時ディレクトリへ隔離した。
+- 結果:
+  - キャッシュは日足 OHLCV のみで、分足、約定、板、注文イベントの時系列履歴はない。
+  - 既存の intraday exit log は test fixture 由来で、実トレードを分析できる記録ではない。decision / snapshot の実観測ログも未蓄積である。
+  - 追加した判断ログは `trade_mode` と `is_simulation` を必須記録し、KABUCOM_TEST と simulation を将来の KABUCOM_LIVE clean holdout から分離する。
+  - `python -m pytest tests -q`: `398 passed, 38 subtests passed`。
+- 判断:
+  - 戦略変更は不採用。履歴日足だけから日中 execution edge を再設計すると、現行の細分化 sizing を別のカーブフィットで置き換えるだけになる。
+  - 次の clean holdout は `2026-07-10` 以降の実観測として固定し、KABUCOM_LIVE かつ非 simulation の判断・注文・約定・保有中 quote を蓄積してから train-only で再設計する。
+- 再試行するとしたら:
+  - 同一銘柄・同一時刻帯の分足 OHLCV、best bid/ask と数量、注文送信・取消・部分約定・手数料を時系列で取得できる外部履歴を導入する場合。
+  - または上記の本番観測を十分な件数で蓄積し、日中の実際の adverse selection、slippage、exit path を train にだけ含められる場合。
+
+### 2026-07-11: Adopted - JPX Tick-Normalized Backtest Execution
+
+- 試したこと:
+  - v16 の候補モデル約定と実約定について、買値を上方向、売値を下方向へ `normalize_tick_size()` で丸めるようにした。
+  - JPX の呼値単位を確認し、銘柄区分を持たない現行日足データでは、`core.logic` の一般銘柄向け保守的 ladder を共通利用した。
+  - entry / exit 条件や資金配分は変更せず、連続価格で都合よく約定できる楽観だけを除いた。
+- 結果:
+  - `python -m pytest tests\\test_backtest.py tests\\test_logic.py -q`: `167 passed`。
+  - `python -m pytest tests -q`: `399 passed, 38 subtests passed`。
+  - `FULL WINDOW: FINAL EQUITY Y476,117,832 / TOTAL RETURN +47511.78% / CLOSED TRADES 403 / WIN RATE 67.00% / PROFIT_FACTOR 21.48 / WEEKS >= +1% 103/228 / POSITIVE WEEKS 159/228 / MONTHS >= 3/4 ACTIVE 1/53 / WORST DAY -6,425,000`。
+  - `TRAIN WINDOW: FINAL EQUITY Y192,641,350 / TOTAL RETURN +19164.13% / CLOSED TRADES 361 / WIN RATE 66.76% / PROFIT_FACTOR 49.63 / WEEKS >= +1% 89/202 / POSITIVE WEEKS 139/202 / MONTHS >= 3/4 ACTIVE 1/46 / WORST DAY -1,130,500`。
+  - `HOLDOUT WINDOW: FINAL EQUITY Y476,117,832 / TOTAL RETURN +147.15% / CLOSED TRADES 42 / WIN RATE 69.05% / PROFIT_FACTOR 15.72 / WEEKS >= +1% 14/26 / POSITIVE WEEKS 20/26 / MONTHS >= 3/4 ACTIVE 0/6 / WORST DAY -6,425,000`。
+  - `100万円 standalone latest 1m: FINAL EQUITY Y1,197,033 / TOTAL RETURN +19.70% / CLOSED TRADES 3 / PROFIT_FACTOR 94.83 / WEEKS >= +1% 1/4 / POSITIVE WEEKS 2/4 / WORST DAY -2,100`。
+  - train full calendar months の `MONTHS >= 20%` は `19/55 -> 15/55`。連続価格約定の除去により目標達成率は低下した。
+- 判断:
+  - 採用。これは alpha 最適化ではなく、実運用との差を利益方向に使わないための約定モデル厳格化である。
+  - baseline の低下は許容し、今後の改善はこの保守的な約定値を基準に行う。
+  - 月間20%全月達成、月間3/4稼働、週次+1%の全週達成はいずれも未達。
+- 再試行するとしたら:
+  - 銘柄コードごとの TOPIX500 区分、ETF/ETN 区分、当日の呼値 metadata を履歴として保持できるようになった場合に、category-aware tick ladder へ置き換える。
+  - 板・部分約定・注文時刻を取得できる場合は、tick 丸めだけでなく spread と fill probability を含む共有 execution model として再検証する。
+
+### 2026-07-11: Rejected - Pre-Trade 1% Daily Stop-Loss Budget Cap
+
+- 試したこと:
+  - `DAYTRADE_MAX_DAILY_LOSS_PCT = 1%` を、次の entry を止める事後判定ではなく、想定 stop 約定損失が日初資産の1%以内になるよう100株単位で建玉前に cap する診断 replay を行った。
+  - stop 価格から売却 slippage を差し引き、JPX tick を下方向へ丸めた価格を想定 worst exit とした。候補、entry、exit、setup 別配分は変更していない。
+- 結果:
+  - 現行 tick-normalized baseline の train 日次実測は `WORST DAY -1.5444% / MAX DRAWDOWN -2.1341% / 負け日の中央値 -0.0981%`。
+  - 現行 train の建玉倍率は中央値 `0.245x`、90%点 `2.974x`、99%点 `13.088x`、最大 `14.062x`。高倍率は narrow stop と組み合わされている。
+  - 1% cap 診断は `FULL RETURN +97.37% / PF 3.05 / WEEKS >= +1% 36/228 / POSITIVE WEEKS 131/228 / WORST DAY -18,000 / CLOSED TRADES 372`。
+  - `TRAIN RETURN +82.95% / PF 3.47 / WEEKS >= +1% 30/202 / POSITIVE WEEKS 117/202 / WORST DAY -14,000 / CLOSED TRADES 326`。
+  - `HOLDOUT RETURN +7.88% / PF 2.03 / WEEKS >= +1% 6/26 / POSITIVE WEEKS 14/26 / WORST DAY -18,000 / CLOSED TRADES 46`。
+  - `100万円 standalone latest 1m: FINAL EQUITY Y997,900 / TOTAL RETURN -0.21% / CLOSED TRADES 1 / PF 0.00 / WEEKS >= +1% 0/4 / POSITIVE WEEKS 0/4 / WORST DAY -2,100`。
+  - 100株単位では1%予算内に収まらない候補が no-trade となり、月次20%目標と直近 standalone を大きく壊した。
+- 判断:
+  - 不採用。日次上限を事前 sizing へ接続する考え方自体は正しいが、100万円・日本株100株単位・現行 daily edge の組み合わせでは、損失抑制幅に対して機会損失が大きすぎる。
+  - 現行の `DAYTRADE_MAX_DAILY_LOSS_PCT` は単一取引の損失保証ではなく、複数取引時の追加 entry 停止閾値にすぎない。実運用上も1%保証として扱わない。
+- 再試行するとしたら:
+  - 単元未満株を同等の執行条件で利用できる、または初期資金が増えて100株でも1%予算内へ連続的に sizing できる場合。
+  - 分足・板・実約定データから stop 到達前の shared exit が検証でき、取引機会を捨てずに expected shortfall を下げられる場合。

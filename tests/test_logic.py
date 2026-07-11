@@ -4186,7 +4186,24 @@ class TestLogic(unittest.TestCase):
                 "primary",
                 buy_price=100.0,
                 current_price=99.8,
+                session_high=100.0,
+            )
+        )
+        self.assertTrue(
+            is_daytrade_primary_failed_runup_exit(
+                "primary",
+                buy_price=100.0,
+                current_price=99.8,
+                session_high=100.1,
+            )
+        )
+        self.assertFalse(
+            is_daytrade_primary_failed_runup_exit(
+                "primary",
+                buy_price=100.0,
+                current_price=99.8,
                 session_high=101.9,
+                min_session_runup_pct=0.02,
             )
         )
     def test_daytrade_live_exit_helper_prioritizes_stop_and_target_before_failed_runup(self):
@@ -9319,12 +9336,3 @@ class TestLogic(unittest.TestCase):
         self.assertEqual(normalize_tick_size(0, is_buy=True), 0.0)
 if __name__ == '__main__':
     unittest.main()
-
-
-
-
-
-
-
-
-
