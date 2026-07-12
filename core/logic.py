@@ -1,6 +1,7 @@
 import json
 import pandas as pd
 import numpy as np
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from datetime import datetime as dt
 from core.config import (
@@ -8615,25 +8616,6 @@ def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
             trade_weekday=trade_weekday,
         ):
             return None
-        if (
-            trade_weekday == DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_WEEKDAY
-            and not _is_invalid_number(breadth_val)
-            and not _is_invalid_number(market_ratio)
-            and not _is_invalid_number(primary_score)
-            and not _is_invalid_number(open_vs_sma_atr)
-            and DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_BREADTH_MIN
-            <= float(breadth_val)
-            < DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_BREADTH_MAX
-            and DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_MARKET_RATIO_MIN
-            <= float(market_ratio)
-            < DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_MARKET_RATIO_MAX
-            and DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_SCORE_MIN
-            <= float(primary_score)
-            < DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_SCORE_MAX
-            and float(open_vs_sma_atr)
-            < DAYTRADE_PRIMARY_WEDNESDAY_MID_BREADTH_HOT_MARKET_HIGH_SCORE_LOW_OPEN_NO_TRADE_MAX_OPEN_VS_SMA_ATR
-        ):
-            return None
         if is_daytrade_primary_thursday_neutral_trend_filtered(
             open_vs_sma_atr,
             trade_date=trade_date,
@@ -8660,6 +8642,111 @@ def evaluate_daytrade_setup(price, open_p, prev_close, sma_med, breadth_val,
         "open_vs_sma_atr": open_vs_sma_atr,
         "rs_alpha": float(rs_alpha) if not _is_invalid_number(rs_alpha) else None,
     }
+@dataclass(frozen=True, slots=True)
+class DaytradeOpenMarketContext:
+    trade_date: object
+    feature_asof: object
+    open_asof: object
+    breadth_val: float
+    market_open: float
+    prev_market_close: float
+    prev_market_sma_trend: float
+    market_ratio: float
+    primary_market_allowed: bool
+    fallback_market_allowed: bool
+    strong_oversold_market_allowed: bool
+    catchup_market_allowed: bool
+    inverse_market_allowed: bool
+    inverse_pullback_market_allowed: bool
+    bull_etf_market_allowed: bool
+
+    def __post_init__(self):
+        trade_day = pd.Timestamp(self.trade_date).normalize()
+        feature_day = pd.Timestamp(self.feature_asof).normalize()
+        open_day = pd.Timestamp(self.open_asof).normalize()
+        if feature_day >= trade_day:
+            raise ValueError(
+                "daytrade open context requires feature_asof before trade_date"
+            )
+        if open_day != trade_day:
+            raise ValueError(
+                "daytrade open context requires the opening snapshot on trade_date"
+            )
+
+    @property
+    def trade_weekday(self):
+        return int(pd.Timestamp(self.trade_date).weekday())
+
+def build_daytrade_open_market_context(
+    *,
+    trade_date,
+    feature_asof,
+    open_asof,
+    breadth_val,
+    market_open,
+    prev_market_close,
+    prev_market_sma_trend,
+):
+    market_ratio = np.nan
+    if not _is_invalid_number(market_open) and not _is_invalid_number(prev_market_sma_trend):
+        previous_trend = float(prev_market_sma_trend)
+        if previous_trend > 0:
+            market_ratio = float(market_open) / previous_trend
+    return DaytradeOpenMarketContext(
+        trade_date=trade_date,
+        feature_asof=feature_asof,
+        open_asof=open_asof,
+        breadth_val=float(breadth_val),
+        market_open=float(market_open) if not _is_invalid_number(market_open) else np.nan,
+        prev_market_close=(
+            float(prev_market_close)
+            if not _is_invalid_number(prev_market_close)
+            else np.nan
+        ),
+        prev_market_sma_trend=(
+            float(prev_market_sma_trend)
+            if not _is_invalid_number(prev_market_sma_trend)
+            else np.nan
+        ),
+        market_ratio=market_ratio,
+        primary_market_allowed=is_daytrade_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        ),
+        fallback_market_allowed=is_daytrade_fallback_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        ),
+        strong_oversold_market_allowed=is_daytrade_strong_oversold_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        ),
+        catchup_market_allowed=is_daytrade_catchup_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+        ),
+        inverse_market_allowed=is_daytrade_inverse_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+            prev_market_close=prev_market_close,
+        ),
+        inverse_pullback_market_allowed=is_daytrade_inverse_pullback_market_allowed(
+            breadth_val,
+            market_open=market_open,
+            prev_market_sma_trend=prev_market_sma_trend,
+            prev_market_close=prev_market_close,
+        ),
+        bull_etf_market_allowed=is_daytrade_bull_etf_rebound_market_allowed(
+            breadth_val
+        ),
+    )
+
+
 def evaluate_daytrade_open_setup(open_p, prev_close, sma_med, breadth_val,
                                  prev_open=None, prev_atr=None, prev_low=None,
                                  prev_rsi2=None, rs_alpha=None, prev_prev_close=None,
@@ -9026,18 +9113,9 @@ def evaluate_daytrade_catchup_open_setups(
         "open_vs_sma_atr": open_vs_sma_atr,
     }
     setups = []
-    if (
-        symbol_trend_ratio > DAYTRADE_CATCHUP_GAPDOWN_MIN_SYMBOL_TREND_RATIO
-        and DAYTRADE_CATCHUP_GAPDOWN_MIN_GAP <= gap_pct < DAYTRADE_CATCHUP_GAPDOWN_MAX_GAP
-        and DAYTRADE_CATCHUP_GAPDOWN_MIN_PREV_RETURN <= prev_return <= DAYTRADE_CATCHUP_GAPDOWN_MAX_PREV_RETURN
-        and DAYTRADE_CATCHUP_GAPDOWN_MIN_RSI2 <= prev_rsi2 <= DAYTRADE_CATCHUP_GAPDOWN_MAX_RSI2
-        and rs_alpha >= DAYTRADE_CATCHUP_GAPDOWN_MIN_RS_ALPHA
-        and (
-            open_from_prev_low_atr is None
-            or open_from_prev_low_atr <= DAYTRADE_CATCHUP_GAPDOWN_MAX_OPEN_FROM_LOW_ATR
-        )
-    ):
-        setups.append({**common, "setup_type": "catchup_gapdown"})
+    # The broad catchup_gapdown family stayed net negative across the multi-year
+    # train sample and did not improve the monthly +20% hit count. Keep it out as
+    # one shared setup decision instead of fitting another narrow loss-pocket guard.
     if (
         symbol_trend_ratio > DAYTRADE_CATCHUP_RS_MIN_SYMBOL_TREND_RATIO
         and DAYTRADE_CATCHUP_RS_MIN_GAP <= gap_pct <= DAYTRADE_CATCHUP_RS_MAX_GAP
@@ -10589,7 +10667,13 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     "equity_notional_pct": primary_equity_notional_pct,
                     "risk_budget_pct": primary_risk_budget_pct,
                     "size_multiplier": primary_size_multiplier,
+                    "prev_return": metrics.get("prev_return"),
+                    "prev_rsi2": r2,
+                    "open_from_prev_low_atr": metrics.get("open_from_prev_low_atr"),
+                    "open_vs_sma_atr": metrics.get("open_vs_sma_atr"),
+                    "rs_alpha": rs,
                     "breadth_val": breadth_val,
+                    "market_ratio": market_ratio,
                     "small_account_probe": None,
                 })
                 continue
@@ -10682,6 +10766,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                     ),
                     "stop_mult": DAYTRADE_STRONG_OVERSOLD_STOP_MULT,
                     "target_mult": DAYTRADE_STRONG_OVERSOLD_TARGET_MULT,
+                    "prev_return": strong_oversold_metrics.get("prev_return"),
+                    "prev_rsi2": strong_oversold_metrics.get("prev_rsi2"),
+                    "open_from_prev_low_atr": strong_oversold_metrics.get("open_from_prev_low_atr"),
+                    "open_vs_sma_atr": strong_oversold_metrics.get("open_vs_trend_atr"),
+                    "rs_alpha": rs,
+                    "breadth_val": breadth_val,
                 })
         fallback_metrics = None
         if fallback_market_allowed and fallback_trend_allowed and (
@@ -10965,6 +11055,12 @@ def select_best_candidates(data_df, targets, symbols_df, regime, breadth_val=0.0
                         "equity_notional_pct": DAYTRADE_BULL_ETF_LOW_BREADTH_REBOUND_EQUITY_NOTIONAL_PCT,
                         "stop_mult": DAYTRADE_FALLBACK_INTRADAY_STOP_MULT,
                         "target_mult": DAYTRADE_FALLBACK_INTRADAY_TARGET_MULT,
+                        "prev_return": bull_etf_metrics.get("prev_return"),
+                        "prev_rsi2": bull_etf_metrics.get("prev_rsi2"),
+                        "open_vs_sma_atr": bull_etf_metrics.get("open_vs_sma_atr"),
+                        "rs_alpha": rs,
+                        "breadth_val": breadth_val,
+                        "market_ratio": market_ratio,
                     })
     return select_daytrade_candidates(
         candidates,
@@ -11120,6 +11216,11 @@ def calculate_lot_size(current_equity, atr, sl_mult, price, dynamic_leverage,
     if buying_power is not None:
         max_bp_shares = _floor_lot((buying_power * 0.95) // price)
         final_shares = min(final_shares, max_bp_shares)
+    if turnover is not None and not _is_invalid_number(turnover) and float(turnover) > 0:
+        max_liquidity_shares = _floor_lot(
+            (float(turnover) * float(LIQUIDITY_LIMIT_RATE)) // float(price)
+        )
+        final_shares = min(final_shares, max_liquidity_shares)
     return final_shares
 def cap_daytrade_position_size(
     raw_shares,

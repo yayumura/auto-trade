@@ -134,6 +134,92 @@ class TestJpJquantsFetcherV2(unittest.TestCase):
             self.assertEqual(float(merged.loc[1, "Open"]), 201.0)
             self.assertEqual(float(merged.loc[2, "Close"]), 202.5)
 
+    def test_fetch_daily_quotes_for_date_uses_bulk_date_query(self):
+        payload = {
+            "data": [
+                {
+                    "Date": "2026-07-10",
+                    "Code": "72030",
+                    "AdjO": 201.0,
+                    "AdjH": 202.0,
+                    "AdjL": 200.0,
+                    "AdjC": 201.5,
+                    "AdjVo": 2100,
+                },
+                {
+                    "Date": "2026-07-10",
+                    "Code": "13010",
+                    "AdjO": 101.0,
+                    "AdjH": 102.0,
+                    "AdjL": 100.0,
+                    "AdjC": 101.5,
+                    "AdjVo": 1100,
+                },
+            ]
+        }
+        with patch.object(fetcher, "_ensure_jquants_no_proxy"), patch.object(
+            fetcher.requests,
+            "get",
+            return_value=_FakeResponse(200, payload),
+        ) as get_mock:
+            frame = fetcher.fetch_daily_quotes_for_date("dummy-token", "20260710")
+
+        self.assertEqual(len(frame), 2)
+        self.assertEqual(list(frame["Open"]), [201.0, 101.0])
+        self.assertIn("date=20260710", get_mock.call_args.args[0])
+
+    def test_refresh_incremental_checkpoints_by_date_merges_each_ticker_once(self):
+        def _daily_frame(_api_key, target_date):
+            date_text = pd.Timestamp(target_date).strftime("%Y-%m-%d")
+            return pd.DataFrame(
+                [
+                    {
+                        "Date": date_text,
+                        "Code": "72030",
+                        "Open": 200.0,
+                        "High": 201.0,
+                        "Low": 199.0,
+                        "Close": 200.5,
+                        "Volume": 2000,
+                    },
+                    {
+                        "Date": date_text,
+                        "Code": "99990",
+                        "Open": 900.0,
+                        "High": 901.0,
+                        "Low": 899.0,
+                        "Close": 900.5,
+                        "Volume": 9000,
+                    },
+                ]
+            )
+
+        saved = {}
+
+        def _save(ticker_code, frame):
+            saved[ticker_code] = frame.copy()
+
+        with patch.object(
+            fetcher,
+            "fetch_daily_quotes_for_date",
+            side_effect=_daily_frame,
+        ) as fetch_mock, patch.object(
+            fetcher,
+            "_save_checkpoint_frame",
+            side_effect=_save,
+        ):
+            summary = fetcher.refresh_incremental_checkpoints_by_date(
+                api_key="dummy-token",
+                start_date="20260514",
+                end_date="20260517",
+                target_tickers=["7203"],
+            )
+
+        self.assertEqual(fetch_mock.call_count, 2)
+        self.assertEqual(summary, {"requested_dates": 2, "rows": 2, "tickers": 1})
+        self.assertEqual(list(saved), ["7203"])
+        self.assertEqual(len(saved["7203"]), 2)
+
     def test_save_checkpoint_frame_keeps_existing_history_when_candidate_is_shorter(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             existing = pd.DataFrame(

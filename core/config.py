@@ -97,6 +97,7 @@ WATCHLIST_FILE      = str(DATA_ROOT / "jp_watchlist.json")
 INTRADAY_SNAPSHOT_FILE = str(DATA_ROOT / "intraday_snapshots.csv")
 DAYTRADE_DECISION_LOG_FILE = str(DATA_ROOT / "daytrade_decisions.csv")
 DAYTRADE_EXIT_LOG_FILE = str(DATA_ROOT / "daytrade_exit_log.csv")
+DAYTRADE_PRODUCTION_SNAPSHOT_FILE = str(DATA_ROOT / "daytrade_production_snapshots.jsonl")
 ORDER_JOURNAL_FILE = str(DATA_ROOT / "order_journal.jsonl")
 
 # --- Day-trade production profile ---

@@ -191,6 +191,11 @@ def test_build_startup_recovery_report_blocks_on_unconfirmed_protective_stop_and
                 "ownership": "MANAGED_BY_BOT",
                 "protective_stop_status": "armed",
             },
+            {
+                "code": "3000",
+                "ownership": "MANAGED_BY_BOT",
+                "protective_stop_status": "failed",
+            },
         ],
         active_orders_info={"orders": [], "has_unknown": False, "unresolved_order_ids": []},
         order_journal_summary=None,
@@ -198,10 +203,10 @@ def test_build_startup_recovery_report_blocks_on_unconfirmed_protective_stop_and
     )
 
     assert report.protective_stop_pending_count == 1
-    assert report.protective_stop_orphan_count == 1
+    assert report.protective_stop_orphan_count == 2
     assert report.needs_manual_review is True
     assert "protective_stop_pending:1" in report.blocking_reasons
-    assert "protective_stop_orphan:1" in report.blocking_reasons
+    assert "protective_stop_orphan:2" in report.blocking_reasons
 
 
 def test_build_startup_recovery_report_blocks_on_missing_armed_protective_stop():

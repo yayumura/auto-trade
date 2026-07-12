@@ -127,6 +127,29 @@ def _make_broker(session):
     return broker
 
 
+def _valid_board_payload(price=1000.0):
+    return {
+        "CurrentPrice": price,
+        "BidPrice": price + 1.0,
+        "BidQty": 200,
+        "AskPrice": price,
+        "AskQty": 150,
+        "CurrentPriceStatus": 1,
+        "CurrentPriceTime": "2026-07-11T09:30:00+09:00",
+        "QuoteTime": "2026-07-11T09:30:00+09:00",
+        "OpeningPrice": price - 5.0,
+        "OpeningPriceTime": "2026-07-11T09:00:00+09:00",
+        "HighPrice": price + 10.0,
+        "LowPrice": price - 10.0,
+        "TradingVolume": 1_000_000,
+        "PreviousClose": price - 2.0,
+        "UpperLimit": price + 300.0,
+        "LowerLimit": price - 300.0,
+    }
+
+
+
+
 def _write_live_write_attestation_artifact(
     tmpdir: str,
     *,
@@ -3688,12 +3711,33 @@ class TestKabucomBroker(unittest.TestCase):
 
         with patch("core.portfolio_state.safe_read_json", return_value=None), \
             patch("core.portfolio_state.safe_read_csv", return_value=pd.DataFrame([
-                {"code": "1234", "execution_id": "EX-1", "execution_ids": ["EX-1", "EX-2"], "buy_time": "2026-04-21 09:00:00", "highest_price": 1000.0, "partial_sold": False}
+                {
+                    "code": "1234",
+                    "execution_id": "EX-1",
+                    "execution_ids": ["EX-1", "EX-2"],
+                    "buy_time": "2026-04-21 09:00:00",
+                    "highest_price": 1000.0,
+                    "partial_sold": False,
+                    "setup_type": "primary",
+                    "buy_atr": 25.0,
+                    "entry_stop_price": 875.0,
+                    "entry_target_price": 1050.0,
+                    "decision_snapshot_id": "snapshot-1",
+                    "protective_stop_order_id": "STOP-1",
+                    "protective_stop_status": "armed",
+                }
             ])):
             positions = broker.get_positions()
 
         self.assertEqual(positions[0]["ownership"], "MANAGED_BY_BOT")
         self.assertEqual(positions[0]["ownership_reason"], "matched_execution_id")
+        self.assertEqual(positions[0]["setup_type"], "primary")
+        self.assertEqual(positions[0]["buy_atr"], 25.0)
+        self.assertEqual(positions[0]["entry_stop_price"], 875.0)
+        self.assertEqual(positions[0]["entry_target_price"], 1050.0)
+        self.assertEqual(positions[0]["decision_snapshot_id"], "snapshot-1")
+        self.assertEqual(positions[0]["protective_stop_order_id"], "STOP-1")
+        self.assertEqual(positions[0]["protective_stop_status"], "armed")
 
     def test_get_positions_live_marks_managed_by_bot_using_any_execution_id_in_execution_ids(self):
         broker = _make_broker(_FakeSession([]))
@@ -4038,4 +4082,117 @@ class TestKabucomBroker(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    def test_get_board_snapshot_batch_returns_all_successes_and_preserves_pacing(self):
+        broker = _make_broker(_FakeSession([]))
+        calls = []
+
+        def fake_api_request(method, endpoint, **kwargs):
+            calls.append((method, endpoint, kwargs))
+            price = 1000.0 if "1000@1" in endpoint else 2000.0
+            return _FakeResponse(200, _valid_board_payload(price))
+
+        broker._api_request = fake_api_request
+        with patch("core.kabucom_broker.time.sleep") as mocked_sleep:
+            result = broker.get_board_snapshot_batch(["1000.T", "2000"])
+
+        self.assertEqual(result.requested, ("1000", "2000"))
+        self.assertEqual(set(result.observations), {"1000", "2000"})
+        self.assertEqual(result.failures, {})
+        self.assertEqual(result.observations["1000"]["open"], 995.0)
+        self.assertEqual(result.observations["2000"]["price"], 2000.0)
+        self.assertLessEqual(result.started_at, result.completed_at)
+        self.assertEqual([call[1] for call in calls], ["board/1000@1", "board/2000@1"])
+        self.assertEqual(mocked_sleep.call_count, 2)
+        mocked_sleep.assert_called_with(0.1)
+
+    def test_get_board_snapshot_batch_preserves_partial_transport_and_http_failures(self):
+        broker = _make_broker(_FakeSession([]))
+
+        def fake_api_request(method, endpoint, **kwargs):
+            if "1000@1" in endpoint:
+                return _FakeResponse(200, _valid_board_payload())
+            if "2000@1" in endpoint:
+                return None
+            return _FakeResponse(503, text="service unavailable")
+
+        broker._api_request = fake_api_request
+        with patch("core.kabucom_broker.time.sleep") as mocked_sleep:
+            result = broker.get_board_snapshot_batch(["1000", "2000", "3000"])
+
+        self.assertEqual(set(result.observations), {"1000"})
+        self.assertEqual(result.failures["2000"].reason, "transport")
+        self.assertEqual(result.failures["3000"].reason, "http")
+        self.assertEqual(result.failures["3000"].http_status, 503)
+        self.assertEqual(result.failures["3000"].detail, "service unavailable")
+        self.assertEqual(mocked_sleep.call_count, 3)
+
+    def test_get_board_snapshot_batch_preserves_invalid_quote_reason(self):
+        broker = _make_broker(_FakeSession([]))
+        payload = _valid_board_payload()
+        payload["CurrentPriceStatus"] = 3
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(200, payload)
+
+        with patch("core.kabucom_broker.time.sleep"):
+            result = broker.get_board_snapshot_batch(["1000"])
+
+        self.assertEqual(result.observations, {})
+        failure = result.failures["1000"]
+        self.assertEqual(failure.reason, "invalid_quote")
+        self.assertEqual(failure.quote_rejection_reason, "special_quote_status_3")
+        self.assertEqual(failure.detail, "special_quote_status_3")
+
+    def test_get_board_snapshot_batch_classifies_malformed_json(self):
+        broker = _make_broker(_FakeSession([]))
+
+        class MalformedJsonResponse:
+            status_code = 200
+            text = "not-json"
+
+            def json(self):
+                raise ValueError("invalid json")
+
+        broker._api_request = lambda *args, **kwargs: MalformedJsonResponse()
+        with patch("core.kabucom_broker.time.sleep"):
+            result = broker.get_board_snapshot_batch(["1000"])
+
+        failure = result.failures["1000"]
+        self.assertEqual(failure.reason, "malformed_json")
+        self.assertEqual(failure.http_status, 200)
+        self.assertIn("invalid json", failure.detail)
+
+    def test_get_board_snapshot_batch_returns_no_token_failure_without_requests(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.token = None
+        broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("API should not be called")
+        )
+
+        with patch("core.kabucom_broker.time.sleep") as mocked_sleep:
+            result = broker.get_board_snapshot_batch(["1000.T", "2000"])
+
+        self.assertEqual(result.requested, ("1000", "2000"))
+        self.assertEqual(result.observations, {})
+        self.assertEqual(result.failures["1000"].reason, "no_token")
+        self.assertEqual(result.failures["2000"].reason, "no_token")
+        mocked_sleep.assert_not_called()
+
+    def test_get_board_data_legacy_wrapper_returns_only_successful_observations(self):
+        broker = _make_broker(_FakeSession([]))
+
+        def fake_api_request(method, endpoint, **kwargs):
+            if "1000@1" in endpoint:
+                return _FakeResponse(200, _valid_board_payload())
+            invalid = _valid_board_payload(2000.0)
+            invalid["AskPrice"] = 2100.0
+            return _FakeResponse(200, invalid)
+
+        broker._api_request = fake_api_request
+        with patch("core.kabucom_broker.time.sleep"):
+            legacy = broker.get_board_data(["1000", "2000"])
+
+        self.assertEqual(set(legacy), {"1000"})
+        self.assertEqual(legacy["1000"]["price"], 1000.0)
+        self.assertEqual(legacy["1000"]["open"], 995.0)
+
+
     unittest.main()

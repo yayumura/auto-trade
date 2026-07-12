@@ -45,6 +45,7 @@ DEFAULT_OUTPUT_PATH = str(REPO_ROOT / "data_cache" / "jp_broad" / "jp_mega_cache
 DEFAULT_START_DATE = "20210405"
 DEFAULT_REFRESH_OVERLAP_DAYS = 7
 DEFAULT_MAX_WORKERS = 4
+DEFAULT_BULK_REFRESH_MAX_DAYS = 31
 _REFRESH_BACKUP_TAG = None
 
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -771,6 +772,93 @@ def fetch_ticker_turbo(ticker_code, api_key, from_date, to_date):
     return f"FAIL:{_normalize_ticker_code(ticker_code)}:exhausted_retries"
 
 
+def fetch_daily_quotes_for_date(api_key, target_date):
+    """Fetch every listed issue for one date using the official bulk-date query."""
+    _ensure_jquants_no_proxy()
+    normalized_date = pd.Timestamp(target_date).strftime("%Y%m%d")
+    url = f"https://api.jquants.com/v2/equities/bars/daily?date={normalized_date}"
+    headers = {"x-api-key": api_key}
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                response_json = resp.json()
+                return _normalize_quote_frame(pd.DataFrame(response_json.get("data", [])), "")
+            if resp.status_code == 429:
+                time.sleep(10 * (attempt + 1))
+                continue
+            if resp.status_code == 401:
+                raise RuntimeError("J-Quants token expired or invalid during bulk refresh.")
+            floor_date = _extract_subscription_floor_date_from_text(resp.text)
+            if resp.status_code == 400 and floor_date:
+                raise RuntimeError(
+                    f"Bulk refresh date {normalized_date} is before subscription floor {floor_date}."
+                )
+            raise RuntimeError(
+                f"Bulk refresh failed for {normalized_date}: "
+                f"status={resp.status_code} body={_shorten_text(resp.text)}"
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            if attempt == 2:
+                raise RuntimeError(
+                    f"Bulk refresh failed for {normalized_date}: exception={_shorten_text(exc)}"
+                ) from exc
+            time.sleep(2)
+    raise RuntimeError(f"Bulk refresh exhausted retries for {normalized_date}.")
+
+
+def refresh_incremental_checkpoints_by_date(api_key, start_date, end_date, target_tickers):
+    """Refresh a short incremental window with one API request per business date."""
+    normalized_targets = {_normalize_ticker_code(code) for code in target_tickers}
+    requested_dates = [
+        timestamp
+        for timestamp in pd.date_range(
+            pd.Timestamp(str(start_date)),
+            pd.Timestamp(str(end_date)),
+            freq="D",
+        )
+        if timestamp.weekday() < 5
+    ]
+    daily_frames = []
+    for target_date in requested_dates:
+        frame = fetch_daily_quotes_for_date(api_key, target_date)
+        if frame.empty:
+            print(f"Bulk refresh {target_date.date()}: no rows.")
+            continue
+        frame = frame.copy()
+        frame["_TickerCode"] = frame["Code"].astype(str).str.slice(0, 4)
+        frame = frame[frame["_TickerCode"].isin(normalized_targets)]
+        if not frame.empty:
+            daily_frames.append(frame)
+        print(f"Bulk refresh {target_date.date()}: {len(frame)} target rows.")
+
+    if not daily_frames:
+        return {
+            "requested_dates": len(requested_dates),
+            "rows": 0,
+            "tickers": 0,
+        }
+
+    combined = pd.concat(daily_frames, ignore_index=True)
+    grouped = list(combined.groupby("_TickerCode", sort=True))
+    for index, (ticker_code, frame) in enumerate(grouped, start=1):
+        _save_checkpoint_frame(
+            ticker_code,
+            frame.drop(columns=["_TickerCode"]).reset_index(drop=True),
+        )
+        if index % 500 == 0:
+            print(f"Bulk checkpoint merge: {index}/{len(grouped)} tickers.")
+
+    return {
+        "requested_dates": len(requested_dates),
+        "rows": len(combined),
+        "tickers": len(grouped),
+    }
+
+
 def fetch_jquants_v2_turbo_revelation(
     output_path=DEFAULT_OUTPUT_PATH,
     start_date=None,
@@ -862,9 +950,35 @@ def fetch_jquants_v2_turbo_revelation(
     print(f"CHECKPOINTED TICKERS: {len(checkpointed_tickers)}")
     print(f"TARGET TICKERS: {len(target_tickers)} of {len(ticker_codes)}")
 
+    bulk_refresh_used = False
+    refresh_span_days = (
+        pd.Timestamp(str(end_date)) - pd.Timestamp(str(effective_start_date))
+    ).days + 1
+    if (
+        target_tickers
+        and incremental_mode
+        and refresh_span_days <= DEFAULT_BULK_REFRESH_MAX_DAYS
+    ):
+        try:
+            bulk_summary = refresh_incremental_checkpoints_by_date(
+                api_key=api_key,
+                start_date=effective_start_date,
+                end_date=end_date,
+                target_tickers=target_tickers,
+            )
+            print(
+                "Bulk incremental refresh completed: "
+                f"dates={bulk_summary['requested_dates']} "
+                f"rows={bulk_summary['rows']} "
+                f"tickers={bulk_summary['tickers']}"
+            )
+            bulk_refresh_used = True
+        except RuntimeError as exc:
+            print(f"Bulk incremental refresh unavailable; falling back to per-ticker fetch: {exc}")
+
     if not target_tickers:
         print("All tickers already fetched. Proceeding to consolidation...")
-    else:
+    elif not bulk_refresh_used:
         with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
             future_to_ticker = {
                 executor.submit(fetch_ticker_turbo, code, api_key, effective_start_date, end_date): code

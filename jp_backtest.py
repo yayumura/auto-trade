@@ -173,6 +173,11 @@ def _summarize_window(
     day_key_set = set(window_day_keys)
     boundary_day_keys = global_day_keys if global_day_keys is not None else daily_stats.keys()
     week_bounds, month_bounds = _build_global_period_boundaries(boundary_day_keys)
+    global_month_keys = sorted(month_bounds)
+    unprovable_edge_months = set()
+    if global_month_keys:
+        unprovable_edge_months.add(global_month_keys[0])
+        unprovable_edge_months.add(global_month_keys[-1])
     window_trades = _filter_trade_log_window(trade_log, start_date=start_date, end_date=end_date)
     trade_results = [float(item["net_pnl"]) for item in window_trades]
 
@@ -200,6 +205,7 @@ def _summarize_window(
     period_active_trade_days = 0
 
     week_stats = {}
+    return_month_stats = {}
     month_totals = {}
     month_active = {}
 
@@ -222,6 +228,16 @@ def _summarize_window(
 
         worst_day = day_pnl if worst_day is None else min(worst_day, day_pnl)
         best_day = day_pnl if best_day is None else max(best_day, day_pnl)
+
+        return_month_key = day_key[:7]
+        return_month_record = return_month_stats.setdefault(
+            return_month_key,
+            {
+                "start_equity": float(item["equity"]) - day_pnl,
+                "pnl": 0.0,
+            },
+        )
+        return_month_record["pnl"] += day_pnl
 
         if day_key < warmup_start:
             continue
@@ -247,6 +263,8 @@ def _summarize_window(
 
     full_month_rates = []
     for month_key, total in sorted(month_totals.items()):
+        if month_key in unprovable_edge_months:
+            continue
         month_bound = month_bounds[month_key]
         # Segmented monthly stats are counted only when the full calendar month is inside the window.
         if month_bound["first"] not in day_key_set or month_bound["last"] not in day_key_set:
@@ -254,6 +272,21 @@ def _summarize_window(
         if total <= 0:
             continue
         full_month_rates.append(month_active.get(month_key, 0) / total)
+
+    full_month_returns = []
+    for month_key, month_record in sorted(return_month_stats.items()):
+        if month_key in unprovable_edge_months:
+            continue
+        month_bound = month_bounds[month_key]
+        if month_bound["first"] not in day_key_set or month_bound["last"] not in day_key_set:
+            continue
+        month_start_equity = float(month_record["start_equity"])
+        month_return = (
+            float(month_record["pnl"]) / month_start_equity
+            if month_start_equity > 0
+            else 0.0
+        )
+        full_month_returns.append(month_return)
 
     plus_day_rate = (plus_days / active_days * 100.0) if active_days > 0 else 0.0
     trade_day_rate = (period_active_trade_days / len(window_day_keys) * 100.0) if window_day_keys else 0.0
@@ -282,6 +315,8 @@ def _summarize_window(
         "best_day": best_day if best_day is not None else 0.0,
         "worst_day": worst_day if worst_day is not None else 0.0,
         "full_month_rates": full_month_rates,
+        "full_month_returns": full_month_returns,
+        "months_ge_20pct": sum(1 for value in full_month_returns if value >= 0.20),
         "plus_1pct_weeks": plus_1pct_weeks,
         "positive_weeks": positive_weeks,
         "week_count": len(week_stats),
@@ -325,6 +360,14 @@ def _print_window_summary(summary):
         print("AVG MONTH ACTIVE RATE: N/A (window does not contain a full calendar month)")
         print("MONTHS >= 3/4 ACTIVE: N/A")
 
+    if summary["full_month_returns"]:
+        print(
+            f"MONTHS >= +20%: {summary['months_ge_20pct']}/"
+            f"{len(summary['full_month_returns'])}"
+        )
+    else:
+        print("MONTHS >= +20%: N/A")
+
     if summary["week_count"] > 0:
         print(f"WEEKS >= +1%:  {summary['plus_1pct_weeks']}/{summary['week_count']}")
         print(f"POSITIVE WEEKS: {summary['positive_weeks']}/{summary['week_count']}")
@@ -364,6 +407,10 @@ def run_jp_broad_backtest(
     standalone_latest_months=0,
     standalone_initial_cash=float(INITIAL_CASH),
 ):
+    print(
+        "REFERENCE-ONLY: daily OHLC backtest is not production-equivalent. "
+        "Use jp_production_replay.py for observed board/order/exit validation."
+    )
     _refresh_cache_if_requested(
         cache_path=cache_path,
         refresh_cache=refresh_cache,

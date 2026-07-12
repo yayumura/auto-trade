@@ -6,6 +6,7 @@ from core.logic import (
     cap_daytrade_position_size,
     calculate_all_technicals_v12,
     calculate_lot_size,
+    build_daytrade_open_market_context,
     compute_daytrade_rebound_trigger,
     evaluate_daytrade_setup,
     evaluate_daytrade_open_setup,
@@ -140,6 +141,41 @@ from core.logic import (
     DAYTRADE_SELECTED_WEDNESDAY_NONPOSITIVE_GAP_NO_TRADE_MAX_LEVERAGE,
 )
 class TestLogic(unittest.TestCase):
+    def test_daytrade_open_market_context_enforces_point_in_time_boundaries(self):
+        context = build_daytrade_open_market_context(
+            trade_date="2026-07-13",
+            feature_asof="2026-07-10",
+            open_asof="2026-07-13",
+            breadth_val=0.60,
+            market_open=2_800.0,
+            prev_market_close=2_790.0,
+            prev_market_sma_trend=2_700.0,
+        )
+
+        self.assertEqual(context.trade_weekday, 0)
+        self.assertAlmostEqual(context.market_ratio, 2_800.0 / 2_700.0)
+
+        with self.assertRaisesRegex(ValueError, "feature_asof before trade_date"):
+            build_daytrade_open_market_context(
+                trade_date="2026-07-13",
+                feature_asof="2026-07-13",
+                open_asof="2026-07-13",
+                breadth_val=0.60,
+                market_open=2_800.0,
+                prev_market_close=2_790.0,
+                prev_market_sma_trend=2_700.0,
+            )
+
+        with self.assertRaisesRegex(ValueError, "opening snapshot on trade_date"):
+            build_daytrade_open_market_context(
+                trade_date="2026-07-13",
+                feature_asof="2026-07-10",
+                open_asof="2026-07-10",
+                breadth_val=0.60,
+                market_open=2_800.0,
+                prev_market_close=2_790.0,
+                prev_market_sma_trend=2_700.0,
+            )
     def _board_lot_candidate(
         self,
         code,
@@ -4269,6 +4305,19 @@ class TestLogic(unittest.TestCase):
             ),
             0,
         )
+        self.assertEqual(
+            calculate_lot_size(
+                current_equity=1_000_000,
+                atr=10.0,
+                sl_mult=3.0,
+                price=1_000.0,
+                dynamic_leverage=1.2,
+                max_positions=1,
+                buying_power=2_000_000,
+                turnover=20_000_000,
+            ),
+            500,
+        )
     def test_daytrade_open_setup_accepts_small_prior_pullback(self):
         accepted = evaluate_daytrade_open_setup(
             open_p=100.2,
@@ -4296,6 +4345,24 @@ class TestLogic(unittest.TestCase):
         )
         self.assertIsNotNone(accepted)
         self.assertIsNone(rejected)
+    def test_daytrade_live_setup_handles_wednesday_without_undefined_sizing_context(self):
+        metrics = evaluate_daytrade_setup(
+            price=104.7,
+            open_p=104.2,
+            prev_close=104.0,
+            sma_med=100.0,
+            breadth_val=0.72,
+            prev_open=103.0,
+            prev_atr=2.0,
+            prev_low=102.8,
+            rs_alpha=24.0,
+            rsi2=45.0,
+            prev_prev_close=103.0,
+            trade_weekday=2,
+        )
+
+        self.assertIsNotNone(metrics)
+        self.assertAlmostEqual(metrics["open_vs_sma_atr"], 2.0)
     def test_daytrade_primary_setup_avoids_mid_breadth_gap_chase(self):
         blocked_open = evaluate_daytrade_open_setup(
             open_p=101.0,
@@ -5345,7 +5412,7 @@ class TestLogic(unittest.TestCase):
             score_daytrade_fallback_open_setup(structured, prev_rsi2=60.0, rs_alpha=33.0),
             score_daytrade_fallback_open_setup(compressed, prev_rsi2=60.0, rs_alpha=40.0),
         )
-    def test_daytrade_catchup_setups_cover_gapdown_and_strong_rs(self):
+    def test_daytrade_catchup_setups_disable_negative_gapdown_family_and_keep_strong_rs(self):
         gapdown = evaluate_daytrade_catchup_open_setups(
             open_p=97.1,
             prev_close=100.0,
@@ -5382,11 +5449,9 @@ class TestLogic(unittest.TestCase):
             prev_prev_close=99.0,
             prev_sma_trend=98.0,
         )
-        self.assertEqual(gapdown[0]["setup_type"], "catchup_gapdown")
+        self.assertEqual(gapdown, [])
         self.assertEqual(strong_rs[0]["setup_type"], "catchup_rs")
         self.assertFalse(any(item["setup_type"] == "catchup_gapdown" for item in shallow_gap))
-        self.assertAlmostEqual(DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT, 0.50)
-        self.assertGreater(score_daytrade_catchup_open_setup(gapdown[0]), 4.0)
         self.assertGreater(score_daytrade_catchup_open_setup(strong_rs[0]), 4.0)
     def test_daytrade_inverse_open_setup_is_riskoff_only(self):
         accepted = evaluate_daytrade_inverse_open_setup(

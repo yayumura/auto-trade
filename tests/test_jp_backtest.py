@@ -86,6 +86,26 @@ class TestJpBacktestWindowing(unittest.TestCase):
         self.assertEqual(summary["plus_1pct_weeks"], 1)
         self.assertEqual(summary["positive_weeks"], 1)
         self.assertEqual(summary["full_month_rates"], [])
+        self.assertEqual(summary["full_month_returns"], [])
+        self.assertEqual(summary["months_ge_20pct"], 0)
+
+    def test_segmented_summary_reports_full_month_twenty_percent_target(self):
+        daily_stats = {
+            "2026-03-02": {"equity": 100.0, "day_pnl": 0.0, "trade_count": 0},
+            "2026-03-31": {"equity": 120.0, "day_pnl": 20.0, "trade_count": 1},
+        }
+        summary = _summarize_window(
+            daily_stats=daily_stats,
+            trade_log=[{"day_key": "2026-03-31", "net_pnl": 20.0}],
+            label="TRAIN",
+            start_date="2026-03-02",
+            end_date="2026-03-31",
+            warmup_start="2026-01-01",
+            global_day_keys=["2026-02-27", "2026-03-02", "2026-03-31", "2026-04-01"],
+        )
+
+        self.assertEqual(summary["full_month_returns"], [0.20])
+        self.assertEqual(summary["months_ge_20pct"], 1)
 
 
 class TestJpBacktestHarness(unittest.TestCase):

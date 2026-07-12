@@ -137,6 +137,25 @@ class BrokerEndpointConfig:
             )
         return BrokerEndpointConfig(self.environment, expected_port, normalized_base_url)
 
+
+@dataclass(frozen=True)
+class BoardFetchFailure:
+    symbol: str
+    reason: str
+    detail: str | None = None
+    http_status: int | None = None
+    quote_rejection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class BoardBatchResult:
+    requested: tuple[str, ...]
+    observations: dict[str, dict]
+    failures: dict[str, BoardFetchFailure]
+    started_at: datetime
+    completed_at: datetime
+
+
 class KabucomBroker(BaseBroker):
     """
     auカブコム証券（kabuステーションAPI）と通信するBrokerクラス。
@@ -1046,7 +1065,11 @@ class KabucomBroker(BaseBroker):
                 ownership = "UNMANAGED"
                 ownership_reason = "no_local_match"
 
-            final_positions.append({
+            # Broker fields are authoritative for quantity, price and routing,
+            # while the local record is authoritative for bot decision / risk
+            # metadata that the positions API does not return.
+            merged_position = dict(hist or {})
+            merged_position.update({
                 "code": code_sym, 
                 "name": p.get('SymbolName', ''), 
                 "shares": leaves_qty,
@@ -1065,6 +1088,7 @@ class KabucomBroker(BaseBroker):
                 "ownership": ownership,
                 "ownership_reason": ownership_reason,
             })
+            final_positions.append(merged_position)
         return final_positions
 
     def _build_close_positions_for_symbol(
@@ -1993,50 +2017,122 @@ class KabucomBroker(BaseBroker):
         print("🛑 unregister/all は安全上の理由で無効化されています。")
         return False
 
+    def get_board_snapshot_batch(self, symbols: list) -> BoardBatchResult:
+        """Fetch a fail-closed board snapshot while preserving per-symbol failures."""
+        requested = tuple(str(symbol).replace(".T", "") for symbol in symbols)
+        started_at = datetime.now(JST)
+        observations = {}
+        failures = {}
+
+        if not self.token:
+            for code in requested:
+                failures[code] = BoardFetchFailure(symbol=code, reason="no_token")
+            return BoardBatchResult(
+                requested=requested,
+                observations=observations,
+                failures=failures,
+                started_at=started_at,
+                completed_at=datetime.now(JST),
+            )
+
+        for code in requested:
+            try:
+                response = self._api_request("GET", f"board/{code}@1", timeout=5)
+            except Exception as exc:
+                failures[code] = BoardFetchFailure(
+                    symbol=code,
+                    reason="transport",
+                    detail=str(exc),
+                )
+                response = None
+            finally:
+                # Preserve the existing per-symbol pacing to avoid API bursts.
+                time.sleep(0.1)
+
+            if code in failures:
+                continue
+            if response is None:
+                failures[code] = BoardFetchFailure(symbol=code, reason="transport")
+                continue
+            status_code = getattr(response, "status_code", None)
+            if status_code != 200:
+                failures[code] = BoardFetchFailure(
+                    symbol=code,
+                    reason="http",
+                    detail=str(getattr(response, "text", "") or "") or None,
+                    http_status=int(status_code) if status_code is not None else None,
+                )
+                continue
+            try:
+                data = response.json()
+            except Exception as exc:
+                failures[code] = BoardFetchFailure(
+                    symbol=code,
+                    reason="malformed_json",
+                    detail=str(exc),
+                    http_status=200,
+                )
+                continue
+            if not isinstance(data, dict):
+                failures[code] = BoardFetchFailure(
+                    symbol=code,
+                    reason="malformed_json",
+                    detail=f"expected object, got {type(data).__name__}",
+                    http_status=200,
+                )
+                continue
+
+            quote = parse_board_quote(code, data)
+            if not quote.is_valid:
+                print(f"⚠️ 板情報スキップ: {code} ({quote.rejection_reason})")
+                failures[code] = BoardFetchFailure(
+                    symbol=code,
+                    reason="invalid_quote",
+                    detail=quote.rejection_reason,
+                    http_status=200,
+                    quote_rejection_reason=quote.rejection_reason,
+                )
+                continue
+
+            received_at = datetime.now(JST)
+            observations[code] = {
+                "symbol": quote.symbol,
+                "price": quote.current_price,
+                "current_price": quote.current_price,
+                "best_sell_price": quote.best_sell_price,
+                "best_sell_qty": quote.best_sell_qty,
+                "best_buy_price": quote.best_buy_price,
+                "best_buy_qty": quote.best_buy_qty,
+                "quote_timestamp": quote.quote_timestamp,
+                "current_price_timestamp": quote.current_price_timestamp,
+                "bid_timestamp": quote.bid_timestamp,
+                "ask_timestamp": quote.ask_timestamp,
+                "opening_price_timestamp": quote.opening_price_timestamp,
+                "received_at": quote.received_at or received_at,
+                "bid_sign_raw": quote.bid_sign_raw,
+                "ask_sign_raw": quote.ask_sign_raw,
+                "current_price_status": quote.current_price_status,
+                "open": data.get("OpeningPrice"),
+                "high": data.get("HighPrice"),
+                "low": data.get("LowPrice"),
+                "volume": data.get("TradingVolume"),
+                "prev_close": data.get("PreviousClose"),
+                "upper_limit": quote.upper_limit,
+                "lower_limit": quote.lower_limit,
+                "is_valid": quote.is_valid,
+            }
+
+        return BoardBatchResult(
+            requested=requested,
+            observations=observations,
+            failures=failures,
+            started_at=started_at,
+            completed_at=datetime.now(JST),
+        )
+
     def get_board_data(self, symbols: list) -> dict:
-        """ [Professional Audit] 制限値幅を含めた板時価情報を取得する """
-        results = {}
-        if not self.token: return results
-        
-        for s in symbols:
-            code = str(s).replace(".T", "")
-            res = self._api_request("GET", f"board/{code}@1", timeout=5)
-            # [Professional Audit] 連続リクエストによる API サーバーへの瞬間負荷 (Burst) を抑制する
-            time.sleep(0.1)
-            if res and res.status_code == 200:
-                data = res.json()
-                quote = parse_board_quote(code, data)
-                if not quote.is_valid:
-                    print(f"⚠️ 板情報スキップ: {code} ({quote.rejection_reason})")
-                    continue
-                received_at = datetime.now(JST)
-                results[code] = {
-                    "symbol": quote.symbol,
-                    "price": quote.current_price,
-                    "current_price": quote.current_price,
-                    "best_sell_price": quote.best_sell_price,
-                    "best_sell_qty": quote.best_sell_qty,
-                    "best_buy_price": quote.best_buy_price,
-                    "best_buy_qty": quote.best_buy_qty,
-                    "quote_timestamp": quote.quote_timestamp,
-                    "current_price_timestamp": quote.current_price_timestamp,
-                    "bid_timestamp": quote.bid_timestamp,
-                    "ask_timestamp": quote.ask_timestamp,
-                    "opening_price_timestamp": quote.opening_price_timestamp,
-                    "received_at": quote.received_at or received_at,
-                    "bid_sign_raw": quote.bid_sign_raw,
-                    "ask_sign_raw": quote.ask_sign_raw,
-                    "current_price_status": quote.current_price_status,
-                    "open": data.get('OpeningPrice'),
-                    "high": data.get('HighPrice'),
-                    "low": data.get('LowPrice'),
-                    "volume": data.get('TradingVolume'),
-                    "prev_close": data.get('PreviousClose'),
-                    "upper_limit": quote.upper_limit,
-                    "lower_limit": quote.lower_limit,
-                    "is_valid": quote.is_valid,
-                }
-        return results
+        """Return the legacy successful-observation mapping."""
+        return dict(self.get_board_snapshot_batch(symbols).observations)
 
     def execute_chase_order(self, code: str, shares: int, action: StockOrderAction, atr: float = 0) -> dict:
         """

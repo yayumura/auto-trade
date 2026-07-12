@@ -6,9 +6,9 @@
 
 ## Current Baseline
 
-- As of 2026-07-09
+- As of 2026-07-11
 
-- Latest data: 2026-07-07
+- Latest data: 2026-07-10
 
 - 採用中ロジック:
 
@@ -299,13 +299,11 @@
 
   - 木曜の breadth `< 0.55` / `open_vs_sma_atr 1.0-2.0` `fallback` は、selected base leverage を `0.00` に制限
 
-  - `prev_return > 0` かつ `market_ratio >= 1.00` の `catchup_gapdown` は、selected base leverage を `0.00` に制限
-
-  - `market_ratio >= 1.15` の `catchup_gapdown` は、hot market veto として selected base leverage を `0.00` に制限
+  - broad `catchup_gapdown` family は、複数年 train で net negative かつ月次 `+20%` 達成本数を改善しないため、shared setup 全体を no-trade にする
 
   - breadth `< 0.55` / `market_ratio >= 1.15` / score `12-16` の `catchup_rs` は、selected base leverage を `0.00` に制限
 
-  - breadth `< 0.55` / `market_ratio >= 1.15` の fragile hot market では、`primary` を `1.00`、`catchup_rs` を `0.00`、`catchup_gapdown` を `0.10`、`fallback` を `0.10` に制限
+  - breadth `< 0.55` / `market_ratio >= 1.15` の fragile hot market では、`primary` を `1.00`、`catchup_rs` を `0.00`、`fallback` を `0.10` に制限
 
   - breadth `< 0.60` / `market_ratio >= 1.20` / `score <= 8.0` / 非マイナス gap の `primary` は、selected base leverage を `0.00` に制限
 
@@ -321,7 +319,7 @@
 
   - breadth `0.55-0.70` / `market_ratio 1.05-1.15` / gap `>= 1.5%` / score `10-14` / 前日上昇 `>= 3.5%` の `primary` は、equity notional 上限を `0.75` に制限
 
-  - `100万円` 近辺の small-account では、`catchup_rs` / `catchup_gapdown` の 1-board-lot が risk / equity cap の範囲に収まるときだけ、notional cap より実行可能性を優先
+  - `100万円` 近辺の small-account では、`catchup_rs` の 1-board-lot が risk / equity cap の範囲に収まるときだけ、notional cap より実行可能性を優先
 
   - `100万円` 近辺の small-account では、hot / mid-score `catchup_rs` の board-lot を無理に建てない
 
@@ -335,20 +333,33 @@
 
 - `primary` の Monday / Tuesday / Thursday near-neutral / low-score / small-gap pocket は、breadth < 0.55 と breadth 0.58-0.70、open_vs_sma_atr 1.0-2.0 の 2 帯で selected base leverage を `0.03` に制限する
 
-- 最新確認値:
-- `FINAL EQUITY: 64,776,730円`
-- `CLOSED TRADES: 392`
-- `WIN RATE: 73.72%`
-- `WEEKS >= +1%: 101/227`
-- `POSITIVE WEEKS: 161/227`
-- `TOTAL RETURN: +6377.67%`
-- `PROFIT_FACTOR: 22.67`
-- `AVG MONTH ACTIVE RATE: 36.81%`
-- `MED MONTH ACTIVE RATE: 33.33%`
-- `MONTHS >= 50% ACTIVE: 11/53`
-- `MONTHS >= 2/3 ACTIVE: 3/53`
-- `MONTHS >= 3/4 ACTIVE: 2/53`
-- `WORST DAY: -296,622円`
+- 最新確認値（FULL / daily OHLC reference-only）:
+- `FINAL EQUITY: 600,707,511円`
+- `CLOSED TRADES: 406`
+- `WIN RATE: 67.24%`
+- `WEEKS >= +1%: 103/228`
+- `POSITIVE WEEKS: 160/228`
+- `TOTAL RETURN: +59970.75%`
+- `PROFIT_FACTOR: 21.64`
+- `AVG MONTH ACTIVE RATE: 38.11%`
+- `MED MONTH ACTIVE RATE: 38.10%`
+- `MONTHS >= 50% ACTIVE: 13/52`
+- `MONTHS >= 2/3 ACTIVE: 3/52`
+- `MONTHS >= 3/4 ACTIVE: 1/52`
+- `MONTHS >= 20%: 18/61`
+- `WORST DAY: -8,100,000円`
+
+- 最新確認値（TRAIN / daily OHLC reference-only）:
+- `FINAL EQUITY: 243,023,054円`
+- `CLOSED TRADES: 364`
+- `WIN RATE: 67.03%`
+- `WEEKS >= +1%: 89/202`
+- `POSITIVE WEEKS: 140/202`
+- `TOTAL RETURN: +24202.31%`
+- `PROFIT_FACTOR: 51.86`
+- `MONTHS >= 3/4 ACTIVE: 1/46`
+- `MONTHS >= 20%: 16/55`
+- `WORST DAY: -1,426,300円`
 
 ### 2026-06-21: Tuesday / Thursday Mid-Breadth Hot-Market Selected-Leverage Cap Adopted
 
@@ -18179,3 +18190,136 @@
 - 再試行するとしたら:
   - 単元未満株を同等の執行条件で利用できる、または初期資金が増えて100株でも1%予算内へ連続的に sizing できる場合。
   - 分足・板・実約定データから stop 到達前の shared exit が検証でき、取引機会を捨てずに expected shortfall を下げられる場合。
+
+### 2026-07-11: Adopted - Candidate Parity Repair and Broad Catchup-Gapdown Removal
+
+- 試したこと:
+  - ゼロベース監査で、本番 `select_best_candidates()` と `run_backtest_v16_production()` の candidate schema、setup sizing、候補生成経路を比較した。
+  - 本番の水曜 `evaluate_daytrade_setup()` が、sizing 専用で関数引数に存在しない `market_ratio` / `primary_score` を参照して `NameError` になる経路を除去した。
+  - 本番 candidate dict に不足していた `prev_return`、`prev_rsi2`、`open_from_prev_low_atr`、`open_vs_sma_atr`、`rs_alpha`、`market_ratio` を primary / strong_oversold / bull ETF へ補い、selected leverage が本番だけ素通りする差を縮めた。
+  - backtest 側へ本番と同じ strong_oversold risk budget、fallback notional context を渡し、インデント不備で `catchup_gapdown` がbacktestだけ生成されなかった差を修正した。
+  - parity 後に初めて可視化された broad `catchup_gapdown` を train-only でsetup単位に再評価し、細かい閾値を追加せずfamily全体の採否を比較した。
+- 結果:
+  - parity 後の `catchup_gapdown` は train `24 trades / net -586,502円 / avg -24,438円 / win 54.2% / worst -429,000円`。2022年はプラス、2023年はほぼ横ばい、2024-2025年はマイナスで、月次 `+20%` は `16/55` のまま変わらなかった。
+  - `catchup_gapdown` 有効: `TRAIN RETURN +25161.16% / PF 41.39 / WEEKS >= +1% 93/202 / POSITIVE WEEKS 149/202 / WORST DAY -1,482,400円 / MONTHS >= +20% 16/55`。
+  - `catchup_gapdown` 無効: `TRAIN RETURN +24202.31% / PF 51.86 / WEEKS >= +1% 89/202 / POSITIVE WEEKS 140/202 / WORST DAY -1,426,300円 / MONTHS >= +20% 16/55`。
+  - 採用 baseline:
+    - `FULL: FINAL Y600,707,511 / RETURN +59970.75% / 406 trades / WIN 67.24% / PF 21.64 / WEEKS >= +1% 103/228 / POSITIVE 160/228 / MONTHS >= +20% 18/61 / MONTHS >= 3/4 ACTIVE 1/52 / WORST DAY -8,100,000円`
+    - `TRAIN: FINAL Y243,023,054 / RETURN +24202.31% / 364 trades / WIN 67.03% / PF 51.86 / WEEKS >= +1% 89/202 / POSITIVE 140/202 / MONTHS >= +20% 16/55 / MONTHS >= 3/4 ACTIVE 1/46 / WORST DAY -1,426,300円`
+    - contaminated `HOLDOUT 2026-01-13..2026-07-10: RETURN +147.18% / 42 trades / PF 15.72 / WEEKS >= +1% 14/26 / POSITIVE 20/26 / MONTHS >= +20% 2/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST DAY -8,100,000円`
+    - `100万円 standalone 2026-06-11..2026-07-10: FINAL Y1,197,033 / RETURN +19.70% / 3 trades / PF 94.83 / WEEKS >= +1% 1/4 / POSITIVE 2/4 / WORST DAY -2,100円`
+  - parity修正前の tick-normalized baseline に対し、train は `RETURN +19164.13% -> +24202.31%`、`PF 49.63 -> 51.86`、`MONTHS >= +20% 15/55 -> 16/55`、positive weeks `139 -> 140`。週次+1%は `89/202` を維持した。
+  - `python -m pytest tests -q`: `404 passed, 38 subtests passed`。
+- 判断:
+  - parity修正は採用。本番で既に使われるshared sizingをbacktestへ反映し、本番 candidate も同じfeature contractへ寄せる根本修正であり、backtest専用の利益分岐ではない。
+  - broad `catchup_gapdown` は不採用。週次hitは4本増えるが、setup自体が複数年trainでnet negative、月次20%件数は不変、PFとworst dayも悪化した。低品質entryで稼働率だけを増やさない原則を優先した。
+  - absolute worst day増加は主に採用baselineのequity増加によるが、実運用損失額としては引き続き監視する。
+- 再試行するとしたら:
+  - `catchup_gapdown` の曜日・gap・score近傍を細かく掘り直さない。新しい事前特徴または実intraday pathで、独立したedgeが複数年に再現した場合だけfamily再設計を行う。
+  - 次の根本課題は、前日cacheで全銘柄候補を作って上位だけ板価格を差し替える本番経路と、当日寄付を全universeで見るbacktestの時点差である。前日情報shortlist、当日official open、entry時刻以降の分足を明示した共通candidate engineが必要。
+
+### 2026-07-11: Adopted - Bulk-Date Incremental J-Quants Refresh
+
+- 試したこと:
+  - 従来の短期増分更新が4,000超の銘柄別API requestを毎回実行していたため、J-Quants公式の日付指定全銘柄取得を実APIで確認した。
+  - `date=20260710` が1 requestで `4,438 rows` を返すことを確認し、31日以内のincremental refreshだけを日付一括取得へ変更した。
+  - full refreshや長い期間、bulk取得失敗時は従来の銘柄別取得へfallbackし、既存checkpoint historyを短くしないmergeとsafety snapshotは維持した。
+- 結果:
+  - `2026-07-02..2026-07-10` の7営業日を7 requestで取得し、`31,035 rows / 4,428 tickers` をcheckpointへ統合した。
+  - cache auditは更新前 `aligned=4485 / missing=0 / truncated=0`。統合後cacheの最新日は `2026-07-10`。
+  - 最新日の追加による新規tradeはなく、上記採用baselineとstandaloneは維持された。
+  - 月次20%を標準出力へ追加し、データ先頭月・最新途中月をfull calendar monthとして誤算入しないようdataset edge monthを保守的に除外した。
+- 判断:
+  - 採用。データ内容や戦略判断を変えず、同じ公式データを少ないrequestで取得し、最新化の失敗率と所要時間を根本的に下げる。
+- 再試行するとしたら:
+  - bulk endpointのschemaまたは契約条件が変わった場合のみ。失敗時は自動fallbackを使い、欠損を成功扱いしない。
+
+### 2026-07-11: Adopted - Point-in-Time Candidate Engine and Simulation Position Parity
+
+- 試したこと:
+  - `run_backtest_v16_production()` の候補生成を `core/daytrade_candidate_engine.py` へ切り出し、入力型から当日 `close / high / low / volume` を除外した。
+  - `feature_asof < trade_date` かつ `open_asof == trade_date` を共通 market context の契約として固定し、当日 OHLC は候補生成後の execution simulation でだけ付加した。
+  - simulation の inverse entry が cash / inverse buying power だけを減らして managed position を追加しない不具合を、通常 setup と同じ shared entry helper へ統合して修正した。
+  - 板取得に `requested / observations / failures` を保持する batch result を追加し、`no_token / transport / HTTP / malformed JSON / invalid quote` を欠落したまま成功扱いしないようにした。
+- 結果:
+  - candidate engine 移植前後の全出力を canonical JSON 化し、`33,796,675 bytes / 1,260 days / 32,631 candidate rows / 406 trades` の SHA-256 が双方 `db962f62398dbc60125632d4ccbed62206d8acbfbedaf8f52cedb3c3bd2c641a` で完全一致した。
+  - baseline は `FULL +59970.75% / TRAIN +24202.31% / TRAIN PF 51.86 / TRAIN MONTHS >= +20% 16/55` のまま変化なし。
+  - focused tests は candidate engine / backtest / logic で `173 passed`、simulation entry は `tests/test_auto_trade.py 51 passed`、板 batch は `tests/test_kabucom_broker.py 113 passed, 38 subtests passed`。
+  - 最終全件確認は `python -m pytest tests -q`: `410 passed, 38 subtests passed`。標準 `holdout 6M + standalone 1M` も上記採用 baseline と一致した。
+- 判断:
+  - 採用。損益を変えずに future field を型から排除し、本番へ移植可能な point-in-time candidate engine を作った根本修正である。
+  - simulation inverse 修正と板 batch failure の明示化も、strategy alpha ではなく執行状態の正しさを直すため採用した。
+
+### 2026-07-11: Rejected - Liquidity-Only 50-Symbol Prior-Day Shortlist
+
+- 試したこと:
+  - kabuステーションAPIの登録上限を backtest へ正直に反映する診断として、前日確定値だけで最大50銘柄を選ぶ shortlist を実装した。
+  - 順位に gap、曜日、score、過去損益を使わず、必須データ、shared minimum turnover、100株の流動性 headroom、bull / inverse の固定予約だけを使った。
+  - 不採用結果を受け、同じ shortlist の閾値を過去損益へ合わせず、前日終値を寄付とする潜在 setup、`-2% / 0% / +2%` の寄付シナリオ、既存 shared sizing confidence 順という説明可能な3案だけを診断した。
+- 結果:
+  - liquidity-only 50 baseline:
+    - `FULL -55.54% / 314 trades / PF 0.75 / WEEKS >= +1% 41/228 / POSITIVE 62/228 / WORST DAY -160,800円`
+    - `TRAIN -57.26% / 292 trades / PF 0.73 / MONTHS >= +20% 2/55`
+    - contaminated holdout `+4.04% / 22 trades / PF 1.24`
+    - standalone latest 1m `+0.14% / 1 trade / WEEKS >= +1% 0/4`
+  - 全銘柄 baseline の train 364 trades のうち shortlist 後も同一日・同一銘柄で残ったのは27件だけ。外れた337件は baseline 上で net `+186,722,875円`、新たに選ばれた265件は net `-1,077,222円` だった。
+  - 前日 flat-open 50 は train `PF 1.62 / net +3,559,658円`、3寄付シナリオの score 順は `PF 1.72 / net +4,204,743円`、shared sizing confidence 順でも `PF 1.98 / net +6,104,352円` に留まった。
+  - flat-open の候補取得を200へ増やすと train `PF 10.22 / net +106,845,824円` まで戻ったが、全銘柄 baseline には届かず、板API requestが自動で銘柄登録される50銘柄上限とも両立しない。
+- 判断:
+  - 不採用。50銘柄の純粋な流動性 shortlist は strategy edge を保持せず、損失最小化にも利益最大化にもならない。
+  - 寄付シナリオや shared confidence を使っても50銘柄では不足し、ここから曜日 / gap / score quotaを足すと、pre-open shortlistを過去の勝ち銘柄へ当て込む別のカーブフィットになる。
+  - C1の backtest / shortlist code は全てrevertし、candidate engine baseline の完全一致hashへ戻した。
+- 再試行するとしたら:
+  - 全銘柄の寄付または寄前気配を point-in-time で取得でき、同じ履歴を train replay できる market-data feed を導入した場合。
+  - 50銘柄を超えて登録を順次入れ替える場合も、API failure、special quote、時刻、登録解除を履歴化し、同じ operational path を replay できる場合だけ。
+  - 現行の日足 cache と50銘柄上限のまま、同じ gap / score / 曜日近傍を再探索しない。
+
+### 2026-07-11: Adopted - Production Point-in-Time Snapshot and Exact Replay Path
+
+- 試したこと:
+  - 日足OHLC backtestを本番相当とみなさず、`KABUCOM_TEST / KABUCOM_LIVE` の実観測入力をそのまま保存・再生する `daytrade_production_snapshots.jsonl` schemaを追加した。
+  - 前日確定値だけで観測49銘柄を固定し、`1321` と合わせてkabuステーションAPIの登録上限50銘柄を本番経路で厳守した。順位は過去損益・曜日・当日gapを使わず、shared minimum turnover、100株の流動性headroom、bull/inverseの固定予約だけで決めた。
+  - 9:30以降の最初の板batchについて、当日寄付と前日特徴だけをshared candidate engineへ渡し、現在値、bid/ask、session high/low、volumeはexecution evidenceへ分離した。
+  - candidate groups、selector context、selected candidates、code/config hashをsnapshotへ保存し、`jp_production_replay.py` が同じengineへ再投入してdigest完全一致を確認するようにした。
+  - `decision_snapshot_id` をdecision log、position、exit logへ接続し、非simulationの実約定損益だけをproduction replayで集計できるようにした。
+  - registry更新をunregister-before-registerへ変更し、解除失敗時は新規登録せずfail closedにした。板欠損、別日OpeningPriceTime、cache/board前日終値不一致、registry失敗、snapshot parity失敗では当日新規entryを0件にした。
+  - live write gateが閉じていてもsnapshot収集は継続し、最初のsnapshot時点でentry未承認なら同日後刻に承認状態が変わっても古い寄付signalでentryしないようにした。
+- 結果:
+  - snapshotのexecution quoteだけを大幅変更してもsnapshot identity、candidate digest、selected digestは不変。寄付を変えるとidentityが変わることを回帰テストで確認した。
+  - schema/date/board failure、snapshot改ざん、最低snapshot件数不足は明示的に非zeroまたはno-entryになる。
+  - 日足 `jp_backtest.py` は起動時に `REFERENCE-ONLY` を表示し、本番同等の成績証明から分離した。
+  - `python -m pytest tests -q`: `423 passed, 38 subtests passed`。日足reference-only baselineと直近1ヶ月standaloneの数値は変更なし。
+- 判断:
+  - 採用。今後「本番同様のテスト」と呼べるのは、このproduction snapshotを同じcode/configで完全replayし、実注文・部分約定・取消・exitまで同じsnapshot IDで接続できた期間だけとする。
+  - `KABUCOM_TEST` はschema / parity / order lifecycle確認用であり、収益根拠には使わない。`KABUCOM_LIVE` の非simulation decision snapshotを2026-07-13以降のdecision clean holdoutとして蓄積し、実注文再開後のexecution clean holdoutは別に切る。
+  - `STATUS: PARITY_OK` は再現一致の証明であって収益性の証明ではない。actual linked exitが0件なら損益は未検証とする。
+- 再試行するとしたら:
+  - 観測49銘柄の成績が悪くても、その結果を見て同じholdout内で曜日 / gap / score quotaへ当て込まない。観測universeの変更は、新しい外部feedや事前定義した別policyをtrain期間で設計し、次のclean holdoutからのみ使う。
+
+### 2026-07-12: Adopted - Production-vs-Test Residual Audit and AI Test Governance
+
+- 試したこと:
+  - daily OHLC、SIM、`KABUCOM_TEST`、production snapshot、`KABUCOM_LIVE` を、候補母集団、時刻、Board、流動性、資金、税、AI veto、注文、部分約定、保護逆指値、exit、再起動、損益証跡まで再監査した。
+  - `calculate_lot_size()` が受け取っていたturnoverを発注株数へ使っていなかったため、daily / live共通で前日turnoverの `LIQUIDITY_LIMIT_RATE` を数量上限へ適用した。
+  - broker position再取得で消えていたstrategy / stop / `decision_snapshot_id` metadataをExecutionID一致時に保持し、数量・価格・routeはbroker値で上書きするようにした。
+  - 9:30以降のlive entryでentry前の公式寄値をexit pathへ使わず、entry fillをpost-entry pathの起点にした。
+  - 保護逆指値arm失敗を未解決entry / orphanとして後続entryとreadinessをfail closedにした。
+  - `KABUCOM_TEST` のlinked actual exitをexecution replayへ含めつつ、LIVE clean holdout資格とは分離した。
+  - optimizer / walkforwardの税・明示コストを標準 `jp_backtest.py` と同じ共有設定へ統一した。
+  - `AGENTS.md` とREADMEへ、本番同等テストの完了条件、残差表、廉価モデル / サブエージェント委譲時の親担当責任を明記した。
+- 結果:
+  - focused tests: `341 passed, 38 subtests passed`。
+  - full tests: `424 passed, 38 subtests passed`。
+  - turnover数量cap後のdaily OHLC reference-only baseline:
+    - `FULL: FINAL Y113,354,312 / RETURN +11235.43% / 418 trades / WIN 66.51% / PF 12.19 / WEEKS >= +1% 98/228 / POSITIVE 158/228 / MONTHS >= +20% 13/61 / MONTHS >= 3/4 ACTIVE 1/52 / WORST DAY -2,093,000円`
+    - `TRAIN: FINAL Y70,930,995 / RETURN +6993.10% / 375 trades / WIN 66.13% / PF 12.58 / WEEKS >= +1% 85/202 / POSITIVE 138/202 / MONTHS >= +20% 12/55 / MONTHS >= 3/4 ACTIVE 1/46 / WORST DAY -2,093,000円`
+    - contaminated `HOLDOUT 2026-01-13..2026-07-10: RETURN +59.81% / 43 trades / PF 11.60 / WEEKS >= +1% 13/26 / POSITIVE 20/26 / MONTHS >= +20% 1/5 / WORST DAY -1,327,200円`
+    - `100万円 standalone 2026-06-11..2026-07-10: RETURN +19.70% / 3 trades / PF 94.83 / WEEKS >= +1% 1/4 / POSITIVE 2/4 / WORST DAY -2,100円`
+  - 旧baseline `TRAIN +24202.31% / PF 51.86 / MONTHS >= +20% 16/55` は、実発注数量へ流動性capを適用していないため廃止した。
+- 判断:
+  - 採用。利益最大化の調整ではなく、本番より楽観的だった数量、position state、live exit時系列、stop失敗、test execution集計、cost profileを厳格化する根本修正である。
+  - daily OHLCは引き続きreference-only。production snapshotが0件のため、本番同等性と本番収益性は未検証のまま。
+  - 未解消の重要残差は、保護逆指値の市場約定をposition消失からexit/PnLへ自動reconcileする経路、lifecycle completeness、grossからnetへの口座コスト照合、AI veto evidence、Board batch時間幅、厳密な前営業日、現在Primeを過去へ適用するsurvivorshipである。
+- 再試行するとしたら:
+  - 同じ日足閾値を再探索しない。まずorder history / execution ID / wallet deltaを `decision_snapshot_id` へ連結し、`selected -> veto/reject -> fill -> stop/exit -> remaining=0` の完全性を機械検証する。
+  - 2026-07-13以降のactual snapshotとlinked exitが蓄積した後、同一code/configのproduction replayでのみ本番差分を再評価する。
