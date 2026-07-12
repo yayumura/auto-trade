@@ -16,10 +16,12 @@ from backtest import run_backtest_v16_production
 from core.config import (
     BEAR_GAP_LIMIT,
     DATA_CACHE_ROOT,
+    DAYTRADE_API_EXPLICIT_TRADE_COST,
     EXIT_ON_SMA20_BREACH,
     INITIAL_CASH,
     LIQUIDITY_LIMIT_RATE,
     SLIPPAGE_RATE,
+    TAX_RATE,
 )
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
 from jp_backtest import (
@@ -567,8 +569,8 @@ def _run_parameterized_backtest(univ_indices, bundle_np, timeline, breadth_ratio
         liquidity_limit=LIQUIDITY_LIMIT_RATE,
         bull_gap_limit=params["bgap"],
         bear_gap_limit=BEAR_GAP_LIMIT,
-        explicit_trade_cost=0.0,
-        profit_tax_rate=0.0,
+        explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
+        profit_tax_rate=TAX_RATE,
         return_daily_stats=return_window_stats,
         return_trade_log=return_window_stats,
         verbose=False,

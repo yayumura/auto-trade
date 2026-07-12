@@ -45,6 +45,23 @@ def get_market_phase(now_time, *, half_day: bool = False) -> MarketPhase:
         return MarketPhase.CLOSING_TIME
 
 
+def should_capture_daytrade_production_snapshot(
+    *,
+    is_sim,
+    scan_interval_ready,
+    phase_entry_blocked,
+    now_time,
+    debug_mode=False,
+):
+    return bool(
+        not is_sim
+        and scan_interval_ready
+        and not phase_entry_blocked
+        and (debug_mode or now_time >= datetime.time(9, 30))
+        and (debug_mode or now_time < ENTRY_SCAN_CUTOFF_TIME)
+    )
+
+
 def _is_submission_accepted(result) -> bool:
     status = getattr(result, "status", None)
     if status is None:
@@ -86,16 +103,22 @@ from core.config import (
     PROJECT_ROOT, DATA_ROOT,
     DATA_FILE, PORTFOLIO_FILE, HISTORY_FILE, ACCOUNT_FILE,
     EXECUTION_LOG_FILE, TARGET_MARKETS, DAYTRADE_EXIT_LOG_FILE,
-    DAYTRADE_DECISION_LOG_FILE,
+    DAYTRADE_DECISION_LOG_FILE, DAYTRADE_PRODUCTION_SNAPSHOT_FILE,
     DEBUG_MODE, TRADE_MODE, RUNTIME_LIVE_ORDER_CONFIG_HASH,
-    LEVERAGE_RATE, JST, BULL_GAP_LIMIT,
-    SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
+    LEVERAGE_RATE, JST, BULL_GAP_LIMIT, LIQUIDITY_LIMIT_RATE,
+    SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
     SLIPPAGE_RATE, STOP_LOSS_ATR, INITIAL_CASH, load_insider_exclusion_codes,
     INTRADAY_SNAPSHOT_FILE, DATA_CACHE_ROOT,
 )
 from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
 from core.live_approval_manifest import read_git_commit_sha
 from core.live_readiness_report import build_live_readiness_report
+from core.daytrade_production_replay import (
+    append_daytrade_production_snapshot,
+    build_daytrade_production_snapshot,
+    find_first_daytrade_production_snapshot,
+    replay_daytrade_production_snapshot,
+)
 
 # --- インスタンスロック機構 ---
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_sim.lock")
@@ -440,6 +463,10 @@ from core.logic import (
     update_daytrade_post_entry_extrema,
     cancel_linked_protective_stop_before_exit,
     resolve_protective_stop_order_id,
+    DAYTRADE_MAX_RSI2,
+    DAYTRADE_BULL_ETF_CODES,
+    DAYTRADE_INVERSE_CODES,
+    resolve_daytrade_scan_min_turnover,
 )
 from core.watchlist import load_watchlist, save_watchlist
 from core.ai_filter import ai_qualitative_filter, get_recent_news
@@ -467,6 +494,86 @@ def build_daytrade_watch_plan(watchlist, portfolio, market_index_code="1321"):
     }
 
 
+def build_daytrade_production_observation_universe(
+    data_df,
+    *,
+    max_symbols=49,
+    excluded_codes=(),
+):
+    """Choose the prior-day observation universe without using open or PnL labels."""
+    if data_df is None or len(data_df.index) < 3 or int(max_symbols) <= 0:
+        return []
+    bundle = calculate_all_technicals_v12(data_df)
+    close = bundle["Close"].iloc[-1]
+    atr = bundle["ATR"].iloc[-1]
+    turnover = bundle["Turnover"].iloc[-1]
+    sma_long = bundle[f"SMA{SMA_LONG_PERIOD}"].iloc[-1]
+    prime = set(get_prime_tickers())
+    breadth_members = [
+        ticker
+        for ticker in close.index
+        if ticker in prime
+        and ticker in sma_long.index
+        and pd.notna(close[ticker])
+        and pd.notna(sma_long[ticker])
+    ]
+    breadth = (
+        float(np.mean([
+            float(close[ticker]) > float(sma_long[ticker])
+            for ticker in breadth_members
+        ]))
+        if breadth_members
+        else 0.0
+    )
+    excluded = {
+        _normalize_daytrade_observation_code(code)
+        for code in excluded_codes or ()
+    }
+    reserved = {
+        *(_normalize_daytrade_observation_code(code) for code in DAYTRADE_BULL_ETF_CODES),
+        *(_normalize_daytrade_observation_code(code) for code in DAYTRADE_INVERSE_CODES),
+    }
+    reserved.discard("1321")
+    rows = []
+    for ticker in close.index:
+        code = _normalize_daytrade_observation_code(ticker)
+        if code == "1321" or code in excluded:
+            continue
+        if ticker not in prime and code not in reserved:
+            continue
+        values = (close.get(ticker), atr.get(ticker), turnover.get(ticker))
+        if any(value is None or pd.isna(value) for value in values):
+            continue
+        prev_close, prev_atr, prev_turnover = map(float, values)
+        if prev_close <= 0 or prev_atr <= 0 or prev_turnover <= 0:
+            continue
+        if prev_turnover < resolve_daytrade_scan_min_turnover(ticker, breadth):
+            continue
+        headroom = (
+            prev_turnover
+            * float(LIQUIDITY_LIMIT_RATE)
+            / (prev_close * 100.0)
+        )
+        if headroom < 1.0:
+            continue
+        rows.append({
+            "code": code,
+            "reserved": code in reserved,
+            "headroom": headroom,
+            "turnover": prev_turnover,
+        })
+    rows.sort(
+        key=lambda item: (
+            not item["reserved"],
+            item["code"] if item["reserved"] else "",
+            -item["headroom"],
+            -item["turnover"],
+            item["code"],
+        )
+    )
+    return [item["code"] for item in rows[: int(max_symbols)]]
+
+
 def sync_daytrade_registry(broker, current_targets, already_tracked, market_index_code="1321", is_sim=False):
     """監視銘柄の register / unregister 結果から registry 同期成功可否を返す。"""
     new_codes = set(current_targets) - set(already_tracked)
@@ -474,10 +581,10 @@ def sync_daytrade_registry(broker, current_targets, already_tracked, market_inde
     registry_sync_ok = True
 
     if not is_sim:
-        if new_codes:
-            registry_sync_ok = bool(broker.register_symbols(list(new_codes))) and registry_sync_ok
         if removed_codes:
-            registry_sync_ok = bool(broker.unregister_symbols(list(removed_codes))) and registry_sync_ok
+            registry_sync_ok = bool(broker.unregister_symbols(list(removed_codes)))
+        if registry_sync_ok and new_codes:
+            registry_sync_ok = bool(broker.register_symbols(list(new_codes)))
 
     return registry_sync_ok, new_codes, removed_codes
 
@@ -920,6 +1027,7 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "entry_stop_price": round(float(entry_stop_price), 1),
         "entry_target_price": round(float(entry_target_price), 1),
         "entry_candidate_rank": item.get("candidate_rank"),
+        "decision_snapshot_id": item.get("decision_snapshot_id"),
         "entry_breadth": item.get("breadth"),
         "entry_market_ratio": item.get("market_ratio"),
         "buy_gap_pct": item.get("gap_pct"),
@@ -946,6 +1054,39 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "exit_order_remaining_qty": 0,
     }
     return update_daytrade_post_entry_extrema(record, executed_price)
+
+
+def open_simulated_daytrade_position(
+    account,
+    portfolio,
+    item,
+    buy_price,
+    shares,
+    day_buying_power,
+    inverse_day_buying_power,
+    buy_time,
+):
+    """Apply a simulated entry and persist the resulting managed position."""
+    executed_price = float(buy_price) * (1.0 + SLIPPAGE_RATE)
+    trade_notional = executed_price * int(shares)
+    account["cash"] -= trade_notional
+
+    if is_daytrade_inverse_setup_type(item.get("setup_type")):
+        inverse_day_buying_power = max(0.0, float(inverse_day_buying_power) - trade_notional)
+    else:
+        day_buying_power = max(0.0, float(day_buying_power) - trade_notional)
+
+    portfolio.append(
+        build_daytrade_position_record(
+            item=item,
+            executed_price=executed_price,
+            shares=shares,
+            buy_time=buy_time,
+            execution_id=None,
+            execution_ids=(),
+        )
+    )
+    return executed_price, day_buying_power, inverse_day_buying_power
 
 
 def build_daytrade_exit_log_row(
@@ -1010,6 +1151,7 @@ def build_daytrade_exit_log_row(
         "buy_price": round(buy_price, 4),
         "buy_atr": round(buy_atr, 4),
         "entry_candidate_rank": position.get("entry_candidate_rank"),
+        "decision_snapshot_id": position.get("decision_snapshot_id"),
         "entry_stop_mult": position.get("stop_mult"),
         "entry_stop_price": round(stop_price, 4),
         "entry_target_mult": position.get("target_mult"),
@@ -1072,6 +1214,7 @@ def build_daytrade_decision_log_rows(
                 "decision": str(decision),
                 "reason": str(reason or ""),
                 "candidate_rank": item.get("candidate_rank", fallback_rank),
+                "decision_snapshot_id": item.get("decision_snapshot_id"),
                 "selected_count": int(selected_count),
                 "code": str(item.get("code", "")),
                 "name": item.get("name", ""),
@@ -1175,6 +1318,264 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
     }
 
 
+def _normalize_daytrade_observation_code(value):
+    code = str(value or "").strip().upper()
+    return code[:-2] if code.endswith(".T") else code
+
+
+def _serialize_board_failure(code, failure):
+    if isinstance(failure, dict):
+        source = failure
+    else:
+        source = {
+            "reason": getattr(failure, "reason", "unknown"),
+            "detail": getattr(failure, "detail", None),
+            "http_status": getattr(failure, "http_status", None),
+            "quote_rejection_reason": getattr(failure, "quote_rejection_reason", None),
+        }
+    return {
+        "code": _normalize_daytrade_observation_code(code),
+        "reason": str(source.get("reason") or "unknown"),
+        "detail": source.get("detail"),
+        "http_status": source.get("http_status"),
+        "quote_rejection_reason": source.get("quote_rejection_reason"),
+    }
+
+
+def _decorate_observed_candidates(snapshot, symbols_df, boards):
+    name_by_code = {}
+    if symbols_df is not None and "コード" in symbols_df.columns:
+        for _, row in symbols_df.iterrows():
+            code = _normalize_daytrade_observation_code(row.get("コード"))
+            name_by_code[code] = row.get("銘柄名", code)
+    board_by_code = {
+        _normalize_daytrade_observation_code(code): dict(board or {})
+        for code, board in (boards or {}).items()
+    }
+    market_ratio = (snapshot.get("inputs") or {}).get("market", {}).get("market_ratio")
+    breadth = (snapshot.get("inputs") or {}).get("market", {}).get("breadth")
+    output = []
+    for item in (snapshot.get("recorded") or {}).get("selected_candidates") or ():
+        candidate = dict(item)
+        code = _normalize_daytrade_observation_code(candidate.get("code"))
+        board = board_by_code.get(code, {})
+        candidate.pop("s_idx", None)
+        candidate["code"] = code
+        candidate["name"] = name_by_code.get(code, code)
+        candidate["price"] = board.get("current_price", board.get("price", candidate.get("open")))
+        candidate["rs"] = candidate.get("rs_alpha")
+        candidate["rsi2"] = candidate.get("prev_rsi2")
+        candidate["adv_yen"] = candidate.get("turnover")
+        candidate["breadth"] = breadth
+        candidate["breadth_val"] = breadth
+        candidate["market_ratio"] = market_ratio
+        candidate["decision_snapshot_id"] = snapshot.get("snapshot_id")
+        output.append(candidate)
+    return output
+
+
+def compute_observed_daytrade_production_snapshot(
+    *,
+    data_df,
+    symbols_df,
+    requested_codes,
+    boards,
+    board_failures,
+    event_time,
+    current_equity,
+    week_start_equity,
+    account_cash,
+    trade_mode=None,
+    is_simulation=False,
+    operational_reasons=(),
+):
+    mode = str(TRADE_MODE if trade_mode is None else trade_mode).strip().upper()
+    trade_day = pd.Timestamp(event_time)
+    if trade_day.tzinfo is not None:
+        trade_day = trade_day.tz_localize(None)
+    trade_day = trade_day.normalize()
+    normalized_index = pd.DatetimeIndex(pd.to_datetime(data_df.index))
+    if normalized_index.tz is not None:
+        normalized_index = normalized_index.tz_localize(None)
+    normalized_index = normalized_index.normalize()
+    history = data_df.loc[normalized_index < trade_day]
+    extra_reasons = list(operational_reasons or ())
+    if len(history) < 3:
+        extra_reasons.append("prior_history_too_short")
+        feature_asof = trade_day - pd.Timedelta(days=1)
+        bundle = None
+    else:
+        feature_asof = pd.Timestamp(history.index[-1]).normalize()
+        bundle = calculate_all_technicals_v12(history)
+
+    requested = sorted(dict.fromkeys(
+        _normalize_daytrade_observation_code(code)
+        for code in requested_codes or ()
+        if _normalize_daytrade_observation_code(code)
+    ))
+    board_by_code = {
+        _normalize_daytrade_observation_code(code): dict(board or {})
+        for code, board in (boards or {}).items()
+    }
+    serialized_failures = [
+        _serialize_board_failure(code, failure)
+        for code, failure in (board_failures or {}).items()
+    ]
+    failure_codes = {item["code"] for item in serialized_failures}
+    for code in requested:
+        if code not in board_by_code and code not in failure_codes:
+            serialized_failures.append({"code": code, "reason": "missing_observation"})
+
+    symbol_inputs = []
+    latest_close_map = {}
+    breadth_val = 0.0
+    if bundle is not None:
+        close = bundle["Close"].iloc[-1]
+        previous_close = bundle["Close"].iloc[-2]
+        previous_open = bundle["Open"].iloc[-1]
+        previous_low = history.xs("Low", axis=1, level=1).iloc[-1]
+        atr = bundle["ATR"].iloc[-1]
+        turnover = bundle["Turnover"].iloc[-1]
+        rsi2 = bundle["RSI2"].iloc[-1]
+        rs_alpha = bundle["RS_Alpha"].iloc[-1]
+        sma_med = bundle[f"SMA{SMA_MEDIUM_PERIOD}"].iloc[-1]
+        sma_trend = bundle[f"SMA{SMA_TREND_PERIOD}"].iloc[-1]
+        sma_long = bundle[f"SMA{SMA_LONG_PERIOD}"].iloc[-1]
+        prime_ref = set(get_prime_tickers())
+        elite_cols = [
+            ticker for ticker in close.index
+            if ticker in prime_ref and ticker in sma_long.index
+            and pd.notna(close[ticker]) and pd.notna(sma_long[ticker])
+        ]
+        if elite_cols:
+            breadth_val = float(np.mean([
+                float(close[ticker]) > float(sma_long[ticker])
+                for ticker in elite_cols
+            ]))
+        for ticker in close.index:
+            if pd.notna(close[ticker]):
+                latest_close_map[_normalize_daytrade_observation_code(ticker)] = float(close[ticker])
+
+        for code in requested:
+            ticker = f"{code}.T"
+            board = board_by_code.get(code, {})
+
+            def value(series):
+                return series.get(ticker) if ticker in series.index else None
+
+            cache_prev_close = value(close)
+            board_prev_close = board.get("prev_close")
+            if (
+                cache_prev_close not in (None, 0)
+                and board_prev_close not in (None, 0)
+                and pd.notna(cache_prev_close)
+                and pd.notna(board_prev_close)
+                and normalize_tick_size(cache_prev_close, is_buy=True)
+                != normalize_tick_size(board_prev_close, is_buy=True)
+            ):
+                extra_reasons.append(f"{code}:board_cache_prev_close_mismatch")
+
+            symbol_inputs.append({
+                "code": code,
+                "opening_price_timestamp": board.get("opening_price_timestamp"),
+                "open_today": board.get("open"),
+                "close_prev": cache_prev_close,
+                "close_prev2": value(previous_close),
+                "open_prev": value(previous_open),
+                "low_prev": value(previous_low),
+                "atr_prev": value(atr),
+                "turnover_prev": value(turnover),
+                "rsi2_prev": value(rsi2),
+                "rs_alpha_prev": value(rs_alpha),
+                "sma_med_prev": value(sma_med),
+                "sma_trend_prev": value(sma_trend),
+            })
+
+    market_code = "1321"
+    market_symbol = next(
+        (item for item in symbol_inputs if item.get("code") == market_code),
+        {},
+    )
+    market_close_prev = market_symbol.get("close_prev")
+    market_sma_trend = market_symbol.get("sma_trend_prev")
+    market_open = market_symbol.get("open_today")
+    market_ratio = None
+    if (
+        market_open not in (None, 0)
+        and market_sma_trend not in (None, 0)
+        and pd.notna(market_open)
+        and pd.notna(market_sma_trend)
+    ):
+        market_ratio = float(market_open) / float(market_sma_trend)
+
+    execution_quotes = []
+    for code in requested:
+        board = board_by_code.get(code, {})
+        execution_quotes.append({
+            "code": code,
+            "current_price": board.get("current_price", board.get("price")),
+            "best_sell_price": board.get("best_sell_price"),
+            "best_sell_qty": board.get("best_sell_qty"),
+            "best_buy_price": board.get("best_buy_price"),
+            "best_buy_qty": board.get("best_buy_qty"),
+            "quote_timestamp": board.get("quote_timestamp"),
+            "current_price_timestamp": board.get("current_price_timestamp"),
+            "received_at": board.get("received_at"),
+            "session_high": board.get("high"),
+            "session_low": board.get("low"),
+            "volume": board.get("volume"),
+            "prev_close": board.get("prev_close"),
+        })
+
+    base_leverage = calculate_dynamic_leverage(
+        breadth_val,
+        config_leverage=LEVERAGE_RATE,
+    )
+    snapshot = build_daytrade_production_snapshot(
+        trade_date=trade_day,
+        feature_asof=feature_asof,
+        open_asof=trade_day,
+        captured_at=event_time,
+        trade_mode=mode,
+        is_simulation=is_simulation,
+        requested_codes=requested,
+        symbol_inputs=symbol_inputs,
+        market_input={
+            "code": market_code,
+            "breadth": breadth_val,
+            "open_today": market_open,
+            "close_prev": market_close_prev,
+            "sma_trend_prev": market_sma_trend,
+            "market_ratio": market_ratio,
+        },
+        selector_context={
+            "current_equity": float(current_equity),
+            "week_start_equity": float(week_start_equity),
+            "account_cash": float(account_cash),
+            "base_leverage": float(base_leverage),
+        },
+        strategy_context={
+            "liquidity_limit": float(LIQUIDITY_LIMIT_RATE),
+            "bull_gap_limit": float(BULL_GAP_LIMIT),
+            "rsi_threshold": float(DAYTRADE_MAX_RSI2),
+        },
+        board_failures=serialized_failures,
+        operational_reasons=extra_reasons,
+        execution_quotes=execution_quotes,
+        code_commit_sha=read_git_commit_sha(),
+        runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+    )
+    return {
+        "production_snapshot": snapshot,
+        "top_candidates": _decorate_observed_candidates(snapshot, symbols_df, boards),
+        "breadth": breadth_val,
+        "market_ratio": market_ratio,
+        "latest_close_map": latest_close_map,
+        "decision_allowed": bool(snapshot.get("decision_allowed")),
+        "rejection_reasons": list(snapshot.get("rejection_reasons") or ()),
+    }
+
+
 def resolve_daytrade_entry_shares(
     item,
     day_equity,
@@ -1191,6 +1592,7 @@ def resolve_daytrade_entry_shares(
         dynamic_leverage=candidate_dynamic_lev,
         max_positions=MAX_POSITIONS,
         buying_power=candidate_buying_power,
+        turnover=item.get("turnover", item.get("adv_yen")),
     )
     return cap_daytrade_position_size(
         raw_shares=shares,
@@ -1341,7 +1743,9 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
         modeled_exit_price, exit_reason = resolve_daytrade_live_exit_decision(
             setup_type=position.get("setup_type"),
             buy_price=buy_price,
-            open_price=session_open,
+            # The official session open predates a live entry made after 09:30.
+            # Treat the entry fill as the open of the post-entry observation path.
+            open_price=buy_price,
             high_price=session_high,
             low_price=session_low,
             current_price=current_price,
@@ -2017,6 +2421,19 @@ def _main_exec():
 
     # --- [Hybrid Monitoring State] ---
     watchlist = load_watchlist()
+    if not is_sim and jp_cache_df is not None:
+        observation_exclusions = set(load_invalid_tickers())
+        observation_exclusions.update(load_insider_exclusion_codes())
+        watchlist = build_daytrade_production_observation_universe(
+            jp_cache_df,
+            max_symbols=49,
+            excluded_codes=observation_exclusions,
+        )
+        save_watchlist(watchlist)
+        print(
+            "📸 [DayTrade] Production observation universe prepared "
+            f"from prior-day data: {len(watchlist)} symbols + 1321"
+        )
     special_quote_watchlist = {} # { "code": item_dict }
     realtime_buffers = {}
     _set_active_runtime_state(realtime_buffers=realtime_buffers)
@@ -2303,6 +2720,8 @@ def _main_exec():
         trade_logs = [] 
 
         boards = {}
+        board_failures = {}
+        current_targets = set()
         registry_sync_ok = True
         try:
             watch_plan = build_daytrade_watch_plan(
@@ -2339,7 +2758,9 @@ def _main_exec():
                 realtime_buffers.pop(code, None)
 
             if not is_sim:
-                boards = broker.get_board_data(list(current_targets))
+                board_batch = broker.get_board_snapshot_batch(sorted(current_targets))
+                boards = dict(board_batch.observations)
+                board_failures = dict(board_batch.failures)
                 for code, b_info in boards.items():
                     price = b_info.get('price')
                     vol = b_info.get('volume', 0)
@@ -2442,6 +2863,14 @@ def _main_exec():
         elif now_time < datetime.time(9, 30) and not DEBUG_MODE: should_scan = False
         elif now_time >= ENTRY_SCAN_CUTOFF_TIME and not DEBUG_MODE: should_scan = False
 
+        should_capture_production_snapshot = should_capture_daytrade_production_snapshot(
+            is_sim=is_sim,
+            scan_interval_ready=should_scan_override,
+            phase_entry_blocked=phase_entry_blocked,
+            now_time=now_time,
+            debug_mode=DEBUG_MODE,
+        )
+
         entry_authorization_context = EntryAuthorizationContext(
             production_endpoint=TRADE_MODE == "KABUCOM_LIVE",
             approved_manifest_valid=(
@@ -2495,13 +2924,15 @@ def _main_exec():
             broker.save_account(account)
             broker.save_portfolio(portfolio)
 
-        if should_scan:
+        if should_scan or should_capture_production_snapshot:
             last_scan_time = time.time()
             print("\n=> 🔍 デイトレード定期スキャン処理を開始します...")
-            should_continue_scan = True
+            should_continue_scan = bool(should_scan)
             dynamic_lev = 0.0
             base_dynamic_lev = 0.0
             top_candidates = []
+            snapshot = {"market_ratio": None, "breadth": breadth_val, "latest_close_map": {}}
+            production_snapshot_id = None
             weekly_profit_guard_active = False
             try:
                 if os.path.exists(JQUANTS_CACHE_FILE):
@@ -2530,12 +2961,94 @@ def _main_exec():
 
                     held_codes = [str(p['code']) for p in portfolio]
                     targets = [str(t) for t in df_symbols['コード'].tolist() if str(t) not in held_codes]
-                    snapshot = compute_daytrade_snapshot(
-                        data_df=data_df,
-                        symbols_df=df_symbols,
-                        targets=targets,
-                        regime=regime,
-                    )
+                    if not is_sim:
+                        existing_production_snapshot = find_first_daytrade_production_snapshot(
+                            DAYTRADE_PRODUCTION_SNAPSHOT_FILE,
+                            trade_date=server_datetime,
+                            trade_mode=TRADE_MODE,
+                        )
+                        if existing_production_snapshot is None:
+                            operational_reasons = []
+                            if not registry_sync_ok:
+                                operational_reasons.append("registry_sync_failed")
+                            if not quote_fresh_ok:
+                                operational_reasons.append("board_quote_not_fresh")
+                            snapshot = compute_observed_daytrade_production_snapshot(
+                                data_df=data_df,
+                                symbols_df=df_symbols,
+                                requested_codes=current_targets,
+                                boards=boards,
+                                board_failures=board_failures,
+                                event_time=server_datetime,
+                                current_equity=current_total,
+                                week_start_equity=account.get(
+                                    "daytrade_week_start_equity",
+                                    current_total,
+                                ),
+                                account_cash=account.get("cash", 0.0),
+                                trade_mode=TRADE_MODE,
+                                is_simulation=False,
+                                operational_reasons=operational_reasons,
+                            )
+                            production_snapshot = snapshot["production_snapshot"]
+                            production_snapshot["execution_authorized_at_capture"] = bool(
+                                should_scan
+                            )
+                            append_daytrade_production_snapshot(
+                                DAYTRADE_PRODUCTION_SNAPSHOT_FILE,
+                                production_snapshot,
+                            )
+                        else:
+                            replay_result = replay_daytrade_production_snapshot(
+                                existing_production_snapshot,
+                                expected_code_commit_sha=read_git_commit_sha(),
+                                expected_runtime_config_hash=RUNTIME_LIVE_ORDER_CONFIG_HASH,
+                            )
+                            snapshot = {
+                                "production_snapshot": existing_production_snapshot,
+                                "top_candidates": (
+                                    _decorate_observed_candidates(
+                                        existing_production_snapshot,
+                                        df_symbols,
+                                        boards,
+                                    )
+                                    if replay_result.parity
+                                    else []
+                                ),
+                                "breadth": (
+                                    existing_production_snapshot.get("inputs") or {}
+                                ).get("market", {}).get("breadth", 0.0),
+                                "market_ratio": (
+                                    existing_production_snapshot.get("inputs") or {}
+                                ).get("market", {}).get("market_ratio"),
+                                "latest_close_map": {},
+                                "decision_allowed": bool(
+                                    existing_production_snapshot.get("decision_allowed")
+                                    and replay_result.parity
+                                ),
+                                "rejection_reasons": (
+                                    list(existing_production_snapshot.get("rejection_reasons") or ())
+                                    + ([] if replay_result.parity else ["snapshot_replay_parity_failed"])
+                                ),
+                            }
+                            if not existing_production_snapshot.get(
+                                "execution_authorized_at_capture",
+                                False,
+                            ):
+                                should_continue_scan = False
+                        if not snapshot.get("decision_allowed"):
+                            should_continue_scan = False
+                            print(
+                                "🛑 [DayTrade] Production snapshot is not replayable. "
+                                f"reasons={snapshot.get('rejection_reasons')}"
+                            )
+                    else:
+                        snapshot = compute_daytrade_snapshot(
+                            data_df=data_df,
+                            symbols_df=df_symbols,
+                            targets=targets,
+                            regime=regime,
+                        )
                     breadth_val = snapshot["breadth"] if snapshot["breadth"] > 0 else breadth_val
                     base_dynamic_lev = calculate_dynamic_leverage(breadth_val, config_leverage=LEVERAGE_RATE)
                     dynamic_lev = resolve_daytrade_weekly_leverage(
@@ -2559,6 +3072,24 @@ def _main_exec():
                         quote_is_fresh=quote_fresh_ok,
                     )
                     top_candidates = snapshot["top_candidates"]
+                    production_snapshot_id = (
+                        (snapshot.get("production_snapshot") or {}).get("snapshot_id")
+                        if not is_sim
+                        else None
+                    )
+                    attempted_snapshot_ids = set(
+                        account.get("daytrade_attempted_snapshot_ids") or ()
+                    )
+                    if (
+                        production_snapshot_id
+                        and production_snapshot_id in attempted_snapshot_ids
+                    ):
+                        should_continue_scan = False
+                        top_candidates = []
+                        print(
+                            "🛡️ [DayTrade] Production decision already attempted: "
+                            f"{production_snapshot_id}"
+                        )
                     print(f"📊 [DayTrade] Market Breadth (Prime): {breadth_val:.1%}")
                     print(f"✅ Shared daytrade scan found {len(top_candidates)} candidates.")
                     record_daytrade_decision(
@@ -2610,6 +3141,14 @@ def _main_exec():
             if weekly_profit_guard_active:
                 save_watchlist([])
             elif should_continue_scan and (selected_dynamic_lev > 0 or inverse_only):
+                if production_snapshot_id:
+                    attempted_snapshot_ids = list(
+                        account.get("daytrade_attempted_snapshot_ids") or ()
+                    )
+                    if production_snapshot_id not in attempted_snapshot_ids:
+                        attempted_snapshot_ids.append(production_snapshot_id)
+                    account["daytrade_attempted_snapshot_ids"] = attempted_snapshot_ids[-100:]
+                    broker.save_account(account)
                 watchlist = [str(item["code"]) for item in top_candidates[:max(5, MAX_POSITIONS * 4)]]
                 save_watchlist(watchlist)
 
@@ -2623,29 +3162,45 @@ def _main_exec():
                     if len(selected_candidates) >= max_to_review:
                         break
 
-                    if not is_sim and hasattr(broker, 'get_board_data'):
-                        try:
-                            board = broker.get_board_data([item['code']])
-                            b_info = board.get(str(item['code']).replace(".T", ""))
-                            if b_info:
-                                c_price = b_info.get('price')
-                                p_close = b_info.get('prev_close', item['price'])
-                                if not c_price or c_price == 0:
-                                    special_quote_watchlist[str(item['code'])] = item
-                                    continue
-                                gap_pct = (c_price - p_close) / p_close if p_close > 0 else 0
-                                if gap_pct < -0.02 or abs(gap_pct) > BULL_GAP_LIMIT:
-                                    continue
-                                item['price'] = c_price
-                        except Exception as e:
-                            print(f"[WARNING] 板情報チェック中のエラー: {e}")
+                    if not is_sim:
+                        code = _normalize_daytrade_observation_code(item.get("code"))
+                        b_info = boards.get(code)
+                        c_price = None if b_info is None else b_info.get("current_price", b_info.get("price"))
+                        if not c_price or float(c_price) <= 0:
+                            special_quote_watchlist[code] = item
+                            record_daytrade_decision(
+                                [item],
+                                decision="blocked_operational_veto",
+                                event_time=server_datetime,
+                                reason="snapshot_execution_quote_missing",
+                                breadth=breadth_val,
+                                market_ratio=snapshot.get("market_ratio"),
+                                selected_count=1,
+                                dynamic_leverage=selected_dynamic_lev,
+                                is_simulation=False,
+                            )
+                            entry_flow_halted = True
+                            break
+                        item["price"] = float(c_price)
 
                     news = get_recent_news(item['code'], item['name'])
                     if news and news != "ニュースなし":
                         is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
                         if not is_safe:
                             print(f"🚫 [AI Filter] {item['code']} skipped: {reason}")
-                            continue
+                            record_daytrade_decision(
+                                [item],
+                                decision="blocked_operational_veto",
+                                event_time=server_datetime,
+                                reason=f"ai_filter:{reason}",
+                                breadth=breadth_val,
+                                market_ratio=snapshot.get("market_ratio"),
+                                selected_count=1,
+                                dynamic_leverage=selected_dynamic_lev,
+                                is_simulation=is_sim,
+                            )
+                            entry_flow_halted = True
+                            break
 
                     selected_candidates.append(item)
 
@@ -2727,22 +3282,16 @@ def _main_exec():
                         continue
 
                     if is_sim:
-                        exec_p = buy_price * (1.0 + SLIPPAGE_RATE)
-                        account['cash'] -= exec_p * shares
-                        if is_daytrade_inverse_setup_type(item.get("setup_type")):
-                            inverse_day_buying_power = max(0.0, inverse_day_buying_power - (exec_p * shares))
-                        else:
-                            day_buying_power = max(0.0, day_buying_power - (exec_p * shares))
-                            portfolio.append(
-                                build_daytrade_position_record(
-                                    item=item,
-                                    executed_price=exec_p,
-                                    shares=shares,
-                                    buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
-                                    execution_id=None,
-                                    execution_ids=(),
-                                )
-                            )
+                        exec_p, day_buying_power, inverse_day_buying_power = open_simulated_daytrade_position(
+                            account=account,
+                            portfolio=portfolio,
+                            item=item,
+                            buy_price=buy_price,
+                            shares=shares,
+                            day_buying_power=day_buying_power,
+                            inverse_day_buying_power=inverse_day_buying_power,
+                            buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
+                        )
                         actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                         record_daytrade_decision(
                             [item],
@@ -2814,6 +3363,14 @@ def _main_exec():
                                 trigger_price=position_record["entry_stop_price"],
                                 expected_shares=actual_qty,
                             )
+                            if not stop_order_id:
+                                position_record["entry_order_unresolved"] = True
+                                position_record["entry_order_unresolved_reason"] = (
+                                    position_record.get("protective_stop_confirmation_reason")
+                                    or "protective_stop_arm_failed"
+                                )
+                                position_record["entry_order_execution_status"] = "protective_stop_unresolved"
+                                entry_flow_halted = True
                             broker.save_portfolio(portfolio)
                             if position_record.get("entry_order_unresolved"):
                                 actions_taken.append(
@@ -2824,6 +3381,10 @@ def _main_exec():
                                 actions_taken.append(f"BUY {item['code']} - Daytrade entry (@{exec_p:,.1f})")
                             if stop_order_id:
                                 actions_taken.append(f"STOP {item['code']} - protective stop armed (ID: {stop_order_id})")
+                            else:
+                                actions_taken.append(
+                                    f"STOP {item['code']} - protective stop unresolved; further entries halted"
+                                )
                             if not entry_flow_halted:
                                 opened_count += 1
                             else:

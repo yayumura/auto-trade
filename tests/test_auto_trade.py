@@ -12,10 +12,13 @@ from types import SimpleNamespace
 import auto_trade
 from auto_trade import (
     build_daytrade_position_record,
+    build_daytrade_production_observation_universe,
     build_daytrade_watch_plan,
     close_daytrade_positions_by_signal,
     compute_daytrade_snapshot,
+    compute_observed_daytrade_production_snapshot,
     is_inverse_only_candidate_set,
+    should_capture_daytrade_production_snapshot,
     sync_daytrade_registry,
 )
 from core.logic import (
@@ -32,6 +35,11 @@ def isolate_runtime_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_trade, "DAYTRADE_DECISION_LOG_FILE", str(tmp_path / "daytrade_decisions.csv"))
     monkeypatch.setattr(auto_trade, "DAYTRADE_EXIT_LOG_FILE", str(tmp_path / "daytrade_exit_log.csv"))
     monkeypatch.setattr(auto_trade, "INTRADAY_SNAPSHOT_FILE", str(tmp_path / "intraday_snapshots.csv"))
+    monkeypatch.setattr(
+        auto_trade,
+        "DAYTRADE_PRODUCTION_SNAPSHOT_FILE",
+        str(tmp_path / "daytrade_production_snapshots.jsonl"),
+    )
 def _side_from_action(action):
     if action == StockOrderAction.MARGIN_CLOSE_LONG:
         return "1"
@@ -56,6 +64,23 @@ def _build_snapshot_df():
     return pd.DataFrame(rows, index=dates, columns=columns)
 
 
+def _build_production_snapshot_df():
+    dates = pd.bdate_range(end="2026-07-10", periods=260)
+    tickers = ["1000.T", "1321.T"]
+    fields = ["Open", "High", "Low", "Close", "Volume"]
+    columns = pd.MultiIndex.from_tuples(
+        (ticker, field) for ticker in tickers for field in fields
+    )
+    rows = []
+    for idx in range(len(dates)):
+        row = []
+        for ticker_offset in (0.0, 100.0):
+            base = 100.0 + ticker_offset + (idx * 0.05) + ((idx % 5) - 2) * 0.2
+            row.extend([base - 0.2, base + 1.0, base - 1.0, base, 1_000_000.0])
+        rows.append(row)
+    return pd.DataFrame(rows, index=dates, columns=columns)
+
+
 def test_compute_daytrade_snapshot_calculates_breadth_without_name_error():
     data_df = _build_snapshot_df()
     symbols_df = pd.DataFrame({"コード": ["1000", "1321"], "銘柄名": ["Foo", "Bar"]})
@@ -75,6 +100,133 @@ def test_compute_daytrade_snapshot_calculates_breadth_without_name_error():
     assert snapshot["latest_close_map"]["1000"] > 0
 
 
+def test_production_observation_universe_uses_prior_liquidity_and_keeps_market_separate():
+    data_df = _build_production_snapshot_df()
+
+    with patch("auto_trade.get_prime_tickers", return_value=["1000.T", "1321.T"]), patch(
+        "auto_trade.resolve_daytrade_scan_min_turnover",
+        return_value=0.0,
+    ):
+        first = build_daytrade_production_observation_universe(
+            data_df,
+            max_symbols=49,
+        )
+        second = build_daytrade_production_observation_universe(
+            data_df,
+            max_symbols=49,
+        )
+
+    assert first == second
+    assert first == ["1000"]
+    assert "1321" not in first
+
+
+def test_production_snapshot_collection_continues_while_entry_gate_is_closed():
+    assert should_capture_daytrade_production_snapshot(
+        is_sim=False,
+        scan_interval_ready=True,
+        phase_entry_blocked=False,
+        now_time=pd.Timestamp("2026-07-13 09:30:00").time(),
+    )
+    assert not should_capture_daytrade_production_snapshot(
+        is_sim=True,
+        scan_interval_ready=True,
+        phase_entry_blocked=False,
+        now_time=pd.Timestamp("2026-07-13 09:30:00").time(),
+    )
+    assert not should_capture_daytrade_production_snapshot(
+        is_sim=False,
+        scan_interval_ready=True,
+        phase_entry_blocked=False,
+        now_time=pd.Timestamp("2026-07-13 14:00:00").time(),
+    )
+
+
+def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
+    data_df = _build_production_snapshot_df()
+    symbols_df = pd.DataFrame(
+        {"コード": ["1000", "1321"], "銘柄名": ["Foo", "Market"]}
+    )
+    opening_time = pd.Timestamp("2026-07-13 09:00:00", tz="Asia/Tokyo")
+    quote_time = pd.Timestamp("2026-07-13 09:30:00", tz="Asia/Tokyo")
+    prior_1000 = float(data_df[("1000.T", "Close")].iloc[-1])
+    prior_1321 = float(data_df[("1321.T", "Close")].iloc[-1])
+    boards = {
+        "1000": {
+            "open": 113.0,
+            "price": 114.0,
+            "current_price": 114.0,
+            "opening_price_timestamp": opening_time,
+            "quote_timestamp": quote_time,
+            "current_price_timestamp": quote_time,
+            "received_at": quote_time,
+            "best_sell_price": 114.1,
+            "best_buy_price": 113.9,
+            "prev_close": prior_1000,
+        },
+        "1321": {
+            "open": 213.0,
+            "price": 214.0,
+            "current_price": 214.0,
+            "opening_price_timestamp": opening_time,
+            "quote_timestamp": quote_time,
+            "current_price_timestamp": quote_time,
+            "received_at": quote_time,
+            "best_sell_price": 214.1,
+            "best_buy_price": 213.9,
+            "prev_close": prior_1321,
+        },
+    }
+
+    with patch("auto_trade.get_prime_tickers", return_value=["1000.T", "1321.T"]):
+        result = compute_observed_daytrade_production_snapshot(
+            data_df=data_df,
+            symbols_df=symbols_df,
+            requested_codes={"1321", "1000"},
+            boards=boards,
+            board_failures={},
+            event_time=quote_time,
+            current_equity=1_000_000.0,
+            week_start_equity=1_000_000.0,
+            account_cash=1_000_000.0,
+            trade_mode="KABUCOM_TEST",
+            is_simulation=False,
+        )
+
+    snapshot = result["production_snapshot"]
+    replay = auto_trade.replay_daytrade_production_snapshot(snapshot)
+    symbol_by_code = {
+        item["code"]: item
+        for item in snapshot["inputs"]["symbols"]
+    }
+    assert snapshot["decision_allowed"] is True
+    assert snapshot["eligible_for_decision_clean_holdout"] is False
+    assert replay.parity is True
+    assert replay.replayable is True
+    assert symbol_by_code["1000"]["open_today"] == 113.0
+    assert "session_high" not in symbol_by_code["1000"]
+    assert snapshot["inputs"]["execution_quotes"][0]["current_price"] in {114.0, 214.0}
+
+    mismatched_boards = {code: dict(value) for code, value in boards.items()}
+    mismatched_boards["1000"]["prev_close"] = prior_1000 + 10.0
+    with patch("auto_trade.get_prime_tickers", return_value=["1000.T", "1321.T"]):
+        blocked = compute_observed_daytrade_production_snapshot(
+            data_df=data_df,
+            symbols_df=symbols_df,
+            requested_codes={"1321", "1000"},
+            boards=mismatched_boards,
+            board_failures={},
+            event_time=quote_time,
+            current_equity=1_000_000.0,
+            week_start_equity=1_000_000.0,
+            account_cash=1_000_000.0,
+            trade_mode="KABUCOM_TEST",
+            is_simulation=False,
+        )
+    assert blocked["decision_allowed"] is False
+    assert "1000:board_cache_prev_close_mismatch" in blocked["rejection_reasons"]
+
+
 
 def test_daytrade_decision_log_records_shared_candidate_context():
     candidates = [
@@ -87,6 +239,7 @@ def test_daytrade_decision_log_records_shared_candidate_context():
             "gap_pct": 0.004,
             "open_vs_sma_atr": 1.2,
             "rs_alpha": 35.0,
+            "decision_snapshot_id": "snapshot-1",
         }
     ]
     rows = auto_trade.build_daytrade_decision_log_rows(
@@ -112,6 +265,7 @@ def test_daytrade_decision_log_records_shared_candidate_context():
     assert row["selected_count"] == 1
     assert row["code"] == "1000"
     assert row["setup_type"] == "primary"
+    assert row["decision_snapshot_id"] == "snapshot-1"
     assert row["breadth"] == 0.62
     assert row["market_ratio"] == 1.04
 
@@ -192,6 +346,7 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
             "score": 8.4,
             "rs_alpha": 42.0,
             "prev_rsi2": 63.0,
+            "decision_snapshot_id": "snapshot-1",
         },
         executed_price=105.0,
         shares=300,
@@ -207,6 +362,52 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["buy_rs"] == 42.0
     assert record["buy_rsi2"] == 63.0
     assert record["protective_stop_order_id"] is None
+    assert record["decision_snapshot_id"] == "snapshot-1"
+
+@pytest.mark.parametrize(
+    ("setup_type", "expected_day_buying_power", "expected_inverse_buying_power"),
+    [
+        ("primary", 979_800.0, 500_000.0),
+        ("inverse_pullback", 1_000_000.0, 479_800.0),
+    ],
+)
+def test_open_simulated_daytrade_position_persists_all_setup_types(
+    setup_type,
+    expected_day_buying_power,
+    expected_inverse_buying_power,
+):
+    account = {"cash": 1_000_000.0}
+    portfolio = []
+    item = {
+        "code": "1459" if setup_type.startswith("inverse") else "1000",
+        "name": "Test",
+        "setup_type": setup_type,
+        "atr": 2.0,
+    }
+
+    with patch("auto_trade.SLIPPAGE_RATE", 0.01):
+        executed_price, day_buying_power, inverse_day_buying_power = (
+            auto_trade.open_simulated_daytrade_position(
+                account=account,
+                portfolio=portfolio,
+                item=item,
+                buy_price=100.0,
+                shares=200,
+                day_buying_power=1_000_000.0,
+                inverse_day_buying_power=500_000.0,
+                buy_time="2026-07-11 09:30:00",
+            )
+        )
+
+    assert executed_price == 101.0
+    assert account["cash"] == 979_800.0
+    assert day_buying_power == expected_day_buying_power
+    assert inverse_day_buying_power == expected_inverse_buying_power
+    assert len(portfolio) == 1
+    assert portfolio[0]["code"] == item["code"]
+    assert portfolio[0]["setup_type"] == setup_type
+    assert portfolio[0]["shares"] == 200
+    assert portfolio[0]["buy_price"] == 101.0
 
 
 def test_mark_daytrade_portfolio_updates_post_entry_extrema_from_current_quote_not_legacy_high_low():
@@ -325,8 +526,37 @@ def test_sync_daytrade_registry_tracks_success_and_failure():
     assert ok is False
     assert new_codes == {"1000"}
     assert removed_codes == {"9999"}
-    assert broker.registered == [["1000"]]
+    assert broker.registered == []
     assert broker.unregistered == [["9999"]]
+
+
+def test_sync_daytrade_registry_unregisters_before_registering_new_universe():
+    class _Broker:
+        def __init__(self):
+            self.calls = []
+
+        def unregister_symbols(self, symbols):
+            self.calls.append(("unregister", set(symbols)))
+            return True
+
+        def register_symbols(self, symbols):
+            self.calls.append(("register", set(symbols)))
+            return True
+
+    broker = _Broker()
+    ok, _, _ = sync_daytrade_registry(
+        broker=broker,
+        current_targets={"1000", "1321"},
+        already_tracked={"1321", "9999"},
+        market_index_code="1321",
+        is_sim=False,
+    )
+
+    assert ok is True
+    assert broker.calls == [
+        ("unregister", {"9999"}),
+        ("register", {"1000"}),
+    ]
 
 
 def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id():
@@ -1109,7 +1339,7 @@ def test_close_daytrade_positions_by_signal_ignores_pre_entry_session_extremes()
         99.8,
         1_000,
         pd.Timestamp("2026-04-21 10:15:00"),
-        open_price=100.0,
+        open_price=95.0,
         high_price=120.0,
         low_price=95.0,
     )

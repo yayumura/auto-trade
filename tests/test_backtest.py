@@ -319,6 +319,61 @@ def test_daytrade_can_return_candidate_log():
     assert opened_candidate["modeled_exit_reason"] == trade_log[0]["exit_reason"]
     assert opened_candidate["net_pnl"] == results[0]
 
+def test_daytrade_backtest_generates_catchup_gapdown_candidates():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+
+    def _gapdown_only(open_p, *_args, **_kwargs):
+        if not np.isclose(float(open_p), 105.0):
+            return []
+        return [{
+            "setup_type": "catchup_gapdown",
+            "gap_pct": -0.01,
+            "prev_return": -0.02,
+            "prev_rsi2": 20.0,
+            "open_from_prev_low_atr": 0.5,
+            "open_vs_sma_atr": 1.0,
+            "rs_alpha": 30.0,
+            "symbol_trend_ratio": 1.05,
+        }]
+
+    def _select_catchup(_primary, _strong, _fallback, catchup, _inverse, _bull, **_kwargs):
+        return catchup[:1]
+
+    with patch("core.logic.is_daytrade_catchup_market_allowed", return_value=True), patch(
+        "core.daytrade_candidate_engine.evaluate_daytrade_open_setup", return_value=None
+    ), patch(
+        "core.daytrade_candidate_engine.evaluate_daytrade_strong_oversold_open_setup", return_value=None
+    ), patch(
+        "core.daytrade_candidate_engine.evaluate_daytrade_fallback_open_setup", return_value=None
+    ), patch(
+        "core.daytrade_candidate_engine.evaluate_daytrade_catchup_open_setups", side_effect=_gapdown_only
+    ), patch(
+        "core.daytrade_candidate_engine.score_daytrade_catchup_open_setup", return_value=10.0
+    ), patch(
+        "backtest.select_daytrade_candidates", side_effect=_select_catchup
+    ), patch(
+        "backtest.cap_daytrade_position_size", return_value=100
+    ):
+        _, trade_count, _, _, _, trade_log, candidate_log = run_backtest_v16_production(
+            univ_indices=np.arange(1),
+            bundle_np=bundle_np,
+            timeline=dates,
+            breadth_ratio=np.ones(len(dates)) * 0.8,
+            initial_cash=10_000_000,
+            max_pos=1,
+            leverage_rate=1.0,
+            return_daily_stats=True,
+            return_trade_log=True,
+            return_candidate_log=True,
+        )
+
+    assert trade_count == 1
+    assert trade_log[0]["setup_type"] == "catchup_gapdown"
+    assert any(
+        row["setup_type"] == "catchup_gapdown" and row["opened"]
+        for row in candidate_log["candidates"]
+    )
+
 def test_daytrade_open_entry_does_not_use_same_day_breadth():
     dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
     breadth_ratio = np.full(len(dates), 0.20)
@@ -407,8 +462,8 @@ def test_daytrade_catchup_rs_strong_continuation_forwards_risk_budget_pct():
         return 100
 
     with patch("backtest.select_daytrade_candidates", side_effect=_select_first_available), patch(
-        "backtest.resolve_daytrade_catchup_notional_pct", return_value=1.0
-    ), patch("backtest.resolve_daytrade_catchup_equity_notional_pct", return_value=2.0), patch(
+        "core.daytrade_candidate_engine.resolve_daytrade_catchup_notional_pct", return_value=1.0
+    ), patch("core.daytrade_candidate_engine.resolve_daytrade_catchup_equity_notional_pct", return_value=2.0), patch(
         "backtest.cap_daytrade_position_size", side_effect=_capture_cap_daytrade_position_size
     ):
         final_assets, trade_count, monthly, results = run_backtest_v16_production(

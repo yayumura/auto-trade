@@ -206,6 +206,18 @@ baseline を更新した場合は、[README.md](/abs/path/c:/Users/yayum/git_wor
 戦略コードを変更するときは、本番とバックテストの乖離を減らす設計を優先すること。
 バックテスト側に独自の戦略判断が増える変更は、実行シミュレーション上どうしても必要な場合を除き、設計上の問題として扱うこと。
 
+## 本番同等テストの必須条件
+
+戦略候補、ranking、sizing、entry / exit、注文、risk、時刻、市場データ処理に触れる変更は、`pytest`、日足OHLC backtest、`SIM` だけで完了扱いにしないこと。これらは回帰確認または `reference-only` であり、本番収益性の証明ではない。
+
+1. 変更後と同じ code commit / runtime config で取得した actual `KABUCOM_TEST` または `KABUCOM_LIVE` production snapshot を replay し、candidate / selected digest の完全一致を確認すること
+2. 選択後の AI veto、注文拒否、zero fill、部分約定、取消、保護逆指値、exit、残数量を `decision_snapshot_id`、order / execution ID で連結し、lifecycle の欠落がないことを確認すること
+3. 欠けた板、注文、約定、決済を日足OHLC、固定slippage、有利な価格で補完しないこと。不明な状態は fail closed とすること
+4. `KABUCOM_TEST` は schema、signal parity、注文 lifecycle の検証用とし、本番収益の根拠には使わないこと
+5. 非simulationの `KABUCOM_LIVE` snapshot と、そこへ連結した actual exit だけを本番損益の観測証拠として扱うこと。gross / net、税、手数料、信用費用を区別すること
+6. 必要な snapshot または linked actual exit がまだ無い場合は、「本番同等未検証」「本番収益性未検証」と明記し、日足成績を代替証拠にしないこと
+7. 新しい本番差分を見つけた場合は、同じターンで README の本番差分表とテスト欄へ追記し、解消するまでは採用判断を利益方向へ丸めないこと
+
 ## テストとREADME
 
 テストを追加・変更した場合は、[README.md](/abs/path/c:/Users/yayum/git_work/auto-trade/README.md) のテスト欄も同じターンで更新すること。
@@ -216,6 +228,12 @@ baseline を更新した場合は、[README.md](/abs/path/c:/Users/yayum/git_wor
 3. 必要ならファイル単位の実行コマンド
 
 テストコードだけ更新して README の実行方法や対象説明を古いまま残さないこと。
+
+## モデルとサブエージェントへの委譲
+
+同等の検証能力を維持できる場合、境界の明確な読み取り監査、ログ集計、機械的照合、独立したテスト候補の列挙は、廉価モデルまたはサブエージェントへ委譲してよい。
+
+ただし親担当は、`AGENTS.md` と適用する skill を自ら読み、仮説、採否、holdout 汚染判定、金融安全、権限、実注文判断を保持すること。子の成果物と差分をレビューし、authoritative test と production replay を親担当自身が最終確認すること。委譲結果は証拠であって採用権限ではない。重複委譲を避け、最小人数・明確な scope とし、廉価化を理由に検証範囲を削らないこと。
 
 ## セッション終了チェック
 

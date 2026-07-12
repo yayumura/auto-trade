@@ -70,7 +70,7 @@
 
   - `primary` の Wednesday mid-breadth / hot-market / high-score / low-open residual pocket (`breadth 0.60-0.71` / `market_ratio 1.15-1.20` / `score 7.5-10` / `open_vs_sma_atr < 1.0`) は no-trade にする
 
-  - `primary` の intraday failed-runup exit は、セッション中の高値が買値から `+2%` 以上伸びたあとに失速したら break-even で退避する
+  - `primary` の intraday failed-runup exit は、entry後に一度でも建値を上回ったあと建値以下へ失速したら、stop/target優先の保守的順序を維持してbreak-evenへ退避する
 
   - `catchup_rs` の Monday / Friday 高 breadth hot-market は selector から除外する
 
@@ -86,7 +86,7 @@
 
   - `catchup_rs` の low-breadth / strong-continuation pure-win pocket（`breadth < 0.50` / `prev_return >= 3%` / `open_vs_sma_atr <= 1.0` / `score >= 10.0`）は selected base leverage を `0.35` に引き上げ、equity notional を `5.0` / risk budget を `0.30` にする
 
-  - `catchup_gapdown` の Friday deep-gap / high-score pocket（`score > 6` / `gap <= -1%`）の equity notional は `0.25` に抑える
+  - broad `catchup_gapdown` family は、複数年 train で net negative かつ月次 `+20%` 達成本数を改善しないため、細かな例外を足さず shared setup 全体を no-trade にする
 
   - `fallback` の Tuesday / Friday 弱市場（`market_ratio 1.00-1.10` / `breadth < 0.55` / positive gap）は equity notional を `0.50` に抑える
 
@@ -192,9 +192,9 @@
 
 ## 現在の検証状況
 
-最新確認日は **2026-07-10** です。
+最新確認日は **2026-07-12** です。
 
-使用データの最新日は **2026-07-09** です。
+使用データの最新日は **2026-07-10** です。
 
 データ更新と標準確認は `python scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` で行いました。
 
@@ -202,44 +202,48 @@
 
 train-only diagnostics は `python analyze_backtest_trade_log.py --holdout-months 6 --top-n 30 --output-trades-csv tmp\train_trade_log.csv` で確認しました。
 
-full history の最新確認値:
+以下の数値は日足OHLCによる `reference-only` baselineです。2026-07-12時点ではproduction snapshotとlinked actual exitがまだ0件なので、本番条件での収益性は未検証です。
 
-- `FINAL EQUITY: 476,117,832円`
-- `CLOSED TRADES: 403`
-- `WIN RATE: 67.00%`
-- `TOTAL RETURN: +47511.78%`
-- `PROFIT_FACTOR: 21.48`
-- `WEEKS >= +1%: 103/228`
-- `POSITIVE WEEKS: 159/228`
-- `MONTHS >= 3/4 ACTIVE: 1/53`
-- `WORST DAY: -6,425,000円`
+full history の最新確認値（daily OHLC reference-only）:
+
+- `FINAL EQUITY: 113,354,312円`
+- `CLOSED TRADES: 418`
+- `WIN RATE: 66.51%`
+- `TOTAL RETURN: +11235.43%`
+- `PROFIT_FACTOR: 12.19`
+- `WEEKS >= +1%: 98/228`
+- `POSITIVE WEEKS: 158/228`
+- `MONTHS >= 3/4 ACTIVE: 1/52`
+- `MONTHS >= 20%: 13/61`
+- `WORST DAY: -2,093,000円`
 
 train window の最新確認値:
 
-- `FINAL EQUITY: 192,641,350円`
-- `CLOSED TRADES: 361`
-- `WIN RATE: 66.76%`
-- `TOTAL RETURN: +19164.13%`
-- `PROFIT_FACTOR: 49.63`
-- `WEEKS >= +1%: 89/202`
-- `POSITIVE WEEKS: 139/202`
+- `FINAL EQUITY: 70,930,995円`
+- `CLOSED TRADES: 375`
+- `WIN RATE: 66.13%`
+- `TOTAL RETURN: +6993.10%`
+- `PROFIT_FACTOR: 12.58`
+- `WEEKS >= +1%: 85/202`
+- `POSITIVE WEEKS: 138/202`
 - `MONTHS >= 3/4 ACTIVE: 1/46`
-- `WORST DAY: -1,130,500円`
-- `MONTHS >= 20% (full calendar months inside train): 15/55`
+- `WORST DAY: -2,093,000円`
+- `MONTHS >= 20% (full calendar months inside train): 12/55`
 
-直近 6ヶ月 holdout `2026-01-13` から `2026-07-09` の確認値（reference / veto 用）:
+直近 6ヶ月 holdout `2026-01-13` から `2026-07-10` の確認値（reference / veto 用）:
 
-- `FINAL EQUITY: 476,117,832円`
-- `CLOSED TRADES: 42`
-- `WIN RATE: 69.05%`
-- `TOTAL RETURN: +147.15%`
-- `PROFIT_FACTOR: 15.72`
-- `WEEKS >= +1%: 14/26`
+- `FINAL EQUITY: 113,354,312円`
+- `CLOSED TRADES: 43`
+- `WIN RATE: 69.77%`
+- `TOTAL RETURN: +59.81%`
+- `PROFIT_FACTOR: 11.60`
+- `WEEKS >= +1%: 13/26`
 - `POSITIVE WEEKS: 20/26`
-- `MONTHS >= 3/4 ACTIVE: 0/6`
-- `WORST DAY: -6,425,000円`
+- `MONTHS >= 3/4 ACTIVE: 0/5`
+- `MONTHS >= 20%: 1/5`
+- `WORST DAY: -1,327,200円`
 
-直近1ヶ月 `100万円 standalone` `2026-06-10` から `2026-07-09` の確認値（reference / veto 用）:
+直近1ヶ月 `100万円 standalone` `2026-06-11` から `2026-07-10` の確認値（reference / veto 用）:
 
 - `START EQUITY: 1,000,000円`
 - `FINAL EQUITY: 1,197,033円`
@@ -263,7 +267,7 @@ train window の最新確認値:
 
 - そのため、現時点では採用の加点材料ではなく、悪化が大きい案を止める `veto` 用の監視値として扱います
 
-- 次の `clean holdout` は、現在の使用データ最新日 `2026-07-09` の翌営業日以降、つまり `2026-07-10` 以降の未観測データです
+- 次の `clean holdout` は、今回のロジック凍結後となる `2026-07-13` 以降の未観測データです
 
 - `KABUCOM_LIVE` の新規エントリーは、`ENABLE_LIVE_ORDER=true` と `APPROVED_CONFIG_HASH` が `core.config.RUNTIME_LIVE_ORDER_CONFIG_HASH` と一致した場合にのみ許可されます
 
@@ -329,6 +333,8 @@ auto-trade/
 
 ├── jp_backtest.py
 
+├── jp_production_replay.py
+
 ├── jp_jquants_fetcher_v2.py
 
 ├── jp_jquants_margin_fetcher.py
@@ -344,6 +350,10 @@ auto-trade/
 ├── core/
 
 │   ├── config.py
+
+│   ├── daytrade_candidate_engine.py
+
+│   ├── daytrade_production_replay.py
 
 │   ├── jquants_margin_cache.py
 
@@ -362,6 +372,10 @@ auto-trade/
     ├── test_analyze_backtest_trade_log.py
 
     ├── test_backtest.py
+
+    ├── test_daytrade_candidate_engine.py
+
+    ├── test_daytrade_production_replay.py
 
     ├── test_kabucom_broker.py
 
@@ -391,6 +405,10 @@ auto-trade/
 
   shared scan 候補と live 側の entry 判定は `data/.../daytrade_decisions.csv` に記録されます。
 
+  `KABUCOM_TEST / KABUCOM_LIVE` の候補判断は、前日確定値だけで作った49銘柄の観測 universe と市場指数 `1321` を合わせた最大50銘柄に限定します。9:30以降の最初の板 batch から当日寄付を固定し、`core/daytrade_candidate_engine.py` と同じ selector を通した判断を `data/.../daytrade_production_snapshots.jsonl` へ1日1件保存します。現在値・bid/ask・日中 high/low・volume は execution evidence として別領域へ保存され、candidate signal には入りません。
+
+  snapshot収集は live write gate が閉じていても継続しますが、注文は引き続き readiness / financial-write gate で停止します。板の一部欠落、別日timestamp、前日cacheと板の前日終値不一致、registry同期失敗、snapshot replay不一致が1つでもあれば、その日は新規entryを行いません。一度見送った上位候補を後刻の価格で再順位付けしたり、次順位候補へ差し替えたりもしません。
+
   保有中の板スナップショットは `data/.../intraday_snapshots.csv` に記録され、entry context、含み損益、stop までの距離、高値からの剥落、安値からの戻りも追えます。
 
   live 側の intraday stop / target / primary failed-runup exit と、`14:30` 以降の force flatten は shared helper で判定され、`data/.../daytrade_exit_log.csv` に quote ベースの exit、target までの距離、simulation では slippage 込み modeled exit、live では実約定ベースの exit が記録されます。live entry 後は保護逆指値を張り、`protective_stop_order_id` を portfolio に残して通常の stuck-order 自動取消から除外します。部分約定も `filled_shares` / `remaining_shares` 付きで event として残ります。
@@ -399,6 +417,8 @@ auto-trade/
 - `backtest.py`
 
   共有戦略ロジックを使って仮想約定を行うバックテスト実行レイヤーです。
+
+  daytrade 候補は `core/daytrade_candidate_engine.py` を通し、入力を当日寄付と前日までに確定した特徴量へ限定します。当日 `close / high / low` は候補生成後の約定シミュレーションだけで使います。
 
 - `jp_backtest.py`
 
@@ -419,6 +439,20 @@ auto-trade/
   `--standalone-latest-months 1` を付けると、最新直近1ヶ月を `100万円` 初期資金の standalone replay でも併記できます。
 
   `--refresh-cache` を付けると、キャッシュ更新後の最新日を基準に holdout を切ります。
+
+  これは日足OHLCによる `reference-only` 検証です。本番相当の検証結果として扱わず、実観測結果は次の `jp_production_replay.py` で確認します。
+
+- `jp_production_replay.py`
+
+  `daytrade_production_snapshots.jsonl` を共有candidate engineへ再投入し、候補群とselected candidateのdigestが本番記録と完全一致することを確認します。`decision_snapshot_id` で非simulationの実exitへ接続し、実約定価格差ベースのgross損益とPFを集計します。`KABUCOM_TEST` のlinked exitはexecution replayに含めますが、`eligible_for_decision_clean_holdout` には含めません。
+
+  snapshotがない場合、必要件数未満、または1件でもparity不一致なら非zeroで終了します。`--min-snapshots` は運用上の最低件数確認であり、統計的な収益証明ではありません。
+
+```bash
+python jp_production_replay.py --trade-mode KABUCOM_TEST --min-snapshots 1
+
+python jp_production_replay.py --trade-mode KABUCOM_LIVE --min-snapshots 1
+```
 
 - `scripts/jp_refresh_validate.py`
 
@@ -446,11 +480,15 @@ auto-trade/
 
   用途は「各 window の train で自動再最適化すること」ではなく、「現行ロジックの頑健性確認」です。
 
+  税・明示コストは標準 `jp_backtest.py` と同じ共有設定を使います。
+
 - `jp_optimizer.py`
 
   `train` 期間だけで候補を順位付けし、上位候補だけを trailing holdout で再確認する optimizer です。
 
   既定では `--min-train-months 24` を要求し、短い recent slice への当て込みを避けます。
+
+  train ranking / holdout reviewとも、税・明示コストは標準 `jp_backtest.py` と同じ共有設定を使います。
 
 - `jp_jquants_fetcher_v2.py`
 
@@ -488,15 +526,30 @@ auto-trade/
 
 | `KABUCOM_LIVE` | 実運用 | もちろん最も本番寄り | 実資金なので検証用途ではなく本番用途 |
 
-使い分けの目安は次のとおりです。
+使い分けは、証拠レベルを混同しないよう次の順にします。
 
-1. まず `jp_backtest.py` で、shared strategy の良し悪しを確認する
+1. `pytest` / `SIM` / `jp_backtest.py` は、shared logic の回帰と train 仮説の `reference-only` 確認に使う
+2. `KABUCOM_TEST` の actual production snapshot で signal parity、注文拒否、部分約定、取消、保護逆指値などの schema / lifecycle を確認する。本番収益の根拠にはしない
+3. write gate を閉じた `KABUCOM_LIVE` でも point-in-time decision snapshot を蓄積し、同一 code / config で exact replay する
+4. 本番収益は、非simulation `KABUCOM_LIVE` snapshotへ連結した actual exit と口座コスト証跡でのみ評価する
 
-2. 次に `KABUCOM_TEST` で、板・注文・部分約定を含む執行の差を確認する
+### 本番との差分と証拠レベル
 
-3. 最後に `KABUCOM_LIVE` で実運用する
+| 項目 | 日足OHLC / SIM | production snapshot / KABUCOM_TEST / LIVE | 現在の扱い |
+| --- | --- | --- | --- |
+| 候補母集団 | 現在のPrime全銘柄を履歴全体へ適用 | 前日確定値で固定した49銘柄 + `1321` | 日足は survivorship と母集団差があるため reference-only |
+| 判断時刻 | 公式寄付でentryしたものとして一日全体を評価 | 9:30以降、最初に取得できた逐次Board batchで判断 | 9:00〜取得時刻の値動きは本番entry前。過去日足では再現不能 |
+| Board / 鮮度 | 板、特別気配、取得失敗なし | 50件を逐次取得。銘柄別timestampはあるがbatch開始・終了幅と `PreviousCloseTime` はsnapshot未保存 | 欠損・cross-day・価格不一致はfail closed。batch時間差と厳密な前営業日照合は未解消 |
+| entry / 流動性 | 固定slippage、前日turnover比上限、全量約定 | spread、注文拒否、partial / zero fill、取消待ち、実余力 | 発注数量にも同じturnover上限を適用済み。過去日足の全量約定差は残る |
+| exit | 日足High/Lowでstop優先、残りは日足Close | post-entry quote、保護逆指値、取消確認、14:30 flatten、実約定 | liveのentry前寄値をexit判定へ使う差は解消。保護逆指値の市場約定をexit/PnLへ自動reconcileする経路は未解消 |
+| position state | 1日内で完結 | broker positionを毎loop再取得 | ExecutionID一致時にstrategy / stop / snapshot metadataを保持するよう修正済み |
+| selector / sizing | model cashの複利 | TESTはlocal台帳、LIVEはwallet余力でcap | snapshotは当時のselector contextを固定するが、資産軌跡そのものは同一ではない |
+| 税・費用 | 利益取引ごとに税を引く保守的近似 | exit logの `observed_pnl` は税・手数料・信用費用前のgross | `observed_gross_pnl` として扱い、dailyの税引き値と直接比較しない。net証拠は未解消 |
+| 外部news / AI veto | 原則再現しない | shared selector後に外部newsとAIでoperational veto | news本文/hash、model、prompt、raw responseがsnapshotに無く、最終注文判断のexact replayは未解消 |
+| replay範囲 | signalと損益を同時に近似 | 現状はcandidate / selected digestとlinked exit集計 | sizing、veto、注文、取消、stop、残数量を含むlifecycle completenessは未解消 |
+| 履歴証拠 | 過去へ遡及可能だがreference-only | 実観測snapshotは導入後にしか蓄積できない | snapshot / linked actual exitが不足する間は「本番同等未検証」「本番収益性未検証」 |
 
-つまり、`jp_backtest.py` は「戦略ロジックの確認に最適」、`KABUCOM_TEST` は「執行の確認に最適」、`SIM` は「高速なローカル確認用」という役割分担です。
+解消済みのコード差分があっても、actual snapshotとlinked lifecycleで再確認されるまでは本番同等の完了証拠にはしません。`STATUS: PARITY_OK` はsignal再現一致であり、収益性や注文 lifecycle 完全性の証明ではありません。
 
 ## Train / Holdout 運用
 
@@ -522,9 +575,9 @@ auto-trade/
 
 現時点の運用メモ:
 
-- 現在の `6m holdout` `2026-01-13` から `2026-07-09` は `contaminated holdout` として扱う
+- 現在の `6m holdout` `2026-01-13` から `2026-07-10` は `contaminated holdout` として扱う
 
-- 次の `clean holdout` は `2026-07-10` 以降の未観測データで積み上げる
+- 次の `clean holdout` は `2026-07-13` 以降の未観測データで積み上げる
 
 - それまでは `train` と `jp_walkforward.py` を採用判断の主軸にし、既存 holdout は `veto` 専用で使う
 
@@ -783,6 +836,40 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
 ```
 
+## 本番同等replayの開始条件
+
+日足backtestではなく本番同等として扱うには、次をすべて満たす必要があります。
+
+1. J-Quants cacheのfeature日がtrade dateより前であり、同日partial rowを含まない
+2. 前日確定値だけで固定した観測49銘柄と `1321` のregistry同期が成功している
+3. 9:30以降の最初の板batchが全50銘柄を返し、OpeningPriceTimeとtrade dateが一致する
+4. 板のPreviousCloseとcacheの前日終値がJPX tick単位で一致する
+5. candidate入力には当日寄付だけを使い、現在値・high/low・volume・bid/askはexecution evidenceへ分離する
+6. 保存snapshotを同じcode/configでreplayし、candidate digestとselected digestが完全一致する
+7. 実注文・部分約定・取消・exitを同じ `decision_snapshot_id` で接続できる
+8. 収益評価は非simulationの実約定exitだけで行い、欠損を日足OHLCや有利な価格で補完しない
+
+最初に `KABUCOM_TEST` でschema/parity/order journalを確認します。その後もlive write gateを閉じたまま `KABUCOM_LIVE` のdecision snapshotを蓄積できます。次の未観測営業日である2026-07-13以降をdecision clean holdoutの起点とし、実注文を再開した日以降だけをexecution clean holdoutとして別集計します。
+
+```powershell
+$env:TRADE_MODE = "KABUCOM_TEST"
+python auto_trade.py
+
+$env:TRADE_MODE = "KABUCOM_LIVE"
+$env:ENABLE_LIVE_ORDER = "false"
+python auto_trade.py
+```
+
+```bash
+python jp_production_replay.py --trade-mode KABUCOM_TEST --min-snapshots 1
+
+python jp_production_replay.py --trade-mode KABUCOM_LIVE --min-snapshots 1
+```
+
+`STATUS: PARITY_OK` はcandidate / selectedのsignal再現一致であり、収益性や注文 lifecycle 完全性の証明ではありません。実exit件数が0件なら、損益については「未検証」と扱います。`OBSERVED_GROSS_PNL` は税・手数料・信用費用前なので、net損益とは区別します。
+
+AIが候補、sizing、entry / exit、注文、risk、時刻、市場データ処理を変更した場合、このproduction replayとlinked lifecycle確認を完了条件にします。actual snapshotがまだ無ければ未検証と報告し、日足OHLCやSIMを本番同等の代替証拠にはしません。
+
 ## テスト
 
 現在のテストは主に次を確認します。
@@ -790,6 +877,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 - `tests/test_logic.py`
 
   - shared strategy の判定関数
+
+  - lot sizingが前日turnoverの共有 `liquidity_limit` を発注株数上限として適用すること
 
   - setup ごとの境界条件
 
@@ -1027,6 +1116,10 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - `primary` の failed-runup exit が、建値を上回った後の建値割れだけで発動し、建値ちょうどの初期値では発動しないこと
 
+  - 水曜の live-compatible `evaluate_daytrade_setup` が sizing 専用の未定義 context を参照せず評価できること
+
+  - open snapshot の `feature_asof < trade_date` と `open_asof == trade_date` を強制し、同日確定値や前日openの混入を拒否すること
+
 - `tests/test_backtest.py`
 
   - `backtest.py` から shared logic を参照したときの売買フロー
@@ -1042,6 +1135,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `candidate_log` の日次 summary、scan / setup counters、selected / not_selected / opened / blocked 診断列
 
   - 火曜 low breadth `catchup_rs` の probe 約定フロー
+
+  - candidate adapter が `catchup_gapdown` を受け取った場合も backtest 側で候補化・約定でき、shared setup 有効化時の実装差分を作らないこと
 
   - small-account で `raw_shares < 100` の fallback board-lot 候補が shared resolve へ到達すること
 
@@ -1079,11 +1174,15 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - `PROFIT FACTOR` の非有限値を `N/A` 表示に正規化すること
 
+  - full calendar month だけで月次 `+20%` 達成本数を集計すること
+
 - `tests/test_jp_jquants_fetcher_v2.py`
 
   - `jp_jquants_fetcher_v2.py` の増分更新開始日の決め方
 
   - overlap を含む増分取得結果が checkpoint へ正しくマージされること
+
+  - 31日以内の増分更新で、日付指定の全銘柄一括取得を使い ticker ごとに一度だけ checkpoint へ統合すること
 
   - consolidated cache から checkpoint を seed して履歴を保全できること
 
@@ -1129,6 +1228,14 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - スナップショット計算
 
+  - simulation の通常 / inverse entry が cash・setup 別 buying power・managed position を一体で更新すること
+
+  - 前日確定値だけの観測49銘柄、1321別枠、registryのunregister-before-registerを確認すること
+
+  - write gateが閉じていてもproduction snapshot収集を続け、simulationではclean observation扱いしないこと
+
+  - board/cache前日終値不一致、cross-day opening timestamp、batch欠損をfail closedにすること
+
   - scan 候補、sizing 対象、board lot 不成立、simulation / live entry の判断ログと `TRADE_MODE` 分離
 
   - server time ベースの月次 state / 月初資産ロールオーバー
@@ -1145,7 +1252,31 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - shared intraday stop / target と `14:30` force flatten の live exit フロー
 
+  - 9:30以降のlive entryではentry前の公式寄値をexit pathへ混ぜず、entry fillをpost-entry pathの起点にすること
+
   - live 部分約定時に shares を減らして保有継続し、partial fill event を exit log へ残すこと
+
+  - 保護逆指値のarm失敗を未解決entryとして後続entry停止へ反映すること
+
+- `tests/test_daytrade_candidate_engine.py`
+
+  - 候補生成入力が当日 `close / high / low / volume` を公開せず、当日寄付と前日確定特徴だけを受け取ること
+
+  - 1日分の NumPy view がコピーを作らず、universe と各特徴量の shape 不整合を拒否すること
+
+  - 共通候補エンジンが point-in-time market context を使って候補グループと診断値を返すこと
+
+- `tests/test_daytrade_production_replay.py`
+
+  - 保存したsignal入力からcandidate / selected digestが完全一致すること
+
+  - current price、bid/ask、session high/low、volumeを変えてもsignal identityと選択が変わらないこと
+
+  - feature_asof逆転、board failure、snapshot改ざんをfail closedにすること
+
+  - JSONL round-trip、1日最初のsnapshot固定、実exitのsnapshot ID連結、最低件数不足の非zero終了を確認すること
+
+  - `KABUCOM_TEST` のlinked actual exitをexecution replayへ含めつつ、LIVE clean holdout資格とは分離すること
 
   - live での unmanaged position を signal flatten / force flatten から除外すること
 
@@ -1217,6 +1348,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - `core/kabucom_broker.py` の POST 再送抑止
 
+  - broker position再取得時にExecutionID一致のstrategy / stop / snapshot metadataを保持し、数量・価格・routeはbroker値を優先すること
+
   - `core/kabucom_broker.py` の GET 429 Retry-After 待機が上限付きで、shutdown 要求で中断できること
 
   - `KABUCOM_LIVE` の新規 entry を `ENABLE_LIVE_ORDER` / `APPROVED_CONFIG_HASH` なしで拒否すること
@@ -1254,6 +1387,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
   - `SeqNum` 順の detail 並べ替え、`RecType=8` のみを fill / ExecutionID に使うこと、`State=4` detail を reject 扱いにすること
 
   - `BoardQuote` への bid/ask 正規化と special / inverted quote の reject
+
+  - 板 batch 取得が requested / observations / failures を分離し、transport / HTTP / malformed JSON / invalid quote / no token を成功扱いしないこと
 
   - `SubmissionResult` の accepted / rejected / unknown 分岐
 
@@ -1413,6 +1548,8 @@ python analyze_intraday_logs.py --exits-file data/kabucom_test/daytrade_exit_log
 
   - startup recovery が protective stop の pending / orphan 状態も manual review にすること
 
+  - protective stop のarm失敗もorphanとしてmanual reviewにすること
+
   - startup recovery が armed だが broker snapshot に無い protective stop も manual review にすること
 
   - journal replay が `FILLED` / filled-before-cancel を終端扱いにし、fsync 失敗を fail closed にすること
@@ -1458,6 +1595,10 @@ python -m pytest tests/test_jp_optimizer.py
 python -m pytest tests/test_jp_walkforward.py
 
 python -m pytest tests/test_auto_trade.py
+
+python -m pytest tests/test_daytrade_candidate_engine.py
+
+python -m pytest tests/test_daytrade_production_replay.py
 
 python -m pytest tests/test_kabucom_broker.py
 
@@ -1641,4 +1782,6 @@ python -m pytest tests/test_order_journal.py
 
 - テストを追加・変更した場合は、README のテスト欄にも対象内容と実行方法を反映します
 
-Last updated: 2026-07-10
+- 同等品質を維持できる読み取り監査、ログ集計、機械的照合は廉価モデル / サブエージェントへ委譲できます。採否、金融安全、holdout管理、差分レビュー、authoritative test / production replayは親担当が保持します。詳細は [AGENTS.md](AGENTS.md) を参照してください
+
+Last updated: 2026-07-12

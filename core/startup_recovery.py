@@ -121,7 +121,7 @@ def _count_positions(portfolio: list[dict[str, Any]] | None, active_orders_info:
         stop_unconfirmed_order_id = str(position.get("protective_stop_unconfirmed_order_id") or "").strip()
         if stop_unconfirmed_order_id:
             protective_stop_pending += 1
-        if stop_status == "armed" and not stop_order_id and not stop_unconfirmed_order_id:
+        if stop_status in {"armed", "failed"} and not stop_order_id and not stop_unconfirmed_order_id:
             protective_stop_orphan += 1
         if (
             can_check_active_orders
