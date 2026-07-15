@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
+import math
 import re
 from typing import Any, Mapping
 
@@ -231,6 +232,25 @@ class ExecutionWaitResult:
         return tuple(fill.execution_id for fill in self.fills if fill.execution_id)
 
     @property
+    def execution_costs_complete(self) -> bool:
+        return bool(self.fills) and all(
+            fill.commission is not None and fill.commission_tax is not None
+            for fill in self.fills
+        )
+
+    @property
+    def commission(self) -> float | None:
+        if not self.execution_costs_complete:
+            return None
+        return sum(float(fill.commission) for fill in self.fills if fill.commission is not None)
+
+    @property
+    def commission_tax(self) -> float | None:
+        if not self.execution_costs_complete:
+            return None
+        return sum(float(fill.commission_tax) for fill in self.fills if fill.commission_tax is not None)
+
+    @property
     def entry_execution_status(self) -> EntryExecutionStatus:
         return classify_entry_execution_status(
             unresolved=self.unresolved,
@@ -263,6 +283,9 @@ class ExecutionWaitResult:
                 "State": detail_state,
                 "Qty": int(fill.qty),
                 "Price": float(fill.price),
+                "TransactTime": None if fill.executed_at is None else fill.executed_at.isoformat(),
+                "Commission": fill.commission,
+                "CommissionTax": fill.commission_tax,
                 "ExecutionID": fill.execution_id,
             }
             for idx, fill in enumerate(self.fills)
@@ -289,6 +312,9 @@ class ExecutionWaitResult:
             "has_partial_fill": self.cumulative_qty > 0 and self.remaining_qty > 0,
             "execution_ids": self.execution_ids,
             "execution_id": self.execution_ids[0] if self.execution_ids else None,
+            "commission": self.commission,
+            "commission_tax": self.commission_tax,
+            "execution_costs_complete": self.execution_costs_complete,
             "execution_status": execution_status,
             execution_status_key: execution_status,
             "__parsed_process_state__": self.process_state.value,
@@ -465,6 +491,38 @@ def _coerce_float(value: Any, default: float | None = None) -> float | None:
     except (TypeError, ValueError):
         return default
 
+
+def coerce_nonnegative_cost(value: Any) -> float | None:
+    result = _coerce_float(value)
+    if result is None or not math.isfinite(result) or result < 0:
+        return None
+    return result
+
+
+def summarize_kabucom_execution_costs(
+    raw: Mapping[str, Any] | None,
+) -> tuple[float | None, float | None, bool]:
+    """Return actual execution costs only when every positive fill reports them."""
+    details = _sort_details_by_seqnum(_extract_details(dict(raw or {})))
+    commissions: list[float] = []
+    commission_taxes: list[float] = []
+    for detail in details:
+        if _coerce_int(detail.get("RecType")) != 8:
+            continue
+        qty = _coerce_int(detail.get("Qty"))
+        if qty is None:
+            qty = _coerce_int(detail.get("CumQty"), default=0) or 0
+        if qty <= 0:
+            continue
+        commission = coerce_nonnegative_cost(detail.get("Commission"))
+        commission_tax = coerce_nonnegative_cost(detail.get("CommissionTax"))
+        if commission is None or commission_tax is None:
+            return None, None, False
+        commissions.append(commission)
+        commission_taxes.append(commission_tax)
+    if not commissions:
+        return None, None, False
+    return sum(commissions), sum(commission_taxes), True
 
 def _normalize_order_id(raw: Mapping[str, Any]) -> str | None:
     for key in ("OrderId", "OrderID", "ID", "Id"):

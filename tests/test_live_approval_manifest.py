@@ -28,6 +28,27 @@ class TestLiveApprovalManifest(unittest.TestCase):
         mutated = replace(manifest, generated_at="2026-06-13T00:00:00Z")
         self.assertEqual(base_hash, compute_live_approval_manifest_hash(mutated))
 
+
+    def test_manifest_fingerprints_decision_replay_quote_and_lifecycle_code(self):
+        manifest = build_live_approval_manifest(generated_at="2026-06-12T00:00:00Z")
+        expected = {
+            "core/ai_filter.py",
+            "core/daytrade_candidate_engine.py",
+            "core/daytrade_observation_universe.py",
+            "core/daytrade_opening_discovery.py",
+            "core/daytrade_production_replay.py",
+            "core/jpx_calendar.py",
+            "core/kabu_launcher.py",
+            "core/kabucom_quote.py",
+            "core/order_journal.py",
+            "contracts/jpx_trading_calendar.json",
+        }
+        self.assertTrue(expected.issubset(manifest.code_file_hashes))
+        for path in expected:
+            self.assertNotEqual(manifest.code_file_hashes[path], "missing")
+        self.assertTrue(manifest.config_snapshot["GEMINI_MODEL"])
+        self.assertTrue(manifest.config_snapshot["GROQ_MODEL"])
+
     def test_manifest_roundtrips_through_json_file(self):
         manifest = build_live_approval_manifest(generated_at="2026-06-12T00:00:00Z")
         import tempfile

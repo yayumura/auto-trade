@@ -19,7 +19,7 @@ from core.config import (
     TAX_RATE,
 )
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
-from jp_backtest import WARMUP_START, _resolve_holdout_start_date
+from jp_backtest import FROZEN_HOLDOUT_START, WARMUP_START, _resolve_holdout_start_date
 
 
 def build_parser():
@@ -217,10 +217,14 @@ def summarize_candidates(candidate_df, top_n):
     _print_frame(edge, top_n)
 
 
-def main():
-    args = build_parser().parse_args()
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     prepared, daily_stats, trade_log, candidate_log = replay_candidate_log(args.cache_path)
-    holdout_start = _resolve_holdout_start_date(prepared["timeline"], args.holdout_months)
+    holdout_start = _resolve_holdout_start_date(
+        prepared["timeline"],
+        args.holdout_months,
+        earliest_holdout_start=FROZEN_HOLDOUT_START,
+    )
     latest = pd.Timestamp(prepared["timeline"][-1]).strftime("%Y-%m-%d")
 
     day_df = pd.DataFrame(candidate_log["days"])
@@ -242,11 +246,11 @@ def main():
     if args.output_day_csv:
         out = Path(args.output_day_csv)
         out.parent.mkdir(parents=True, exist_ok=True)
-        day_df.to_csv(out, index=False)
+        train_day_df.to_csv(out, index=False, encoding="utf-8-sig")
     if args.output_candidate_csv:
         out = Path(args.output_candidate_csv)
         out.parent.mkdir(parents=True, exist_ok=True)
-        candidate_df.to_csv(out, index=False)
+        train_candidate_df.to_csv(out, index=False, encoding="utf-8-sig")
 
 
 if __name__ == "__main__":

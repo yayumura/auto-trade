@@ -12,16 +12,18 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from backtest import run_backtest_v16_production, _resolve_intraday_exit
+from core.daytrade_observation_universe import build_daytrade_rotating_discovery_indices_by_day
 from core.config import (
     DAYTRADE_API_EXPLICIT_TRADE_COST,
     DATA_CACHE_ROOT,
     INITIAL_CASH,
     SLIPPAGE_RATE,
     TAX_RATE,
+    load_insider_exclusion_codes,
 )
-from core.logic import get_daytrade_week_key
+from core.logic import get_daytrade_week_key, get_prime_tickers, load_invalid_tickers
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
-from jp_backtest import WARMUP_START, _resolve_holdout_start_date
+from jp_backtest import FROZEN_HOLDOUT_START, WARMUP_START, _resolve_holdout_start_date
 
 
 STOP_EXIT_REASONS = {"open_stop", "intraday_stop", "intraday_stop_priority"}
@@ -57,7 +59,15 @@ def build_parser():
     parser.add_argument(
         "--output-trades-csv",
         default="",
-        help="Optional path to save the full replay trade log as CSV.",
+        help="Optional path to save the train-only replay trade log as CSV.",
+    )
+    parser.add_argument(
+        "--rotating-discovery-replay",
+        action="store_true",
+        help=(
+            "Analyze the fixed four-by-49 prior-day rotating discovery replay "
+            "instead of the all-Prime reference baseline."
+        ),
     )
     return parser
 
@@ -70,11 +80,29 @@ def load_prepared_inputs(cache_path):
     return prepared, univ_indices
 
 
-def replay_backtest(cache_path):
+def replay_backtest(cache_path, *, rotating_discovery_replay=False):
     prepared, univ_indices = load_prepared_inputs(cache_path)
     bundle_np = prepared["bundle_np"]
     timeline = prepared["timeline"]
     breadth_series = prepared["breadth_series"]
+    observation_universe_indices_by_day = None
+    if rotating_discovery_replay:
+        excluded_codes = set(load_invalid_tickers())
+        excluded_codes.update(load_insider_exclusion_codes())
+        observation_universe_indices_by_day = build_daytrade_rotating_discovery_indices_by_day(
+            bundle_np=bundle_np,
+            timeline=timeline,
+            prime_tickers=get_prime_tickers(),
+            excluded_codes=excluded_codes,
+        )
+        univ_indices = np.asarray(
+            sorted({
+                int(index)
+                for indices in observation_universe_indices_by_day.values()
+                for index in indices
+            }),
+            dtype=int,
+        )
     _, _, _, _, daily_stats, trade_log = run_backtest_v16_production(
         univ_indices=univ_indices,
         bundle_np=bundle_np,
@@ -84,6 +112,7 @@ def replay_backtest(cache_path):
         slippage=SLIPPAGE_RATE,
         explicit_trade_cost=DAYTRADE_API_EXPLICIT_TRADE_COST,
         profit_tax_rate=TAX_RATE,
+        observation_universe_indices_by_day=observation_universe_indices_by_day,
         return_daily_stats=True,
         return_trade_log=True,
         verbose=False,
@@ -221,7 +250,11 @@ def classify_exit_bucket(trades_df, prepared=None):
 
 
 def build_train_frames(timeline, daily_df, trades_df, holdout_months):
-    holdout_start = _resolve_holdout_start_date(timeline, holdout_months)
+    holdout_start = _resolve_holdout_start_date(
+        timeline,
+        holdout_months,
+        earliest_holdout_start=FROZEN_HOLDOUT_START,
+    )
     if holdout_start is None:
         train_end = str(pd.Timestamp(timeline[-1]).date())
     else:
@@ -611,8 +644,17 @@ def build_report(summary, top_n):
     return "\n".join(lines)
 
 
-def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
-    prepared, daily_stats, trade_log = replay_backtest(cache_path)
+def analyze_backtest_trade_log(
+    cache_path,
+    holdout_months=6,
+    top_n=12,
+    *,
+    rotating_discovery_replay=False,
+):
+    prepared, daily_stats, trade_log = replay_backtest(
+        cache_path,
+        rotating_discovery_replay=rotating_discovery_replay,
+    )
     timeline = prepared["timeline"]
     daily_df = build_daily_frame(daily_stats)
     trades_df = classify_exit_bucket(pd.DataFrame(trade_log), prepared=prepared)
@@ -674,6 +716,7 @@ def analyze_backtest_trade_log(cache_path, holdout_months=6, top_n=12):
         "prepared": prepared,
         "daily_df": daily_df,
         "trades_df": trades_df,
+        "train_trades_df": train_trades,
         "train_start": train_start,
         "train_end": train_end,
         "holdout_start": holdout_start,
@@ -725,9 +768,10 @@ def main(argv=None):
         cache_path=args.cache_path,
         holdout_months=max(0, int(args.holdout_months)),
         top_n=max(1, int(args.top_n)),
+        rotating_discovery_replay=bool(args.rotating_discovery_replay),
     )
     if args.output_trades_csv:
-        summary["trades_df"].to_csv(args.output_trades_csv, index=False, encoding="utf-8-sig")
+        summary["train_trades_df"].to_csv(args.output_trades_csv, index=False, encoding="utf-8-sig")
     print(build_report(summary, top_n=max(1, int(args.top_n))))
 
 

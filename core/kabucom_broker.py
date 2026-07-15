@@ -40,6 +40,8 @@ from core.kabucom_order_state import (
     CancelTerminalStatus,
     ExecutionFill,
     ExecutionWaitResult,
+    coerce_nonnegative_cost,
+    summarize_kabucom_execution_costs,
     OrderProcessState,
     OrderTerminalReason,
     OrderSubmissionResult,
@@ -92,6 +94,27 @@ REQUEST_BUDGET_LIMITS = {
 }
 MAX_RATE_LIMIT_RETRY_AFTER_SECONDS = 60.0
 RATE_LIMIT_SLEEP_CHECK_INTERVAL_SECONDS = 0.5
+KABUCOM_REGISTRY_CAPACITY = 50
+
+
+def _parse_registry_response_codes(response) -> set[str] | None:
+    """Return the complete registered-symbol set, or None on contract failure."""
+    try:
+        payload = response.json()
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("RegistList"), list):
+        return None
+
+    codes: set[str] = set()
+    for item in payload["RegistList"]:
+        if not isinstance(item, dict) or "Symbol" not in item:
+            return None
+        code = str(item["Symbol"]).strip().replace(".T", "")
+        if not code:
+            return None
+        codes.add(code)
+    return codes
 
 
 @dataclass(frozen=True)
@@ -172,6 +195,16 @@ class KabucomBroker(BaseBroker):
         self.password = KABUCOM_API_PASSWORD
         self.order_password = KABUCOM_ORDER_PASSWORD or (self.password if self.environment == BrokerEnvironment.TEST else None)
         self.token = None
+        self.last_server_time_evidence = {
+            "schema_version": 1,
+            "verified": False,
+            "source": "local_clock_fallback",
+            "reason": "not_checked",
+            "server_time": None,
+            "received_at": None,
+            "fallback_time": None,
+            "drift_seconds": None,
+        }
         # [Professional Audit] マルチスレッド環境での認証競合を防ぐためのロック
         self._auth_lock = threading.Lock()
         # [Professional Audit] Sessionを永続化し、HTTP Keep-Aliveを有効にして遅延を最小化する
@@ -432,28 +465,60 @@ class KabucomBroker(BaseBroker):
         return None
 
     def get_server_time(self) -> datetime:
-        """ 取引所（証券会社側）の現在時刻を取得する """
+        """Return a usable JST clock and record whether broker time was verified.
+
+        The local fallback is retained for monitoring and safe liquidation only.
+        Callers must inspect last_server_time_evidence before allowing new risk.
+        """
         from core.config import JST
-        fallback = datetime.now(JST)  # H-6: JST aware datetimeを常に返すよう修正
-        if not self.token: return fallback
+        fallback = datetime.now(JST)
+
+        def _record_unverified(reason: str) -> datetime:
+            self.last_server_time_evidence = {
+                "schema_version": 1,
+                "verified": False,
+                "source": "local_clock_fallback",
+                "reason": str(reason),
+                "server_time": None,
+                "received_at": fallback.isoformat(),
+                "fallback_time": fallback.isoformat(),
+                "drift_seconds": None,
+            }
+            return fallback
+
+        if not self.token:
+            return _record_unverified("token_unavailable")
         try:
             # [Professional Audit] 共通ラッパーを使用して認証・リトライの恩恵を受ける
             res = self._api_request("GET", "wallet/cash", timeout=5)
-            if res and res.status_code == 200:
-                date_header = None
-                if hasattr(res, "headers"):
-                    date_header = res.headers.get("Date")
-                if date_header:
-                    try:
-                        parsed_date = parsedate_to_datetime(date_header)
-                        if parsed_date.tzinfo is None:
-                            parsed_date = parsed_date.replace(tzinfo=JST)
-                        return parsed_date.astimezone(JST)
-                    except Exception:
-                        pass
-            return fallback
-        except Exception:
-            return fallback
+            if res is None:
+                return _record_unverified("wallet_cash_response_unavailable")
+            if res.status_code != 200:
+                return _record_unverified(f"wallet_cash_http_status_{res.status_code}")
+            date_header = res.headers.get("Date") if hasattr(res, "headers") else None
+            if not date_header:
+                return _record_unverified("wallet_cash_date_header_missing")
+            try:
+                parsed_date = parsedate_to_datetime(str(date_header))
+                if parsed_date.tzinfo is None:
+                    return _record_unverified("wallet_cash_date_header_naive")
+                server_time = parsed_date.astimezone(JST)
+            except Exception:
+                return _record_unverified("wallet_cash_date_header_invalid")
+            received_at = datetime.now(JST)
+            self.last_server_time_evidence = {
+                "schema_version": 1,
+                "verified": True,
+                "source": "wallet_cash_date_header",
+                "reason": "verified",
+                "server_time": server_time.isoformat(),
+                "received_at": received_at.isoformat(),
+                "fallback_time": fallback.isoformat(),
+                "drift_seconds": round((server_time - received_at).total_seconds(), 6),
+            }
+            return server_time
+        except Exception as exc:
+            return _record_unverified(f"wallet_cash_request_error:{type(exc).__name__}")
 
     def get_active_orders(self) -> dict | None:
         """ 現在執行中（未約定・待機中等）の注文一覧を取得する """
@@ -700,7 +765,12 @@ class KabucomBroker(BaseBroker):
                 price = float(detail.get("Price") or 0.0)
             except (TypeError, ValueError):
                 price = 0.0
-            executed_at = detail.get("ExecutionDateTime") or detail.get("ExecTime")
+            executed_at = (
+                detail.get("TransactTime")
+                or detail.get("ExecutionDateTime")
+                or detail.get("ExecTime")
+                or detail.get("ExecutionDay")
+            )
             if isinstance(executed_at, str):
                 try:
                     executed_at = datetime.fromisoformat(executed_at.replace("Z", "+00:00"))
@@ -714,8 +784,8 @@ class KabucomBroker(BaseBroker):
                     qty=max(0, qty),
                     price=price,
                     executed_at=executed_at,
-                    commission=None,
-                    commission_tax=None,
+                    commission=coerce_nonnegative_cost(detail.get("Commission")),
+                    commission_tax=coerce_nonnegative_cost(detail.get("CommissionTax")),
                 )
             )
         if fills:
@@ -793,6 +863,7 @@ class KabucomBroker(BaseBroker):
         self,
         *,
         order_id: str,
+        expected_symbol: str,
         expected_qty: int,
         expected_trigger_price: float,
         expected_close_positions: list | None,
@@ -856,19 +927,21 @@ class KabucomBroker(BaseBroker):
             close_positions_summary = _close_positions_summary(None if details_payload is None else details_payload.get("ClosePositions"))
             reverse_limit_summary = _reverse_limit_summary(details_payload)
             summary = {
-                "response_shape_version": 1,
-                "order_id": order_id,
+                "response_shape_version": 2,
+                "requested_order_id": order_id,
+                "order_id": None if not isinstance(details_payload, dict) else details_payload.get("OrderId"),
+                "symbol": None if not isinstance(details_payload, dict) else details_payload.get("Symbol"),
                 "details_present": bool(details_payload),
                 "process_state": None if parsed_order is None else parsed_order.process_state.value,
                 "terminal_reason": None if parsed_order is None or parsed_order.terminal_reason is None else parsed_order.terminal_reason.value,
                 "order_qty": None if parsed_order is None else parsed_order.order_qty,
                 "cumulative_qty": None if parsed_order is None else parsed_order.cumulative_qty,
                 "remaining_qty": None if parsed_order is None else parsed_order.unfilled_qty,
-                "side": side,
-                "cash_margin": details_payload.get("CashMargin") if isinstance(details_payload, dict) and "CashMargin" in details_payload else expected_cash_margin,
-                "deliv_type": details_payload.get("DelivType") if isinstance(details_payload, dict) and "DelivType" in details_payload else expected_deliv_type,
-                "exchange": details_payload.get("Exchange") if isinstance(details_payload, dict) and "Exchange" in details_payload else exchange,
-                "margin_trade_type": details_payload.get("MarginTradeType") if isinstance(details_payload, dict) and "MarginTradeType" in details_payload else margin_trade_type,
+                "side": None if not isinstance(details_payload, dict) else details_payload.get("Side"),
+                "cash_margin": None if not isinstance(details_payload, dict) else details_payload.get("CashMargin"),
+                "deliv_type": None if not isinstance(details_payload, dict) else details_payload.get("DelivType"),
+                "exchange": None if not isinstance(details_payload, dict) else details_payload.get("Exchange"),
+                "margin_trade_type": None if not isinstance(details_payload, dict) else details_payload.get("MarginTradeType"),
                 "trigger_price": None if reverse_limit_summary is None else reverse_limit_summary.get("TriggerPrice"),
                 "expected_qty": int(expected_qty),
                 "expected_trigger_price": float(expected_trigger_price),
@@ -893,6 +966,14 @@ class KabucomBroker(BaseBroker):
 
         if not isinstance(details, dict) or not details:
             return False, "stop_order_not_found", _build_confirmation_details("stop_order_not_found")
+        actual_order_id = str(details.get("OrderId") or "").strip()
+        if not actual_order_id or actual_order_id != str(order_id).strip():
+            return False, "stop_order_id_mismatch", _build_confirmation_details("stop_order_id_mismatch", details_payload=details)
+        actual_symbol = str(details.get("Symbol") or "").strip()
+        if not actual_symbol or actual_symbol != str(expected_symbol).strip():
+            return False, "stop_order_symbol_mismatch", _build_confirmation_details("stop_order_symbol_mismatch", details_payload=details)
+
+
 
         parsed = parse_kabucom_order(details)
         if parsed.process_state == OrderProcessState.UNKNOWN:
@@ -900,13 +981,15 @@ class KabucomBroker(BaseBroker):
         if parsed.process_state != OrderProcessState.ACTIVE:
             mismatch_reason = f"stop_order_state_{parsed.process_state.value}"
             return False, mismatch_reason, _build_confirmation_details(mismatch_reason, details_payload=details, parsed_order=parsed)
+        if not parsed.is_consistent:
+            return False, "stop_order_state_inconsistent", _build_confirmation_details("stop_order_state_inconsistent", details_payload=details, parsed_order=parsed)
         if parsed.order_qty != int(expected_qty):
             return False, "stop_order_qty_mismatch", _build_confirmation_details("stop_order_qty_mismatch", details_payload=details, parsed_order=parsed)
         if parsed.cumulative_qty != 0:
             return False, "stop_order_already_filled", _build_confirmation_details("stop_order_already_filled", details_payload=details, parsed_order=parsed)
 
         actual_side = str(details.get("Side") or "").strip()
-        if actual_side and actual_side != str(side):
+        if not actual_side or actual_side != str(side):
             return False, "stop_order_side_mismatch", _build_confirmation_details("stop_order_side_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_cash_margin = None
@@ -915,7 +998,7 @@ class KabucomBroker(BaseBroker):
                 actual_cash_margin = int(details.get("CashMargin") or 0)
             except (TypeError, ValueError):
                 actual_cash_margin = None
-        if actual_cash_margin is not None and actual_cash_margin != expected_cash_margin:
+        if actual_cash_margin != expected_cash_margin:
             return False, "stop_order_cash_margin_mismatch", _build_confirmation_details("stop_order_cash_margin_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_deliv_type = None
@@ -924,7 +1007,7 @@ class KabucomBroker(BaseBroker):
                 actual_deliv_type = int(details.get("DelivType") or 0)
             except (TypeError, ValueError):
                 actual_deliv_type = None
-        if actual_deliv_type is not None and actual_deliv_type != expected_deliv_type:
+        if actual_deliv_type != expected_deliv_type:
             return False, "stop_order_deliv_type_mismatch", _build_confirmation_details("stop_order_deliv_type_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_exchange = None
@@ -933,7 +1016,7 @@ class KabucomBroker(BaseBroker):
                 actual_exchange = int(details.get("Exchange") or 0)
             except (TypeError, ValueError):
                 actual_exchange = None
-        if exchange is not None and actual_exchange is not None and actual_exchange != int(exchange):
+        if exchange is not None and actual_exchange != int(exchange):
             return False, "stop_order_exchange_mismatch", _build_confirmation_details("stop_order_exchange_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_margin_trade_type = None
@@ -942,12 +1025,19 @@ class KabucomBroker(BaseBroker):
                 actual_margin_trade_type = int(details.get("MarginTradeType") or 0)
             except (TypeError, ValueError):
                 actual_margin_trade_type = None
-        if margin_trade_type is not None and actual_margin_trade_type is not None and actual_margin_trade_type != int(margin_trade_type):
+        if margin_trade_type is not None and actual_margin_trade_type != int(margin_trade_type):
             return False, "stop_order_margin_trade_type_mismatch", _build_confirmation_details("stop_order_margin_trade_type_mismatch", details_payload=details, parsed_order=parsed)
 
         reverse_limit = details.get("ReverseLimitOrder")
         if not isinstance(reverse_limit, dict):
             return False, "stop_order_reverse_limit_missing", _build_confirmation_details("stop_order_reverse_limit_missing", details_payload=details, parsed_order=parsed)
+        try:
+            actual_trigger_sec = int(reverse_limit.get("TriggerSec"))
+        except (TypeError, ValueError):
+            actual_trigger_sec = None
+        if actual_trigger_sec != 1:
+            return False, "stop_order_trigger_sec_mismatch", _build_confirmation_details("stop_order_trigger_sec_mismatch", details_payload=details, parsed_order=parsed)
+
         actual_trigger_price = reverse_limit.get("TriggerPrice")
         if actual_trigger_price is None:
             return False, "stop_order_trigger_price_missing", _build_confirmation_details("stop_order_trigger_price_missing", details_payload=details, parsed_order=parsed)
@@ -964,7 +1054,7 @@ class KabucomBroker(BaseBroker):
             except (TypeError, ValueError):
                 actual_under_over = None
         expected_under_over = 1 if str(side) == "1" else 2
-        if actual_under_over is not None and actual_under_over != expected_under_over:
+        if actual_under_over != expected_under_over:
             return False, "stop_order_under_over_mismatch", _build_confirmation_details("stop_order_under_over_mismatch", details_payload=details, parsed_order=parsed)
 
         actual_after_hit_order_type = None
@@ -973,15 +1063,22 @@ class KabucomBroker(BaseBroker):
                 actual_after_hit_order_type = int(reverse_limit.get("AfterHitOrderType") or 0)
             except (TypeError, ValueError):
                 actual_after_hit_order_type = None
-        if actual_after_hit_order_type is not None and actual_after_hit_order_type != 1:
+        if actual_after_hit_order_type != 1:
             return False, "stop_order_after_hit_order_type_mismatch", _build_confirmation_details("stop_order_after_hit_order_type_mismatch", details_payload=details, parsed_order=parsed)
+
+        try:
+            actual_after_hit_price = Decimal(str(reverse_limit.get("AfterHitPrice")))
+        except Exception:
+            actual_after_hit_price = None
+        if actual_after_hit_price != Decimal("0"):
+            return False, "stop_order_after_hit_price_mismatch", _build_confirmation_details("stop_order_after_hit_price_mismatch", details_payload=details, parsed_order=parsed)
 
         if expected_close_positions_payload is not None:
             actual_close_positions_payload = self._normalize_close_positions_payload(details.get("ClosePositions"))
             if actual_close_positions_payload != expected_close_positions_payload:
                 return False, "stop_order_close_positions_mismatch", _build_confirmation_details("stop_order_close_positions_mismatch", details_payload=details, parsed_order=parsed)
 
-        return True, None, None
+        return True, None, _build_confirmation_details("confirmed", details_payload=details, parsed_order=parsed)
 
     def get_positions(self) -> list:
         """ 
@@ -1087,6 +1184,9 @@ class KabucomBroker(BaseBroker):
                 "margin_trade_type": p.get('MarginTradeType'),
                 "ownership": ownership,
                 "ownership_reason": ownership_reason,
+                "broker_position_expenses": coerce_nonnegative_cost(p.get("Expenses")),
+                "broker_position_commission": coerce_nonnegative_cost(p.get("Commission")),
+                "broker_position_commission_tax": coerce_nonnegative_cost(p.get("CommissionTax")),
             })
             final_positions.append(merged_position)
         return final_positions
@@ -1959,7 +2059,7 @@ class KabucomBroker(BaseBroker):
 
     # --- [New] リアルタイム監視用の銘柄登録・解除・板情報取得 ---
     def register_symbols(self, symbols: list):
-        """ 
+        """
         kabuステーションAPI側に銘柄を監視登録する。
         仕様上1回あたり50銘柄までのため、チャンク分割して実行する。
         """
@@ -1968,47 +2068,56 @@ class KabucomBroker(BaseBroker):
         if not allowed:
             print(f"🛑 register をコード側で停止しました。reason={reason}")
             return False
-        url = f"{self.base_url}/register"
-        
+
         # yfinance形式 (7203.T) -> カブコム形式 (7203)
         # [Professional Audit] 重複登録を排除してAPIの負荷とエラーを防ぐ
         codes = sorted(list(set(str(s).replace(".T", "") for s in symbols)))
-        
-        chunk_size = 50
+        if not codes:
+            return False
+
+        if len(codes) > KABUCOM_REGISTRY_CAPACITY:
+            print(f"⚠️ 銘柄登録上限超過: {len(codes)} > {KABUCOM_REGISTRY_CAPACITY}")
+            return False
+        chunk_size = KABUCOM_REGISTRY_CAPACITY
         for i in range(0, len(codes), chunk_size):
             chunk = codes[i:i + chunk_size]
             reg_list = [{"Symbol": c, "Exchange": 1} for c in chunk]
             data = {"Symbols": reg_list}
             res = self._api_request("PUT", "register", json=data, timeout=10)
-            if res and res.status_code == 200:
-                print(f"✅ API銘柄登録完了 ({i+1}〜{i+len(chunk)}銘柄目)")
-            else:
+            if res is None or res.status_code != 200:
                 print(f"⚠️ 銘柄登録エラー ({i+1}〜): {res.text if res else 'No Response'}")
                 return False
+            registered_codes = _parse_registry_response_codes(res)
+            if registered_codes is None or not set(chunk).issubset(registered_codes):
+                print(f"⚠️ 銘柄登録レスポンス契約違反 ({i+1}〜{i+len(chunk)}銘柄目)")
+                return False
+            print(f"✅ API銘柄登録完了 ({i+1}〜{i+len(chunk)}銘柄目)")
         return True
 
     def unregister_symbols(self, symbols: list):
-        """ 監視対象から外れた銘柄を解除する（2000銘柄の上限管理） """
+        """監視対象から外れた銘柄を解除する（登録上限50銘柄の管理）。"""
         if not self.token or not symbols: return False
         allowed, reason = self._authorize_operation(BrokerOperationClass.REGISTRY_MUTATION)
         if not allowed:
             print(f"🛑 unregister をコード側で停止しました。reason={reason}")
             return False
-        url = f"{self.base_url}/unregister"
-        
+
         # [Professional Audit] 重複解除を排除してリソースを最適化
         codes = sorted(list(set(str(s).replace(".T", "") for s in symbols)))
-        chunk_size = 50
+        chunk_size = KABUCOM_REGISTRY_CAPACITY
         for i in range(0, len(codes), chunk_size):
             chunk = codes[i:i + chunk_size]
             unreg_list = [{"Symbol": c, "Exchange": 1} for c in chunk]
             data = {"Symbols": unreg_list}
             res = self._api_request("PUT", "unregister", json=data, timeout=10)
-            if res and res.status_code == 200:
-                print(f"✅ API銘柄登録解除完了 ({i+1}〜{i+len(chunk)}銘柄目)")
-            else:
+            if res is None or res.status_code != 200:
                 print(f"⚠️ 銘柄解除エラー: {res.text if res else 'No Response'}")
                 return False
+            registered_codes = _parse_registry_response_codes(res)
+            if registered_codes is None or set(chunk).intersection(registered_codes):
+                print(f"⚠️ 銘柄解除レスポンス契約違反 ({i+1}〜{i+len(chunk)}銘柄目)")
+                return False
+            print(f"✅ API銘柄登録解除完了 ({i+1}〜{i+len(chunk)}銘柄目)")
         return True
 
     def unregister_all(self):
@@ -2108,6 +2217,7 @@ class KabucomBroker(BaseBroker):
                 "bid_timestamp": quote.bid_timestamp,
                 "ask_timestamp": quote.ask_timestamp,
                 "opening_price_timestamp": quote.opening_price_timestamp,
+                "previous_close_timestamp": quote.previous_close_timestamp,
                 "received_at": quote.received_at or received_at,
                 "bid_sign_raw": quote.bid_sign_raw,
                 "ask_sign_raw": quote.ask_sign_raw,
@@ -2134,7 +2244,14 @@ class KabucomBroker(BaseBroker):
         """Return the legacy successful-observation mapping."""
         return dict(self.get_board_snapshot_batch(symbols).observations)
 
-    def execute_chase_order(self, code: str, shares: int, action: StockOrderAction, atr: float = 0) -> dict:
+    def execute_chase_order(
+        self,
+        code: str,
+        shares: int,
+        action: StockOrderAction,
+        atr: float = 0,
+        max_entry_price: float | None = None,
+    ) -> dict:
         """
         指値を最良気配に追従（Chase）させながら発注し、一定時間で強制執行するOMS機能。
         [Professional Audit] 1. 部分約定の合算(VWAP), 2. 待機時間の短縮, 3. 決済指定(HoldID)
@@ -2162,13 +2279,70 @@ class KabucomBroker(BaseBroker):
                 "execution_id": None,
                 "side": side,
                 "action": action.value,
+                "commission": None,
+                "commission_tax": None,
+                "execution_costs_complete": False,
             }
+        resolved_max_entry_price = None
+        if action == StockOrderAction.MARGIN_NEW_LONG:
+            rejection_reason = None
+            try:
+                ceiling_decimal = Decimal(str(max_entry_price))
+                if not ceiling_decimal.is_finite() or ceiling_decimal <= 0:
+                    rejection_reason = "invalid_entry_price_ceiling"
+                else:
+                    resolved_max_entry_price = float(ceiling_decimal)
+            except (ArithmeticError, TypeError, ValueError):
+                rejection_reason = "invalid_entry_price_ceiling"
+            try:
+                normalized_shares = int(shares)
+            except (TypeError, ValueError):
+                normalized_shares = 0
+            if normalized_shares < 100 or normalized_shares % 100 != 0:
+                rejection_reason = "invalid_entry_board_lot"
+            if rejection_reason:
+                append_order_journal({
+                    "event": "REJECTED",
+                    "intent_id": None,
+                    "kind": "market",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": normalized_shares,
+                    "price": 0.0,
+                    "entry_price_ceiling": max_entry_price,
+                    "rejection_reason": rejection_reason,
+                    "is_production": bool(self.is_production),
+                })
+                return {
+                    "order_id": None,
+                    "submission_status": SubmissionStatus.REJECTED.value,
+                    "process_state": OrderProcessState.TERMINAL.value,
+                    "terminal_reason": OrderTerminalReason.REJECTED.value,
+                    "Qty": 0,
+                    "filled_qty": 0,
+                    "Price": 0.0,
+                    "average_price": None,
+                    "remaining_qty": max(0, normalized_shares),
+                    "Symbol": code,
+                    "has_partial_fill": False,
+                    "rejection_reason": rejection_reason,
+                    "unresolved": False,
+                    "execution_ids": (),
+                    "execution_id": None,
+                    "side": side,
+                    "action": action.value,
+                    "max_entry_price": max_entry_price,
+                    "commission": None,
+                    "commission_tax": None,
+                    "execution_costs_complete": False,
+                }
         print(f"🚀 【追従発注開始】{code} {shares}株 (Side:{side})")
         
         remaining_shares = shares
         total_filled_qty = 0
         total_filled_value = 0.0
         total_execution_ids: list[str] = []
+        submitted_order_ids: list[str] = []
         unresolved = False
         last_order_id = None
         last_submission = None
@@ -2178,6 +2352,85 @@ class KabucomBroker(BaseBroker):
         last_execution_status = None
         last_entry_execution_status = None
         last_exit_execution_status = None
+        total_commission = 0.0
+        total_commission_tax = 0.0
+        execution_costs_complete = True
+        cost_evidence_order_ids: set[str] = set()
+
+        def _record_execution_costs(order_id: str | None, details: dict | None, filled_qty: int) -> None:
+            nonlocal total_commission, total_commission_tax, execution_costs_complete
+            if filled_qty <= 0:
+                return
+            order_key = str(order_id or "").strip()
+            if not order_key or order_key in cost_evidence_order_ids:
+                return
+            cost_evidence_order_ids.add(order_key)
+            commission, commission_tax, complete = summarize_kabucom_execution_costs(details)
+            if not complete or commission is None or commission_tax is None:
+                execution_costs_complete = False
+                return
+            total_commission += float(commission)
+            total_commission_tax += float(commission_tax)
+
+        def _execution_cost_fields() -> dict:
+            complete = bool(cost_evidence_order_ids and execution_costs_complete)
+            return {
+                "commission": round(total_commission, 4) if complete else None,
+                "commission_tax": round(total_commission_tax, 4) if complete else None,
+                "execution_costs_complete": complete,
+            }
+
+        def _entry_ceiling_terminal_result(
+            reason: str,
+            attempted_price: float | None = None,
+        ) -> dict:
+            avg_price = (
+                total_filled_value / total_filled_qty
+                if total_filled_qty > 0
+                else 0.0
+            )
+            remaining_qty = max(0, int(shares) - total_filled_qty)
+            append_order_journal({
+                "event": "REJECTED",
+                "intent_id": None,
+                "kind": "market",
+                "symbol": str(code),
+                "side": side,
+                "qty": remaining_qty,
+                "price": 0.0 if attempted_price is None else float(attempted_price),
+                "filled_qty": total_filled_qty,
+                "remaining_qty": remaining_qty,
+                "entry_price_ceiling": resolved_max_entry_price,
+                "rejection_reason": reason,
+                "is_production": bool(self.is_production),
+                **_execution_cost_fields(),
+            })
+            execution_status = (
+                "partial_terminal" if total_filled_qty > 0 else "rejected"
+            )
+            return {
+                "order_id": last_order_id,
+                "submission_status": SubmissionStatus.REJECTED.value,
+                "process_state": OrderProcessState.TERMINAL.value,
+                "terminal_reason": OrderTerminalReason.REJECTED.value,
+                "Qty": total_filled_qty,
+                "filled_qty": total_filled_qty,
+                "Price": avg_price,
+                "average_price": avg_price if total_filled_qty > 0 else None,
+                "remaining_qty": remaining_qty,
+                "Symbol": code,
+                "has_partial_fill": 0 < total_filled_qty < int(shares),
+                "rejection_reason": reason,
+                "unresolved": False,
+                "execution_status": execution_status,
+                "entry_execution_status": execution_status,
+                "execution_ids": tuple(total_execution_ids),
+                "execution_id": (
+                    total_execution_ids[0] if total_execution_ids else None
+                ),
+                "max_entry_price": resolved_max_entry_price,
+                **_execution_cost_fields(),
+            }
 
         def _log_unresolved_order_event(
             *,
@@ -2205,9 +2458,52 @@ class KabucomBroker(BaseBroker):
                 "unresolved_reason": reason,
                 "submission_status": None if submission_status is None else submission_status.value,
                 "is_production": bool(self.is_production),
+                **_execution_cost_fields(),
             })
 
-        filled_order_ids: set[str] = set()
+        def _unresolved_without_new_order(reason: str) -> dict:
+            remaining_qty = max(0, int(shares) - total_filled_qty)
+            _log_unresolved_order_event(
+                reason=reason,
+                order_id=last_order_id,
+                filled_qty=total_filled_qty,
+                remaining_qty=remaining_qty,
+                terminal_reason=last_terminal_reason,
+                submission_status=(
+                    None if last_submission is None else last_submission.status
+                ),
+            )
+            avg_price = (
+                total_filled_value / total_filled_qty
+                if total_filled_qty > 0
+                else 0.0
+            )
+            return {
+                "order_id": last_order_id,
+                "submission_status": (
+                    None if last_submission is None else last_submission.status.value
+                ),
+                "process_state": OrderProcessState.UNKNOWN.value,
+                "terminal_reason": (
+                    None
+                    if last_terminal_reason is None
+                    else last_terminal_reason.value
+                ),
+                "Qty": total_filled_qty,
+                "filled_qty": total_filled_qty,
+                "Price": avg_price,
+                "average_price": avg_price if total_filled_qty > 0 else None,
+                "remaining_qty": remaining_qty,
+                "Symbol": code,
+                "has_partial_fill": 0 < total_filled_qty < int(shares),
+                "unresolved_reason": reason,
+                "unresolved": True,
+                "execution_ids": tuple(total_execution_ids),
+                "execution_id": (
+                    total_execution_ids[0] if total_execution_ids else None
+                ),
+                **_execution_cost_fields(),
+            }
 
         def _log_filled_order_event(
             *,
@@ -2218,9 +2514,12 @@ class KabucomBroker(BaseBroker):
             submission_status: SubmissionStatus | None,
         ) -> None:
             order_key = str(order_id or "").strip()
-            if not order_key or order_key in filled_order_ids:
+            if not order_key:
                 return
-            filled_order_ids.add(order_key)
+            aggregate_average_price = (
+                total_filled_value / total_filled_qty
+                if total_filled_qty > 0 else None
+            )
             append_order_journal({
                 "event": "FILLED",
                 "intent_id": None if last_submission is None else last_submission.intent_id,
@@ -2228,6 +2527,12 @@ class KabucomBroker(BaseBroker):
                 "symbol": str(code),
                 "side": side,
                 "qty": int(filled_qty),
+                "execution_evidence_schema_version": 1,
+                "aggregate_execution": True,
+                "requested_qty": int(shares),
+                "average_price": aggregate_average_price,
+                "average_fill_price": aggregate_average_price,
+                "order_ids": tuple(submitted_order_ids),
                 "order_id": order_id,
                 "filled_qty": int(filled_qty),
                 "remaining_qty": int(max(0, remaining_qty)),
@@ -2237,6 +2542,7 @@ class KabucomBroker(BaseBroker):
                 "terminal_reason": None if terminal_reason is None else terminal_reason.value,
                 "submission_status": None if submission_status is None else submission_status.value,
                 "is_production": bool(self.is_production),
+                **_execution_cost_fields(),
             })
 
         from core.logic import normalize_tick_size
@@ -2268,6 +2574,20 @@ class KabucomBroker(BaseBroker):
             if not limit_price or limit_price <= 0:
                 print(f"⚠️ {code} の有効な価格が取得できないため、追従を中断します。")
                 break
+            if (
+                action == StockOrderAction.MARGIN_NEW_LONG
+                and resolved_max_entry_price is not None
+                and float(limit_price) > resolved_max_entry_price
+            ):
+                print(
+                    f"🛑 {code} の指値 {limit_price} はentry価格上限 "
+                    f"{resolved_max_entry_price} を超えるため発注しません。"
+                )
+                return _entry_ceiling_terminal_result(
+                    "entry_price_ceiling_exceeded",
+                    attempted_price=float(limit_price),
+                )
+
 
             close_pos_list = None
             close_route = None
@@ -2292,6 +2612,8 @@ class KabucomBroker(BaseBroker):
             order_id = submission.broker_order_id
             last_submission = submission
             last_order_id = order_id
+            if order_id and order_id not in submitted_order_ids:
+                submitted_order_ids.append(order_id)
             if not order_id:
                 if last_submission and last_submission.status == SubmissionStatus.REJECTED:
                     rejection_reason = last_submission.rejection_reason or "rejected"
@@ -2309,6 +2631,7 @@ class KabucomBroker(BaseBroker):
                         "has_partial_fill": total_filled_qty > 0 and total_filled_qty < shares,
                         "rejection_reason": rejection_reason,
                         "unresolved": False,
+                        **_execution_cost_fields(),
                     }
                 if last_submission and last_submission.status == SubmissionStatus.UNKNOWN:
                     unresolved = True
@@ -2363,15 +2686,9 @@ class KabucomBroker(BaseBroker):
                                 "exit_execution_status": "rejected",
                                 "execution_ids": tuple(total_execution_ids),
                                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                                **_execution_cost_fields(),
                             }
-                        if parsed.terminal_reason == OrderTerminalReason.FILLED and parsed.cumulative_qty > 0:
-                            _log_filled_order_event(
-                                order_id=order_id,
-                                filled_qty=parsed.cumulative_qty,
-                                remaining_qty=0,
-                                terminal_reason=parsed.terminal_reason,
-                                submission_status=last_submission.status if last_submission is not None else None,
-                            )
+                        _record_execution_costs(order_id, terminal_details, parsed.cumulative_qty)
                         break
                 time.sleep(1)
 
@@ -2394,7 +2711,8 @@ class KabucomBroker(BaseBroker):
                 if parsed.process_state == OrderProcessState.UNKNOWN:
                     unresolved = True
                     unresolved_reason = "unknown_state"
-                    break
+                    if parsed.cumulative_qty <= 0:
+                        break
                 if parsed.cumulative_qty > 0:
                     for execution_id in parsed.execution_ids:
                         if execution_id not in total_execution_ids:
@@ -2411,6 +2729,9 @@ class KabucomBroker(BaseBroker):
                         f"⚠️ 注文 ID: {order_id} は {fill_qty}株 約定済みです"
                         + (" (部分約定)" if remaining_shares > 0 else "")
                     )
+                    _record_execution_costs(order_id, terminal_details, fill_qty)
+                if unresolved:
+                    break
                 if parsed.terminal_reason == OrderTerminalReason.FILLED or remaining_shares <= 0:
                     break
                 continue
@@ -2445,18 +2766,62 @@ class KabucomBroker(BaseBroker):
                 "execution_ids": tuple(total_execution_ids),
                 "execution_id": total_execution_ids[0] if total_execution_ids else None,
                 "unresolved": True,
+                **_execution_cost_fields(),
             }
 
         if remaining_shares > 0:
             print(f"🔥 【強制執行】残数 {remaining_shares}株 をマージン付の価格で即時約定させます。")
             board = self.get_board_data([code])
             b_info = board.get(str(code).replace(".T", ""))
-            current_price = float(b_info.get("current_price") or b_info.get("price") or 0.0)
+            if not isinstance(b_info, dict):
+                if action == StockOrderAction.MARGIN_NEW_LONG:
+                    return _entry_ceiling_terminal_result("force_quote_missing")
+                return _unresolved_without_new_order("force_quote_missing")
+            try:
+                current_price = float(
+                    b_info.get("current_price") or b_info.get("price") or 0.0
+                )
+                best_sell_price = float(
+                    b_info.get("best_sell_price") or current_price
+                )
+            except (TypeError, ValueError):
+                current_price = 0.0
+                best_sell_price = 0.0
+            if current_price <= 0 or (side == "2" and best_sell_price <= 0):
+                if action == StockOrderAction.MARGIN_NEW_LONG:
+                    return _entry_ceiling_terminal_result("force_quote_invalid")
+                return _unresolved_without_new_order("force_quote_invalid")
 
             if side == "2":
-                force_price = normalize_tick_size(current_price + (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=True)
+                force_reference_price = max(current_price, best_sell_price)
+                force_price = normalize_tick_size(
+                    force_reference_price
+                    + (
+                        atr * 0.2
+                        if atr > 0
+                        else force_reference_price * 0.01
+                    ),
+                    is_buy=True,
+                )
             else:
-                force_price = normalize_tick_size(current_price - (atr * 0.2 if atr > 0 else current_price * 0.01), is_buy=False)
+                force_price = normalize_tick_size(
+                    current_price
+                    - (atr * 0.2 if atr > 0 else current_price * 0.01),
+                    is_buy=False,
+                )
+            if (
+                action == StockOrderAction.MARGIN_NEW_LONG
+                and resolved_max_entry_price is not None
+                and force_price > resolved_max_entry_price
+            ):
+                print(
+                    f"🛑 {code} の強制指値 {force_price} はentry価格上限 "
+                    f"{resolved_max_entry_price} を超えるため発注しません。"
+                )
+                return _entry_ceiling_terminal_result(
+                    "force_entry_price_ceiling_exceeded",
+                    attempted_price=force_price,
+                )
 
             close_pos_list = None
             close_route = None
@@ -2487,6 +2852,7 @@ class KabucomBroker(BaseBroker):
                         "rejection_reason": "close_positions_unavailable",
                         "unresolved_reason": "close_route_unavailable",
                         "unresolved": True,
+                        **_execution_cost_fields(),
                         "execution_status": last_execution_status,
                         "entry_execution_status": last_entry_execution_status,
                         "exit_execution_status": last_exit_execution_status,
@@ -2506,6 +2872,8 @@ class KabucomBroker(BaseBroker):
             order_id = submission.broker_order_id
             last_order_id = order_id or last_order_id
             last_submission = submission
+            if order_id and order_id not in submitted_order_ids:
+                submitted_order_ids.append(order_id)
             if order_id:
                 execution_kind = "exit" if action == StockOrderAction.MARGIN_CLOSE_LONG else "entry"
                 f_details = self.wait_for_execution(order_id, timeout_sec=20).to_legacy_dict(symbol=code, side=side, execution_kind=execution_kind)
@@ -2528,6 +2896,7 @@ class KabucomBroker(BaseBroker):
                             total_filled_qty += fill_qty
                             total_filled_value += float(fill_price) * fill_qty
                             remaining_shares = max(0, shares - total_filled_qty)
+                            _record_execution_costs(order_id, f_details, fill_qty)
                         _log_unresolved_order_event(
                             reason="wait_for_execution_unresolved",
                             order_id=last_order_id,
@@ -2556,6 +2925,7 @@ class KabucomBroker(BaseBroker):
                             "exit_execution_status": last_exit_execution_status,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                            **_execution_cost_fields(),
                         }
                     parsed = parse_kabucom_order(f_details)
                     if parsed.process_state == OrderProcessState.UNKNOWN:
@@ -2571,6 +2941,7 @@ class KabucomBroker(BaseBroker):
                             total_filled_qty += fill_qty
                             total_filled_value += float(fill_price) * fill_qty
                             remaining_shares = max(0, shares - total_filled_qty)
+                            _record_execution_costs(order_id, f_details, fill_qty)
                         _log_unresolved_order_event(
                             reason="force_fill_unknown_state",
                             order_id=last_order_id,
@@ -2599,6 +2970,7 @@ class KabucomBroker(BaseBroker):
                             "exit_execution_status": last_exit_execution_status,
                             "execution_ids": tuple(total_execution_ids),
                             "execution_id": total_execution_ids[0] if total_execution_ids else None,
+                            **_execution_cost_fields(),
                         }
                     elif parsed.cumulative_qty > 0:
                         last_terminal_reason = parsed.terminal_reason or last_terminal_reason
@@ -2613,14 +2985,7 @@ class KabucomBroker(BaseBroker):
                         total_filled_qty += fill_qty
                         total_filled_value += float(fill_price) * fill_qty
                         remaining_shares = max(0, shares - total_filled_qty)
-                        if parsed.terminal_reason == OrderTerminalReason.FILLED:
-                            _log_filled_order_event(
-                                order_id=order_id,
-                                filled_qty=parsed.cumulative_qty,
-                                remaining_qty=0,
-                                terminal_reason=parsed.terminal_reason,
-                                submission_status=last_submission.status if last_submission is not None else None,
-                            )
+                        _record_execution_costs(order_id, f_details, fill_qty)
 
         avg_price = total_filled_value / total_filled_qty if total_filled_qty > 0 else 0.0
         terminal_reason = None if last_terminal_reason is None else last_terminal_reason.value
@@ -2631,7 +2996,6 @@ class KabucomBroker(BaseBroker):
             not unresolved
             and total_filled_qty > 0
             and last_order_id
-            and str(last_order_id).strip() not in filled_order_ids
             and (
                 remaining_shares <= 0
                 or last_terminal_reason == OrderTerminalReason.FILLED
@@ -2675,6 +3039,8 @@ class KabucomBroker(BaseBroker):
             "exit_execution_status": last_exit_execution_status,
             "execution_ids": tuple(total_execution_ids),
             "execution_id": total_execution_ids[0] if total_execution_ids else None,
+            "order_ids": tuple(submitted_order_ids),
+            **_execution_cost_fields(),
         }
 
     def execute_stop_order(
@@ -3270,6 +3636,7 @@ class KabucomBroker(BaseBroker):
                 confirmed, confirmation_reason, confirmation_details = self._confirm_stop_order_submission(
                     order_id=order_id,
                     expected_qty=int(shares),
+                    expected_symbol=str(code),
                     expected_trigger_price=float(normalized_trigger_price),
                     expected_close_positions=expected_close_positions,
                     side=side,
@@ -3277,6 +3644,31 @@ class KabucomBroker(BaseBroker):
                     margin_trade_type=margin_trade_type,
                 )
             if confirmed:
+                append_order_journal({
+                    "event": "ACCEPTED",
+                    "intent_id": intent_id,
+                    "kind": "stop",
+                    "symbol": str(code),
+                    "side": side,
+                    "qty": int(shares),
+                    "trigger_price": float(normalized_trigger_price),
+                    "hold_id": hold_id,
+                    "order_id": order_id,
+                    "http_status": submission.http_status,
+                    "result": submission.result_code,
+                    "confirmed": True,
+                    "confirmation_reason": "orders_api_confirmed",
+                    **_build_stop_route_journal_fields(),
+                    "confirmation_evidence_schema_version": 1,
+                    "confirmation_details": confirmation_details,
+                    "exchange": None if exchange is None else int(exchange),
+                    "margin_trade_type": (
+                        None
+                        if margin_trade_type is None
+                        else int(margin_trade_type)
+                    ),
+                    "is_production": bool(self.is_production),
+                })
                 print(f"🛑 逆指値注文（ストップロス）を設定しました (ID: {order_id}) - {code} {shares}株 Trigger: {trigger_price}")
                 return self._wrap_submission_result(
                     submission,

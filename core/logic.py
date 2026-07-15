@@ -1509,6 +1509,7 @@ DAYTRADE_MIN_RS_ALPHA = 0.0
 DAYTRADE_MIN_RSI2 = 35.0
 DAYTRADE_MAX_RSI2 = 80.0
 DAYTRADE_MIN_SETUP_SCORE = 3.0
+DAYTRADE_PRIMARY_FULL_CONFIDENCE_SCORE = 8.0
 DAYTRADE_MIN_PREV_DAY_RETURN_PCT = -0.005
 DAYTRADE_MAX_PREV_DAY_RETURN_PCT = 0.08
 DAYTRADE_MAX_DAILY_LOSS_PCT = 0.01
@@ -1711,7 +1712,7 @@ DAYTRADE_STRONG_OVERSOLD_MAX_GAP = 0.005
 DAYTRADE_STRONG_OVERSOLD_MIN_PREV_DAY_RETURN_PCT = -0.03
 DAYTRADE_STRONG_OVERSOLD_MAX_PREV_DAY_RETURN_PCT = 0.0
 DAYTRADE_STRONG_OVERSOLD_MAX_RSI2 = 3.0
-DAYTRADE_STRONG_OVERSOLD_MIN_RS_ALPHA = -999.0
+DAYTRADE_STRONG_OVERSOLD_MIN_RS_ALPHA = 0.0
 DAYTRADE_STRONG_OVERSOLD_STOP_MULT = 0.50
 DAYTRADE_STRONG_OVERSOLD_TARGET_MULT = 1.20
 DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT = 0.04
@@ -2055,6 +2056,37 @@ DAYTRADE_INVERSE_REBREAK_STOP_MULT = 0.60
 DAYTRADE_INVERSE_REBREAK_TARGET_MULT = 1.40
 DAYTRADE_INVERSE_NOTIONAL_PCT = 0.70
 DAYTRADE_INVERSE_EQUITY_NOTIONAL_PCT = 0.70
+
+# A setup's ordinary exposure is the upper bound for live and replay sizing.
+# Regime signals may reduce or block exposure, but isolated historical pockets
+# must not amplify it beyond the setup-wide risk envelope.
+DAYTRADE_BASE_EXPOSURE_CAPS = {
+    "primary": {
+        "notional_pct": DAYTRADE_MAX_NOTIONAL_PCT,
+        "equity_notional_pct": DAYTRADE_PRIMARY_MAX_EQUITY_NOTIONAL_PCT,
+        "risk_budget_pct": DAYTRADE_RISK_PER_TRADE_PCT,
+    },
+    "fallback": {
+        "notional_pct": DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
+        "equity_notional_pct": DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
+        "risk_budget_pct": DAYTRADE_RISK_PER_TRADE_PCT,
+    },
+    "strong_oversold": {
+        "notional_pct": DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT,
+        "equity_notional_pct": DAYTRADE_STRONG_OVERSOLD_EQUITY_NOTIONAL_PCT,
+        "risk_budget_pct": DAYTRADE_RISK_PER_TRADE_PCT,
+    },
+    "catchup_gapdown": {
+        "notional_pct": DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT,
+        "equity_notional_pct": DAYTRADE_CATCHUP_GAPDOWN_EQUITY_NOTIONAL_PCT,
+        "risk_budget_pct": DAYTRADE_RISK_PER_TRADE_PCT,
+    },
+    "catchup_rs": {
+        "notional_pct": DAYTRADE_CATCHUP_RS_NOTIONAL_PCT,
+        "equity_notional_pct": DAYTRADE_CATCHUP_RS_EQUITY_NOTIONAL_PCT,
+        "risk_budget_pct": DAYTRADE_RISK_PER_TRADE_PCT,
+    },
+}
 DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE = 1.00
 DAYTRADE_INVERSE_PANIC_BREADTH_MAX = 0.10
 DAYTRADE_INVERSE_PANIC_MIN_TURNOVER = 125_000_000.0
@@ -6014,24 +6046,6 @@ def resolve_daytrade_primary_risk_budget_pct(
     return float(default_pct)
 
 
-def _is_daytrade_primary_train_replay_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    open_vs_sma_atr,
-    market_ratio,
-    primary_score,
-    prev_return,
-):
-    if any(_is_invalid_number(v) for v in [breadth_val, gap_pct, open_vs_sma_atr, market_ratio, primary_score, prev_return]):
-        return False
-    return (
-        0.60 <= float(breadth_val) < 0.90
-        and 1.04 <= float(market_ratio) < 1.15
-        and 8.0 <= float(primary_score) <= 10.7
-        and 0.005 <= float(gap_pct) <= 0.025
-        and 0.0 <= float(open_vs_sma_atr) <= 3.5
-        and float(prev_return) >= 0.01
-    )
 
 
 def _is_daytrade_primary_friday_high_breadth_hot_market_stable_gap_sizeup_regime(
@@ -6074,27 +6088,7 @@ def resolve_daytrade_primary_size_multiplier(
     prev_rsi2=None,
     default_multiplier=1.0,
 ):
-    if _is_daytrade_primary_train_replay_sizeup_regime(
-        breadth_val=breadth_val,
-        gap_pct=gap_pct,
-        open_vs_sma_atr=open_vs_sma_atr,
-        market_ratio=market_ratio,
-        primary_score=primary_score,
-        prev_return=prev_return,
-    ):
-        return max(float(default_multiplier), DAYTRADE_PRIMARY_BROAD_HOT_MARKET_STABLE_GAP_SIZEUP_MULTIPLIER)
-    if _is_daytrade_primary_friday_high_breadth_hot_market_stable_gap_sizeup_regime(
-        breadth_val=breadth_val,
-        gap_pct=gap_pct,
-        open_vs_sma_atr=open_vs_sma_atr,
-        market_ratio=market_ratio,
-        primary_score=primary_score,
-        prev_return=prev_return,
-        prev_rsi2=prev_rsi2,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        return max(float(default_multiplier), DAYTRADE_PRIMARY_FRIDAY_HIGH_BREADTH_HOT_MARKET_STABLE_GAP_SIZEUP_MULTIPLIER)
+    """Return the setup default; shared exposure caps forbid upward amplification."""
     return float(default_multiplier)
 
 def resolve_daytrade_fallback_notional_pct(
@@ -6106,67 +6100,8 @@ def resolve_daytrade_fallback_notional_pct(
     trade_weekday=None,
     default_pct=DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
 ):
-    resolved_pct = float(default_pct)
-    weekday = resolve_daytrade_weekday(trade_weekday=trade_weekday)
-    if (
-        _is_invalid_number(breadth_val)
-        or _is_invalid_number(score)
-        or _is_invalid_number(prev_return)
-    ):
-        return resolved_pct
-    if (
-        float(breadth_val) < DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_BREADTH
-        and float(score) <= DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_MAX_SCORE
-        and float(prev_return) <= 0.02
-    ):
-        return max(resolved_pct, DAYTRADE_FALLBACK_LOW_SCORE_SIZEUP_NOTIONAL_PCT)
-    if (
-        float(breadth_val) < DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_BREADTH
-        and DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MIN_SCORE
-        < float(score)
-        <= DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_MAX_SCORE
-        and float(prev_return) <= 0.02
-    ):
-        return max(resolved_pct, DAYTRADE_FALLBACK_HIGH_CONFIDENCE_SIZEUP_NOTIONAL_PCT)
-    if (
-        weekday == DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_WEEKDAY
-        and not _is_invalid_number(market_ratio)
-        and DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MAX_BREADTH
-        and DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        <= DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MAX_MARKET_RATIO
-        and DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MIN_SCORE
-        <= float(score)
-        <= DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_MAX_SCORE
-    ):
-        return max(resolved_pct, DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_NOTIONAL_PCT)
-    # Wednesday fallback with mid breadth, hot market, and a stretched open was
-    # pure-win in train, so let it size above the default fallback cap.
-    if (
-        weekday == DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_WEEKDAY
-        and not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(score)
-        and not _is_invalid_number(prev_return)
-        and not _is_invalid_number(open_vs_sma_atr)
-        and DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        <= DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MAX_MARKET_RATIO
-        and DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MIN_SCORE
-        <= float(score)
-        <= DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MAX_SCORE
-        and float(prev_return)
-        >= DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MIN_PREV_RETURN_PCT
-        and float(open_vs_sma_atr)
-        >= DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_MIN_OPEN_VS_SMA_ATR
-    ):
-        return max(resolved_pct, DAYTRADE_FALLBACK_WEDNESDAY_HOT_OPEN_SIZEUP_NOTIONAL_PCT)
-    return resolved_pct
+    """Return the fallback default, which is also its setup-wide notional cap."""
+    return float(default_pct)
 def resolve_daytrade_fallback_equity_notional_pct(
     gap_pct,
     breadth_val=None,
@@ -6656,30 +6591,7 @@ def resolve_daytrade_catchup_size_multiplier(
     trade_weekday=None,
     default_multiplier=1.0,
 ):
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday is None or setup_type != "catchup_rs":
-        return float(default_multiplier)
-    if (
-        weekday == DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_WEEKDAY
-        and not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(gap_pct)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(score)
-        and not _is_invalid_number(rs_alpha)
-        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MAX_BREADTH
-        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        <= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MAX_MARKET_RATIO
-        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MIN_SCORE
-        <= float(score)
-        and DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MIN_GAP_PCT
-        <= float(gap_pct)
-        <= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MAX_GAP_PCT
-        and float(rs_alpha) >= DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MIN_RS_ALPHA
-    ):
-        return max(float(default_multiplier), DAYTRADE_CATCHUP_RS_TUESDAY_LOW_BREADTH_HIGH_RS_SIZEUP_MULTIPLIER)
+    """Return the setup default; shared exposure caps forbid upward amplification."""
     return float(default_multiplier)
 
 
@@ -6693,28 +6605,12 @@ def resolve_daytrade_catchup_notional_pct(
     rs_alpha=None,
     default_pct=None,
 ):
+    """Return the setup-wide catchup notional cap without fitted size-up pockets."""
     if default_pct is None:
         default_pct = (
             DAYTRADE_CATCHUP_GAPDOWN_NOTIONAL_PCT
             if setup_type == "catchup_gapdown"
             else DAYTRADE_CATCHUP_RS_NOTIONAL_PCT
-        )
-    if (
-        setup_type == "catchup_rs"
-        and not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(prev_return)
-        and not _is_invalid_number(open_vs_sma_atr)
-        and not _is_invalid_number(score)
-        and not _is_invalid_number(rs_alpha)
-        and float(breadth_val) < DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_BREADTH
-        and float(prev_return) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_PREV_RETURN
-        and float(open_vs_sma_atr) <= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MAX_OPEN_VS_SMA_ATR
-        and float(score) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_SCORE
-        and float(rs_alpha) >= DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_MIN_RS_ALPHA
-    ):
-        return max(
-            float(default_pct),
-            DAYTRADE_CATCHUP_RS_STRONG_CONTINUATION_NOTIONAL_PCT,
         )
     return float(default_pct)
 def is_daytrade_primary_thursday_mid_breadth_filtered(
@@ -7942,26 +7838,57 @@ def resolve_daytrade_intraday_stop_mult(sl_mult=STOP_LOSS_ATR):
     return max(0.6, min(1.2, float(sl_mult) / 5.0))
 def resolve_daytrade_intraday_target_mult(tp_mult=TAKE_PROFIT_ATR):
     return max(1.0, min(2.0, float(tp_mult) / 20.0))
+def resolve_daytrade_primary_failed_runup_exit_price(
+    setup_type,
+    buy_price,
+    current_price,
+    session_high,
+    min_session_runup_pct=DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT,
+    exit_slippage_rate=0.0,
+):
+    if str(setup_type or "") != "primary":
+        return None
+    values = [buy_price, current_price, session_high, min_session_runup_pct, exit_slippage_rate]
+    if any(_is_invalid_number(value) for value in values):
+        return None
+    buy_price = float(buy_price)
+    current_price = float(current_price)
+    session_high = float(session_high)
+    if buy_price <= 0 or current_price <= 0 or session_high <= 0:
+        return None
+    runup_pct = max(0.0, float(min_session_runup_pct))
+    runup_threshold = buy_price * (1.0 + runup_pct)
+    if runup_pct <= 0.0:
+        runup_reached = session_high > buy_price
+    else:
+        runup_reached = session_high >= runup_threshold
+    if not runup_reached:
+        return None
+
+    slippage_rate = float(np.clip(float(exit_slippage_rate), 0.0, 0.99))
+    if slippage_rate > 0.0:
+        net_breakeven_trigger = buy_price / (1.0 - slippage_rate)
+        if session_high >= max(runup_threshold, net_breakeven_trigger) and current_price <= net_breakeven_trigger:
+            return net_breakeven_trigger
+    if current_price <= buy_price:
+        return buy_price
+    return None
 def is_daytrade_primary_failed_runup_exit(
     setup_type,
     buy_price,
     current_price,
     session_high,
     min_session_runup_pct=DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT,
+    exit_slippage_rate=0.0,
 ):
-    if str(setup_type or "") != "primary":
-        return False
-    if any(_is_invalid_number(value) for value in [buy_price, current_price, session_high, min_session_runup_pct]):
-        return False
-    if float(buy_price) <= 0 or float(current_price) <= 0 or float(session_high) <= 0:
-        return False
-    runup_pct = float(min_session_runup_pct)
-    runup_threshold = float(buy_price) * (1.0 + runup_pct)
-    if runup_pct <= 0.0:
-        runup_reached = float(session_high) > float(buy_price)
-    else:
-        runup_reached = float(session_high) >= runup_threshold
-    return runup_reached and float(current_price) <= float(buy_price)
+    return resolve_daytrade_primary_failed_runup_exit_price(
+        setup_type=setup_type,
+        buy_price=buy_price,
+        current_price=current_price,
+        session_high=session_high,
+        min_session_runup_pct=min_session_runup_pct,
+        exit_slippage_rate=exit_slippage_rate,
+    ) is not None
 def resolve_daytrade_live_exit_decision(
     setup_type,
     buy_price,
@@ -7973,6 +7900,7 @@ def resolve_daytrade_live_exit_decision(
     target_price,
     session_high=None,
     min_session_runup_pct=DAYTRADE_PRIMARY_FAILED_RUNUP_MIN_SESSION_RUNUP_PCT,
+    exit_slippage_rate=0.0,
     allow_close_exit=True,
 ):
     values = [buy_price, open_price, high_price, low_price, current_price, stop_price, target_price]
@@ -7998,14 +7926,16 @@ def resolve_daytrade_live_exit_decision(
         return stop_price, "intraday_stop"
     if target_hit:
         return target_price, "intraday_target"
-    if is_daytrade_primary_failed_runup_exit(
+    failed_runup_exit_price = resolve_daytrade_primary_failed_runup_exit_price(
         setup_type=setup_type,
         buy_price=buy_price,
         current_price=current_price,
         session_high=resolved_session_high,
         min_session_runup_pct=min_session_runup_pct,
-    ):
-        return buy_price, "intraday_failed_runup"
+        exit_slippage_rate=exit_slippage_rate,
+    )
+    if failed_runup_exit_price is not None:
+        return failed_runup_exit_price, "intraday_failed_runup"
     if allow_close_exit:
         return current_price, "close_exit"
     return None, ""
@@ -9335,81 +9265,6 @@ def score_daytrade_strong_oversold_open_setup(metrics, rs_alpha=None):
     )
     return float(score)
 
-def _is_daytrade_strong_oversold_pure_win_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    market_ratio,
-    score,
-    open_vs_trend_atr=None,
-    trade_date=None,
-    trade_weekday=None,
-):
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday is None:
-        return False
-    if (
-        weekday in DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_WEEKDAYS
-        and not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(gap_pct)
-        and not _is_invalid_number(score)
-        and DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_MARKET_RATIO
-        and float(score) >= DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_SCORE
-        and float(gap_pct) <= DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_GAP_PCT
-    ):
-        return True
-    if (
-        not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(gap_pct)
-        and not _is_invalid_number(score)
-        and not _is_invalid_number(open_vs_trend_atr)
-        and DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MAX_MARKET_RATIO
-        and DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MIN_SCORE
-        <= float(score)
-        <= DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MAX_SCORE
-        and DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MIN_GAP_PCT
-        <= float(gap_pct)
-        <= DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MAX_GAP_PCT
-        and DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MIN_OPEN_VS_TREND_ATR
-        <= float(open_vs_trend_atr)
-        <= DAYTRADE_STRONG_OVERSOLD_HOT_MARKET_PURE_WIN_SIZEUP_MAX_OPEN_VS_TREND_ATR
-    ):
-        return True
-    if (
-        not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(gap_pct)
-        and not _is_invalid_number(score)
-        and not _is_invalid_number(open_vs_trend_atr)
-        and DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MAX_MARKET_RATIO
-        and DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MIN_SCORE
-        <= float(score)
-        <= DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MAX_SCORE
-        and DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MIN_GAP_PCT
-        <= float(gap_pct)
-        <= DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MAX_GAP_PCT
-        and DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MIN_OPEN_VS_TREND_ATR
-        <= float(open_vs_trend_atr)
-        <= DAYTRADE_STRONG_OVERSOLD_STABLE_MARKET_PURE_WIN_SIZEUP_MAX_OPEN_VS_TREND_ATR
-    ):
-        return True
-    return False
 
 
 def resolve_daytrade_strong_oversold_notional_pct(
@@ -9422,21 +9277,8 @@ def resolve_daytrade_strong_oversold_notional_pct(
     trade_weekday=None,
     default_pct=DAYTRADE_STRONG_OVERSOLD_NOTIONAL_PCT,
 ):
-    resolved_pct = float(default_pct)
-    if _is_daytrade_strong_oversold_pure_win_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        return max(
-            resolved_pct,
-            DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_NOTIONAL_PCT,
-        )
-    return resolved_pct
+    """Return the strong-oversold setup-wide notional cap."""
+    return float(default_pct)
 
 
 def resolve_daytrade_strong_oversold_equity_notional_pct(
@@ -9449,22 +9291,8 @@ def resolve_daytrade_strong_oversold_equity_notional_pct(
     trade_weekday=None,
     default_pct=DAYTRADE_STRONG_OVERSOLD_EQUITY_NOTIONAL_PCT,
 ):
-    resolved_pct = float(default_pct)
-    if _is_daytrade_strong_oversold_pure_win_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        # Keep the broader pure-win sizing cap aligned with the notional lift.
-        return max(
-            resolved_pct,
-            DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_EQUITY_NOTIONAL_PCT,
-        )
-    return resolved_pct
+    """Return the strong-oversold setup-wide equity-notional cap."""
+    return float(default_pct)
 
 def resolve_daytrade_strong_oversold_risk_budget_pct(
     breadth_val,
@@ -9476,133 +9304,17 @@ def resolve_daytrade_strong_oversold_risk_budget_pct(
     trade_weekday=None,
     default_pct=DAYTRADE_RISK_PER_TRADE_PCT,
 ):
-    resolved_pct = float(default_pct)
-    if _is_daytrade_strong_oversold_pure_win_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        # Keep the broader pure-win sizing aligned with the notional lift.
-        return max(
-            resolved_pct,
-            DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_RISK_BUDGET_PCT,
-        )
-    return resolved_pct
+    """Return the shared risk budget without fitted upward amplification."""
+    return float(default_pct)
 
 
 
-def _is_daytrade_strong_oversold_near_neutral_high_open_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    market_ratio,
-    score,
-    open_vs_trend_atr=None,
-):
-    if any(_is_invalid_number(v) for v in [breadth_val, gap_pct, market_ratio, score, open_vs_trend_atr]):
-        return False
-    return (
-        DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MAX_MARKET_RATIO
-        and float(score) >= DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MIN_SCORE
-        and DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MIN_GAP_PCT
-        <= float(gap_pct)
-        <= DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MAX_GAP_PCT
-        and float(open_vs_trend_atr) >= DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MIN_OPEN_VS_TREND_ATR
-    )
 
 
-def _is_daytrade_strong_oversold_broad_train_replay_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    market_ratio,
-    score,
-):
-    if any(_is_invalid_number(v) for v in [breadth_val, gap_pct, market_ratio, score]):
-        return False
-    return (
-        DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MAX_MARKET_RATIO
-        and float(score) >= DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MIN_SCORE
-        and DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MIN_GAP_PCT
-        <= float(gap_pct)
-        <= DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MAX_GAP_PCT
-    )
 
 
-def _is_daytrade_strong_oversold_hot_stable_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    market_ratio,
-    score,
-    open_vs_trend_atr=None,
-    trade_date=None,
-    trade_weekday=None,
-):
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday is None:
-        return False
-    if any(_is_invalid_number(v) for v in [breadth_val, gap_pct, market_ratio, score, open_vs_trend_atr]):
-        return False
-    monday_match = (
-        weekday == DAYTRADE_PRIMARY_MONDAY_MID_GAP_WEEKDAY
-        and 0.55 <= float(breadth_val) < 0.70
-        and 1.00 <= float(market_ratio) <= 1.20
-        and float(score) >= 18.0
-        and -0.02 <= float(gap_pct) <= 0.0
-        and float(open_vs_trend_atr) <= 3.5
-    )
-    wednesday_match = (
-        weekday == DAYTRADE_PRIMARY_WEDNESDAY_STALL_WEEKDAY
-        and 0.55 <= float(breadth_val) < 0.65
-        and 1.10 <= float(market_ratio) <= 1.25
-        and float(score) >= 18.0
-        and -0.02 <= float(gap_pct) <= 0.0
-        and 1.0 <= float(open_vs_trend_atr) <= 6.0
-    )
-    return monday_match or wednesday_match
 
 
-def _is_daytrade_strong_oversold_weekday_pure_win_sizeup_regime(
-    breadth_val,
-    gap_pct,
-    market_ratio,
-    score,
-    open_vs_trend_atr=None,
-    trade_date=None,
-    trade_weekday=None,
-):
-    weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
-    if weekday is None:
-        return False
-    if (
-        weekday in DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_WEEKDAYS
-        and not _is_invalid_number(breadth_val)
-        and not _is_invalid_number(market_ratio)
-        and not _is_invalid_number(gap_pct)
-        and not _is_invalid_number(score)
-        and DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_BREADTH
-        <= float(breadth_val)
-        < DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_BREADTH
-        and DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_MARKET_RATIO
-        <= float(market_ratio)
-        < DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_MARKET_RATIO
-        and float(score) >= DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MIN_SCORE
-        and float(gap_pct) <= DAYTRADE_STRONG_OVERSOLD_PURE_WIN_SIZEUP_MAX_GAP_PCT
-    ):
-        return True
-    return False
 
 
 def resolve_daytrade_strong_oversold_size_multiplier(
@@ -9615,41 +9327,7 @@ def resolve_daytrade_strong_oversold_size_multiplier(
     trade_weekday=None,
     default_multiplier=1.0,
 ):
-    if _is_daytrade_strong_oversold_near_neutral_high_open_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-    ):
-        return max(float(default_multiplier), DAYTRADE_STRONG_OVERSOLD_NEAR_NEUTRAL_HIGH_OPEN_SIZEUP_MULTIPLIER)
-    if _is_daytrade_strong_oversold_broad_train_replay_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-    ):
-        return max(float(default_multiplier), DAYTRADE_STRONG_OVERSOLD_BROAD_TRAIN_REPLAY_SIZEUP_MULTIPLIER)
-    if _is_daytrade_strong_oversold_hot_stable_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        return max(float(default_multiplier), DAYTRADE_STRONG_OVERSOLD_HOT_STABLE_SIZEUP_MULTIPLIER)
-    if _is_daytrade_strong_oversold_weekday_pure_win_sizeup_regime(
-        breadth_val,
-        gap_pct,
-        market_ratio,
-        score,
-        open_vs_trend_atr=open_vs_trend_atr,
-        trade_date=trade_date,
-        trade_weekday=trade_weekday,
-    ):
-        return max(float(default_multiplier), DAYTRADE_STRONG_OVERSOLD_WEEKDAY_PURE_WIN_SIZEUP_MULTIPLIER)
+    """Return the setup default; shared exposure caps forbid upward amplification."""
     return float(default_multiplier)
 
 def score_daytrade_catchup_open_setup(metrics):
@@ -9711,6 +9389,29 @@ def score_daytrade_inverse_open_setup(metrics, rs_alpha=None):
         )
     gap_penalty = abs(gap_pct - 0.01) * 30.0
     return float((prev_return * 100.0) + rs_bonus - gap_penalty + 2.0)
+def apply_daytrade_base_exposure_cap(candidate):
+    """Apply setup-wide live exposure ceilings without weakening de-risking."""
+    capped = candidate if isinstance(candidate, dict) else {}
+    setup_type = str(capped.get("setup_type") or "")
+    caps = DAYTRADE_BASE_EXPOSURE_CAPS.get(setup_type)
+    if not caps:
+        return capped
+    effective_caps = caps
+    score = capped.get("score")
+    if setup_type == "primary" and not _is_invalid_number(score):
+        confidence_scale = float(
+            np.clip(float(score) / DAYTRADE_PRIMARY_FULL_CONFIDENCE_SCORE, 0.50, 1.00)
+        )
+        effective_caps = {field: float(value) * confidence_scale for field, value in caps.items()}
+    for field, upper_bound in effective_caps.items():
+        value = capped.get(field)
+        if value is None or _is_invalid_number(value):
+            continue
+        capped[field] = min(float(value), float(upper_bound))
+    size_multiplier = capped.get("size_multiplier")
+    if size_multiplier is not None and not _is_invalid_number(size_multiplier):
+        capped["size_multiplier"] = min(float(size_multiplier), 1.0)
+    return capped
 def select_daytrade_candidates(
     primary_candidates,
     strong_oversold_candidates,
@@ -9730,6 +9431,12 @@ def select_daytrade_candidates(
     base_leverage=LEVERAGE,
 ):
     weekday = resolve_daytrade_weekday(trade_date=trade_date, trade_weekday=trade_weekday)
+    primary_candidates = [apply_daytrade_base_exposure_cap(item) for item in (primary_candidates or [])]
+    strong_oversold_candidates = [apply_daytrade_base_exposure_cap(item) for item in (strong_oversold_candidates or [])]
+    fallback_candidates = [apply_daytrade_base_exposure_cap(item) for item in (fallback_candidates or [])]
+    catchup_candidates = [apply_daytrade_base_exposure_cap(item) for item in (catchup_candidates or [])]
+    inverse_candidates = [apply_daytrade_base_exposure_cap(item) for item in (inverse_candidates or [])]
+    bull_etf_candidates = [apply_daytrade_base_exposure_cap(item) for item in (bull_etf_candidates or [])]
     if weekday == 4:
         strong_oversold_candidates = [
             item
@@ -10221,6 +9928,8 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
     sell_actions = []
     fill_events = []
     remaining_portfolio = []
+    if not is_simulation:
+        from core.order_journal import order_journal_context
     if not portfolio:
         return [], sell_actions, fill_events
     for p in portfolio:
@@ -10242,11 +9951,15 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
         if not is_simulation:
             stop_order_id = resolve_protective_stop_order_id(p)
             if stop_order_id:
-                stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
-                    broker=broker,
-                    position=p,
-                    stop_order_id=stop_order_id,
-                )
+                with order_journal_context(
+                    decision_snapshot_id=p.get("decision_snapshot_id"),
+                    lifecycle_stage="protective_stop_cancel",
+                ):
+                    stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
+                        broker=broker,
+                        position=p,
+                        stop_order_id=stop_order_id,
+                    )
                 if not stop_cancel_ok:
                     unresolved_position = dict(p)
                     unresolved_position["protective_stop_cancel_unresolved"] = True
@@ -10270,7 +9983,11 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
         if is_simulation or not broker:
             continue
         try:
-            details = broker.execute_chase_order(code, p['shares'], action=StockOrderAction.MARGIN_CLOSE_LONG)
+            with order_journal_context(
+                decision_snapshot_id=p.get("decision_snapshot_id"),
+                lifecycle_stage="exit",
+            ):
+                details = broker.execute_chase_order(code, p['shares'], action=StockOrderAction.MARGIN_CLOSE_LONG)
         except Exception as exc:
             sell_actions.append(f"SELL {code} - Day Trade Flatten failed ({exc})")
             remaining_portfolio.append(dict(p))
@@ -10295,6 +10012,12 @@ def manage_positions_live(portfolio, broker=None, is_simulation=True, realtime_b
             "session_low": float(p.get("post_entry_low", p.get("buy_price", current_price))),
             "exit_time": dt.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
             "exit_reason": "daytrade_flatten",
+            "exit_order_id": details.get("order_id"),
+            "exit_execution_ids": tuple(details.get("execution_ids") or ()),
+            "exit_commission": details.get("commission"),
+            "exit_commission_tax": details.get("commission_tax"),
+            "exit_execution_costs_complete": bool(details.get("execution_costs_complete")),
+            "exit_order_unresolved": bool(details.get("unresolved")),
         })
         if remaining_shares > 0:
             remaining_position = dict(p)
@@ -11254,5 +10977,192 @@ def cap_daytrade_position_size(
         capped_shares = min(capped_shares, equity_cap_shares)
     return capped_shares if capped_shares >= 100 else 0
 
+
+
+def resolve_daytrade_entry_risk_envelope(
+    *,
+    current_equity,
+    buying_power,
+    entry_price,
+    stop_price,
+    dynamic_leverage,
+    max_positions,
+    turnover,
+    notional_pct=None,
+    equity_notional_pct=None,
+    risk_budget_pct=None,
+    size_multiplier=1.0,
+):
+    """Resolve board-lot size and the highest price that preserves every sizing cap."""
+    required_values = (
+        current_equity,
+        buying_power,
+        entry_price,
+        stop_price,
+        dynamic_leverage,
+        max_positions,
+        turnover,
+    )
+    if any(_is_invalid_number(value) for value in required_values):
+        return {
+            "status": "blocked",
+            "reason": "invalid_required_input",
+            "raw_shares": 0,
+            "shares": 0,
+            "max_entry_price": 0.0,
+        }
+
+    current_equity = float(current_equity)
+    buying_power = float(buying_power)
+    entry_price = float(entry_price)
+    stop_price = float(stop_price)
+    dynamic_leverage = float(dynamic_leverage)
+    max_positions = int(max_positions)
+    turnover = float(turnover)
+    if (
+        current_equity <= 0
+        or buying_power <= 0
+        or entry_price <= 0
+        or stop_price <= 0
+        or dynamic_leverage <= 0
+        or max_positions <= 0
+        or turnover <= 0
+    ):
+        return {
+            "status": "blocked",
+            "reason": "nonpositive_required_input",
+            "raw_shares": 0,
+            "shares": 0,
+            "max_entry_price": 0.0,
+        }
+
+    resolved_size_multiplier = (
+        1.0
+        if _is_invalid_number(size_multiplier) or float(size_multiplier) <= 0
+        else float(size_multiplier)
+    )
+    resolved_risk_budget_pct = DAYTRADE_RISK_PER_TRADE_PCT
+    if not _is_invalid_number(risk_budget_pct) and float(risk_budget_pct) > 0:
+        resolved_risk_budget_pct = float(risk_budget_pct)
+    if notional_pct is None:
+        resolved_notional_pct = DAYTRADE_MAX_NOTIONAL_PCT
+    elif _is_invalid_number(notional_pct) or float(notional_pct) <= 0:
+        return {
+            "status": "blocked",
+            "reason": "invalid_notional_pct",
+            "raw_shares": 0,
+            "shares": 0,
+            "max_entry_price": 0.0,
+        }
+    else:
+        resolved_notional_pct = float(notional_pct)
+    resolved_equity_notional_pct = None
+    if equity_notional_pct is not None:
+        if (
+            _is_invalid_number(equity_notional_pct)
+            or float(equity_notional_pct) <= 0
+        ):
+            return {
+                "status": "blocked",
+                "reason": "invalid_equity_notional_pct",
+                "raw_shares": 0,
+                "shares": 0,
+                "max_entry_price": 0.0,
+            }
+        resolved_equity_notional_pct = float(equity_notional_pct)
+
+    raw_shares = calculate_lot_size(
+        current_equity=current_equity,
+        atr=0.0,
+        sl_mult=0.0,
+        price=entry_price,
+        dynamic_leverage=dynamic_leverage,
+        max_positions=max_positions,
+        buying_power=buying_power,
+        turnover=turnover,
+    )
+    shares = cap_daytrade_position_size(
+        raw_shares=raw_shares,
+        current_equity=current_equity,
+        buying_power=buying_power,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        notional_pct=resolved_notional_pct,
+        equity_notional_pct=resolved_equity_notional_pct,
+        risk_budget_pct=resolved_risk_budget_pct,
+        size_multiplier=resolved_size_multiplier,
+    )
+    if shares < 100:
+        return {
+            "status": "blocked",
+            "reason": "capped_lot_below_100",
+            "raw_shares": int(raw_shares),
+            "shares": 0,
+            "max_entry_price": 0.0,
+            "size_multiplier": resolved_size_multiplier,
+            "risk_budget_pct": resolved_risk_budget_pct,
+            "notional_pct": resolved_notional_pct,
+            "equity_notional_pct": resolved_equity_notional_pct,
+        }
+
+    total_assets = current_equity if USE_COMPOUNDING else float(INITIAL_CASH)
+    risk_budget_yen = (
+        current_equity
+        * resolved_risk_budget_pct
+        * resolved_size_multiplier
+    )
+    bounds = [
+        (total_assets * dynamic_leverage / max_positions) / shares,
+        (buying_power * 0.95) / shares,
+        (turnover * float(LIQUIDITY_LIMIT_RATE)) / shares,
+        stop_price + (risk_budget_yen / shares),
+        (risk_budget_yen / shares) / 0.001,
+        (
+            buying_power
+            * resolved_notional_pct
+            * resolved_size_multiplier
+        ) / shares,
+    ]
+    if resolved_equity_notional_pct is not None:
+        bounds.append(
+            (
+                current_equity
+                * resolved_equity_notional_pct
+                * resolved_size_multiplier
+            ) / shares
+        )
+    finite_bounds = [
+        float(value)
+        for value in bounds
+        if not _is_invalid_number(value) and float(value) > 0
+    ]
+    if len(finite_bounds) != len(bounds):
+        return {
+            "status": "blocked",
+            "reason": "invalid_price_ceiling_bound",
+            "raw_shares": int(raw_shares),
+            "shares": int(shares),
+            "max_entry_price": 0.0,
+        }
+    max_entry_price = normalize_tick_size(min(finite_bounds), is_buy=False)
+    if max_entry_price < entry_price:
+        return {
+            "status": "blocked",
+            "reason": "price_ceiling_below_sizing_price",
+            "raw_shares": int(raw_shares),
+            "shares": int(shares),
+            "max_entry_price": float(max_entry_price),
+        }
+    return {
+        "status": "approved",
+        "reason": "",
+        "raw_shares": int(raw_shares),
+        "shares": int(shares),
+        "max_entry_price": float(max_entry_price),
+        "size_multiplier": resolved_size_multiplier,
+        "risk_budget_pct": resolved_risk_budget_pct,
+        "notional_pct": resolved_notional_pct,
+        "equity_notional_pct": resolved_equity_notional_pct,
+    }
 
 

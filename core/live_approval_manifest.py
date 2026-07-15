@@ -148,11 +148,21 @@ def _collect_code_file_hashes(repo_root: Path | None = None) -> dict[str, str]:
     root = _repo_root() if repo_root is None else Path(repo_root)
     rel_paths = [
         "core/config.py",
+        "core/ai_filter.py",
+        "core/daytrade_candidate_engine.py",
+        "core/daytrade_observation_universe.py",
+        "core/daytrade_opening_discovery.py",
+        "core/daytrade_production_replay.py",
+        "core/jpx_calendar.py",
+        "core/kabu_launcher.py",
+        "core/kabucom_quote.py",
         "core/logic.py",
         "core/monthly_rotation_strategy.py",
         "core/live_order_gate.py",
         "core/kabucom_broker.py",
+        "core/order_journal.py",
         "auto_trade.py",
+        "contracts/jpx_trading_calendar.json",
     ]
     return {rel_path: _hash_file(root / rel_path) for rel_path in rel_paths}
 

@@ -94,6 +94,7 @@ def _resolve_intraday_exit(
     stop_price,
     target_price,
     setup_type=None,
+    exit_slippage_rate=0.0,
 ):
     """
     Resolve a same-day OHLC exit with conservative assumptions.
@@ -109,6 +110,7 @@ def _resolve_intraday_exit(
         stop_price=stop_price,
         target_price=target_price,
         session_high=high_price,
+        exit_slippage_rate=exit_slippage_rate,
         allow_close_exit=True,
     )
 
@@ -869,6 +871,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                                 entry_slippage=None, exit_slippage=None,
                                 explicit_trade_cost=0.0, profit_tax_rate=0.0,
                                 evaluation_start_date=None,
+                                observation_universe_indices_by_day=None,
                                 return_daily_stats=False,
                                 return_trade_log=False,
                                 return_candidate_log=False,
@@ -972,6 +975,8 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         if ticker == "1321.T":
             market_idx = idx_t
             break
+    base_univ_indices = tuple(int(index) for index in univ_indices)
+    base_univ_index_set = set(base_univ_indices)
     
     current_month = ""
     month_start_equity = initial_cash
@@ -1014,14 +1019,22 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
 
         day_key = curr_time.strftime('%Y-%m-%d')
         day_start_equity = float(cash)
+        day_univ_indices = base_univ_indices
+        if observation_universe_indices_by_day is not None:
+            requested_indices = observation_universe_indices_by_day.get(day_key, ())
+            day_univ_indices = tuple(
+                int(index)
+                for index in requested_indices
+                if int(index) in base_univ_index_set
+            )
         day_trade_count = 0
 
         total_equity = cash
         if is_daytrade_monthly_risk_blocked(month_start_equity, total_equity):
             month_done = True
 
-        if i + 1 >= T or month_done:
-            skip_reason = "monthly_risk_blocked" if month_done else "last_day_without_next_session"
+        if month_done:
+            skip_reason = "monthly_risk_blocked"
             _record_candidate_day(
                 day_key,
                 curr_time,
@@ -1121,7 +1134,7 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         generated = generate_daytrade_candidate_groups(
             DaytradeOpenArrayView(
                 tickers=bundle_np["tickers"],
-                universe_indices=univ_indices,
+                universe_indices=day_univ_indices,
                 open_today=open_np[i],
                 close_prev=close_np[i - 1],
                 close_prev2=close_np[i - 2],
@@ -1147,20 +1160,6 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
         bull_etf_candidates = generated.bull_etf
         scan_stats = generated.scan_stats
         setup_stats = generated.setup_stats
-
-        for candidate_group in (
-            candidates,
-            strong_oversold_candidates,
-            fallback_candidates,
-            catchup_candidates,
-            inverse_candidates,
-            bull_etf_candidates,
-        ):
-            for candidate in candidate_group:
-                candidate_index = candidate["s_idx"]
-                candidate["close"] = close_np[i, candidate_index]
-                candidate["high"] = high_np[i, candidate_index]
-                candidate["low"] = low_np[i, candidate_index]
 
         candidate_groups = [
             ("primary", candidates),
@@ -1208,12 +1207,24 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                 current_time=curr_time,
             )
             selected_dynamic_lev *= resolve_daytrade_breadth_exposure_scale(entry_breadth)
+            # Keep same-day outcomes outside candidate dictionaries. They are execution-
+            # simulation evidence and must never become selection or sizing inputs.
+            execution_outcomes_by_id = {}
+            for _source_bucket, candidate_group in candidate_groups:
+                for candidate in candidate_group:
+                    candidate_index = candidate["s_idx"]
+                    execution_outcomes_by_id[id(candidate)] = (
+                        close_np[i, candidate_index],
+                        high_np[i, candidate_index],
+                        low_np[i, candidate_index],
+                    )
             if return_candidate_log:
                 selected_rank_by_id = {id(item): rank for rank, item in enumerate(selected, start=1)}
                 for source_bucket, group in candidate_groups:
                     for candidate in group:
                         candidate_id = id(candidate)
                         selected_rank = selected_rank_by_id.get(candidate_id)
+                        candidate_close, candidate_high, candidate_low = execution_outcomes_by_id[candidate_id]
                         effective_sl_mult = candidate.get("stop_mult")
                         if effective_sl_mult is None:
                             effective_sl_mult = resolve_daytrade_intraday_stop_mult(sl_mult)
@@ -1226,12 +1237,13 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                         modeled_raw_exit, modeled_exit_reason = _resolve_intraday_exit(
                             entry_price=modeled_entry,
                             open_price=float(candidate["open"]),
-                            high_price=float(candidate["high"]),
-                            low_price=float(candidate["low"]),
-                            close_price=float(candidate["close"]),
+                            high_price=float(candidate_high),
+                            low_price=float(candidate_low),
+                            close_price=float(candidate_close),
                             stop_price=modeled_stop,
                             target_price=modeled_target,
                             setup_type=candidate.get("setup_type"),
+                            exit_slippage_rate=sell_slippage,
                         )
                         modeled_exit = normalize_tick_size(float(modeled_raw_exit) * (1.0 - sell_slippage), is_buy=False)
                         modeled_gross_per_100 = (modeled_exit - modeled_entry) * 100.0
@@ -1258,9 +1270,9 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                             "market_ratio": _log_float(market_ratio),
                             "selected_dynamic_leverage": _log_float(selected_dynamic_lev),
                             "open": _log_float(candidate.get("open")),
-                            "close": _log_float(candidate.get("close")),
-                            "high": _log_float(candidate.get("high")),
-                            "low": _log_float(candidate.get("low")),
+                            "close": _log_float(candidate_close),
+                            "high": _log_float(candidate_high),
+                            "low": _log_float(candidate_low),
                             "atr": _log_float(candidate.get("atr")),
                             "turnover": _log_float(candidate.get("turnover")),
                             "gap_pct": _log_float(candidate.get("gap_pct")),
@@ -1431,15 +1443,22 @@ def run_backtest_v16_production(univ_indices, bundle_np, timeline, breadth_ratio
                     )
                     continue
 
+                candidate_outcomes = execution_outcomes_by_id.get(id(candidate))
+                if candidate_outcomes is None:
+                    candidate_outcomes = (
+                        candidate["close"], candidate["high"], candidate["low"]
+                    )
+                candidate_close, candidate_high, candidate_low = candidate_outcomes
                 raw_exit, _exit_reason = _resolve_intraday_exit(
                     entry_price=real_buy,
                     open_price=candidate["open"],
-                    high_price=candidate["high"],
-                    low_price=candidate["low"],
-                    close_price=candidate["close"],
+                    high_price=candidate_high,
+                    low_price=candidate_low,
+                    close_price=candidate_close,
                     stop_price=stop_price,
                     target_price=target_price,
                     setup_type=candidate.get("setup_type"),
+                    exit_slippage_rate=sell_slippage,
                 )
                 real_sell = normalize_tick_size(raw_exit * (1.0 - sell_slippage), is_buy=False)
                 gross_pnl = (real_sell - real_buy) * shares

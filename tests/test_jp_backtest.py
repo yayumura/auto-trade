@@ -14,6 +14,8 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import jp_refresh_validate
+import analyze_daytrade_candidate_log
+import analyze_backtest_trade_log as trade_log_analysis
 from jp_backtest import _resolve_holdout_start_date, _summarize_window, run_jp_broad_backtest
 
 
@@ -64,6 +66,34 @@ class TestJpBacktestWindowing(unittest.TestCase):
             "2026-03-04",
         )
 
+    def test_resolve_holdout_start_date_never_returns_frozen_holdout_to_train(self):
+        timeline = pd.to_datetime(
+            ["2026-01-09", "2026-01-13", "2026-01-14", "2026-07-13"]
+        )
+
+        self.assertEqual(
+            _resolve_holdout_start_date(
+                timeline,
+                6,
+                earliest_holdout_start="2026-01-13",
+            ),
+            "2026-01-13",
+        )
+
+
+    def test_frozen_holdout_fails_closed_when_cache_starts_after_boundary(self):
+        timeline = pd.to_datetime(["2026-03-02", "2026-04-03", "2026-07-13"])
+
+        self.assertEqual(
+            _resolve_holdout_start_date(
+                timeline,
+                6,
+                earliest_holdout_start="2026-01-13",
+            ),
+            "2026-03-02",
+        )
+
+
     def test_segmented_summary_uses_only_full_iso_weeks_inside_window(self):
         summary = _summarize_window(
             daily_stats=self.daily_stats,
@@ -107,8 +137,126 @@ class TestJpBacktestWindowing(unittest.TestCase):
         self.assertEqual(summary["full_month_returns"], [0.20])
         self.assertEqual(summary["months_ge_20pct"], 1)
 
+    def test_summary_excludes_pre_warmup_months_from_operational_metrics(self):
+        daily_stats = {
+            "2026-01-30": {"equity": 100.0, "day_pnl": 0.0, "trade_count": 0},
+            "2026-02-02": {"equity": 110.0, "day_pnl": 10.0, "trade_count": 1},
+            "2026-02-27": {"equity": 120.0, "day_pnl": 10.0, "trade_count": 1},
+            "2026-03-02": {"equity": 120.0, "day_pnl": 0.0, "trade_count": 0},
+            "2026-03-31": {"equity": 144.0, "day_pnl": 24.0, "trade_count": 1},
+            "2026-04-01": {"equity": 144.0, "day_pnl": 0.0, "trade_count": 0},
+        }
+        summary = _summarize_window(
+            daily_stats=daily_stats,
+            trade_log=[
+                {"day_key": "2026-02-02", "net_pnl": 10.0},
+                {"day_key": "2026-02-27", "net_pnl": 10.0},
+                {"day_key": "2026-03-31", "net_pnl": 24.0},
+            ],
+            label="TRAIN",
+            start_date="2026-01-30",
+            end_date="2026-04-01",
+            warmup_start="2026-03-01",
+        )
+
+        self.assertEqual(summary["evaluation_start_date"], "2026-03-02")
+        self.assertEqual(summary["full_month_returns"], [0.20])
+        self.assertEqual(summary["months_ge_20pct"], 1)
+        self.assertEqual(summary["plus_days"], 1)
+        self.assertEqual(summary["flat_days"], 2)
+        self.assertAlmostEqual(summary["trade_day_rate"], 100.0 / 3.0)
+
 
 class TestJpBacktestHarness(unittest.TestCase):
+    def test_candidate_diagnostic_csv_exports_train_only(self):
+        prepared = {
+            "timeline": pd.to_datetime(
+                ["2026-01-12", "2026-01-13", "2026-07-13"]
+            )
+        }
+        candidate_log = {
+            "days": [
+                {"day_key": "2026-01-12", "reason": "opened"},
+                {"day_key": "2026-01-13", "reason": "opened"},
+            ],
+            "candidates": [
+                {"day_key": "2026-01-12", "code": "1000.T"},
+                {"day_key": "2026-01-13", "code": "2000.T"},
+            ],
+        }
+        trade_log = [
+            {"day_key": "2026-01-12"},
+            {"day_key": "2026-01-13"},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            analyze_daytrade_candidate_log,
+            "replay_candidate_log",
+            return_value=(prepared, {}, trade_log, candidate_log),
+        ), patch.object(
+            analyze_daytrade_candidate_log,
+            "summarize_day_reasons",
+        ), patch.object(
+            analyze_daytrade_candidate_log,
+            "summarize_scan_reasons",
+        ), patch.object(
+            analyze_daytrade_candidate_log,
+            "summarize_candidates",
+        ):
+            day_path = Path(tmpdir) / "days.csv"
+            candidate_path = Path(tmpdir) / "candidates.csv"
+            analyze_daytrade_candidate_log.main([
+                "--holdout-months",
+                "6",
+                "--output-day-csv",
+                str(day_path),
+                "--output-candidate-csv",
+                str(candidate_path),
+            ])
+
+            exported_days = pd.read_csv(day_path, encoding="utf-8-sig")
+            exported_candidates = pd.read_csv(candidate_path, encoding="utf-8-sig")
+
+        self.assertEqual(exported_days["day_key"].tolist(), ["2026-01-12"])
+        self.assertEqual(exported_candidates["day_key"].tolist(), ["2026-01-12"])
+
+
+    def test_trade_diagnostic_csv_exports_train_only(self):
+        full_trades = pd.DataFrame([
+            {"day_key": "2026-01-12", "code": "1000.T"},
+            {"day_key": "2026-01-13", "code": "2000.T"},
+        ])
+        train_trades = full_trades[full_trades["day_key"] < "2026-01-13"].copy()
+        summary = {
+            "trades_df": full_trades,
+            "train_trades_df": train_trades,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            trade_log_analysis,
+            "analyze_backtest_trade_log",
+            return_value=summary,
+        ) as mock_analyze, patch.object(
+            trade_log_analysis,
+            "build_report",
+            return_value="",
+        ):
+            output_path = Path(tmpdir) / "trades.csv"
+            trade_log_analysis.main([
+                "--holdout-months",
+                "6",
+                "--output-trades-csv",
+                str(output_path),
+                "--rotating-discovery-replay",
+            ])
+            exported = pd.read_csv(output_path, encoding="utf-8-sig")
+
+        self.assertEqual(exported["day_key"].tolist(), ["2026-01-12"])
+        self.assertTrue(
+            mock_analyze.call_args.kwargs["rotating_discovery_replay"]
+        )
+
+
     def test_run_jp_broad_backtest_uses_prepared_univ_indices(self):
         cache_path = None
         try:
@@ -140,6 +288,115 @@ class TestJpBacktestHarness(unittest.TestCase):
         finally:
             if cache_path is not None:
                 Path(cache_path).unlink(missing_ok=True)
+
+    def test_production_observation_replay_passes_fixed_daily_constraint(self):
+        cache_path = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", suffix=".pkl", delete=False) as handle:
+                pickle.dump({"ignored": True}, handle)
+                cache_path = handle.name
+
+            prepared = {
+                "bundle": {"Close": pd.DataFrame(columns=["1000.T", "1570.T", "1321.T"])},
+                "bundle_np": {"tickers": ["1000.T", "1570.T", "1321.T"]},
+                "timeline": pd.to_datetime(["2026-01-06", "2026-01-07", "2026-01-08"]),
+                "breadth_series": np.array([0.50, 0.50, 0.50], dtype=float),
+                "univ_indices": np.array([0], dtype=int),
+            }
+            daily_constraint = {
+                "2026-01-07": (1, 0),
+                "2026-01-08": (0,),
+            }
+
+            with patch("jp_backtest.build_rotation_backtest_inputs_from_cache", return_value=prepared), \
+                patch(
+                    "jp_backtest.build_daytrade_production_observation_indices_by_day",
+                    return_value=daily_constraint,
+                ) as mock_build, \
+                patch("jp_backtest.get_prime_tickers", return_value=["1000.T"]), \
+                patch("jp_backtest.load_invalid_tickers", return_value={}), \
+                patch("jp_backtest.load_insider_exclusion_codes", return_value=[]), \
+                patch("jp_backtest._summarize_window", return_value={"start_date": "2026-01-06", "end_date": "2026-01-08"}), \
+                patch("jp_backtest._print_report"), \
+                patch(
+                    "jp_backtest.run_backtest_v16_production",
+                    return_value=(1_000_000.0, 0, {}, [], {}, []),
+                ) as mock_run:
+                result = run_jp_broad_backtest(
+                    cache_path=cache_path,
+                    production_observation_replay=True,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertTrue(mock_build.called)
+            self.assertTrue(np.array_equal(mock_run.call_args.kwargs["univ_indices"], np.array([0, 1])))
+            self.assertIs(
+                mock_run.call_args.kwargs["observation_universe_indices_by_day"],
+                daily_constraint,
+            )
+        finally:
+            if cache_path is not None:
+                Path(cache_path).unlink(missing_ok=True)
+
+    def test_rotating_discovery_replay_passes_fixed_daily_constraint(self):
+        cache_path = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", suffix=".pkl", delete=False) as handle:
+                pickle.dump({"ignored": True}, handle)
+                cache_path = handle.name
+
+            prepared = {
+                "bundle": {"Close": pd.DataFrame(columns=["1000.T", "1570.T", "1321.T"])},
+                "bundle_np": {"tickers": ["1000.T", "1570.T", "1321.T"]},
+                "timeline": pd.to_datetime(["2026-01-06", "2026-01-07", "2026-01-08"]),
+                "breadth_series": np.array([0.50, 0.50, 0.50], dtype=float),
+                "univ_indices": np.array([0], dtype=int),
+            }
+            daily_constraint = {
+                "2026-01-07": (1, 0),
+                "2026-01-08": (0,),
+            }
+
+            with patch("jp_backtest.build_rotation_backtest_inputs_from_cache", return_value=prepared), \
+                patch(
+                    "jp_backtest.build_daytrade_rotating_discovery_indices_by_day",
+                    return_value=daily_constraint,
+                ) as mock_build, \
+                patch("jp_backtest.get_prime_tickers", return_value=["1000.T"]), \
+                patch("jp_backtest.load_invalid_tickers", return_value={}), \
+                patch("jp_backtest.load_insider_exclusion_codes", return_value=[]), \
+                patch("jp_backtest._summarize_window", return_value={"start_date": "2026-01-06", "end_date": "2026-01-08"}), \
+                patch("jp_backtest._print_report"), \
+                patch(
+                    "jp_backtest.run_backtest_v16_production",
+                    return_value=(1_000_000.0, 0, {}, [], {}, []),
+                ) as mock_run:
+                result = run_jp_broad_backtest(
+                    cache_path=cache_path,
+                    rotating_discovery_replay=True,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertTrue(mock_build.called)
+            self.assertTrue(np.array_equal(mock_run.call_args.kwargs["univ_indices"], np.array([0, 1])))
+            self.assertIs(
+                mock_run.call_args.kwargs["observation_universe_indices_by_day"],
+                daily_constraint,
+            )
+        finally:
+            if cache_path is not None:
+                Path(cache_path).unlink(missing_ok=True)
+
+    def test_observation_replay_modes_are_mutually_exclusive(self):
+        with patch("jp_backtest.build_rotation_backtest_inputs_from_cache") as mock_build:
+            result = run_jp_broad_backtest(
+                cache_path="does-not-need-to-exist.pkl",
+                production_observation_replay=True,
+                rotating_discovery_replay=True,
+            )
+
+        self.assertEqual(result, 1)
+        mock_build.assert_not_called()
 
     def test_refresh_validate_uses_tax_rate_for_full_and_standalone(self):
         prepared = {

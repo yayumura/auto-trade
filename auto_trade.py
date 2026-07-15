@@ -1,6 +1,7 @@
 import os
 import sys
 import datetime
+import math
 import json
 from pathlib import Path
 import numpy as np
@@ -14,7 +15,15 @@ from dataclasses import dataclass
 import psutil
 from core.log_setup import setup_logging, send_discord_notify
 from core.preflight import pre_flight_check
-from core.kabucom_order_state import StockOrderAction, SubmissionStatus
+from core.kabucom_order_state import (
+    OrderProcessState,
+    OrderTerminalReason,
+    StockOrderAction,
+    SubmissionStatus,
+    parse_kabucom_order,
+    coerce_nonnegative_cost,
+    summarize_kabucom_execution_costs,
+)
 from core.jpx_calendar import get_jpx_trading_day_status
 
 class MarketPhase(Enum):
@@ -62,6 +71,83 @@ def should_capture_daytrade_production_snapshot(
     )
 
 
+def resolve_runtime_server_clock(broker, *, is_sim: bool):
+    """Resolve the loop clock and prove whether it may authorize new exposure."""
+    fallback = datetime.datetime.now(JST)
+    if is_sim:
+        return fallback, True, {
+            "schema_version": 1,
+            "verified": True,
+            "source": "simulation_clock",
+            "reason": "simulation",
+            "server_time": fallback.isoformat(),
+            "received_at": fallback.isoformat(),
+            "fallback_time": fallback.isoformat(),
+            "drift_seconds": 0.0,
+            "max_abs_drift_seconds": SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS,
+        }
+    try:
+        observed = broker.get_server_time() if hasattr(broker, "get_server_time") else fallback
+    except Exception as exc:
+        return fallback, False, {
+            "schema_version": 1,
+            "verified": False,
+            "source": "local_clock_fallback",
+            "reason": f"server_time_error:{type(exc).__name__}",
+            "server_time": None,
+            "received_at": fallback.isoformat(),
+            "fallback_time": fallback.isoformat(),
+            "drift_seconds": None,
+            "max_abs_drift_seconds": SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS,
+        }
+    observed_valid = isinstance(observed, datetime.datetime) and observed.tzinfo is not None
+    observed = observed.astimezone(JST) if observed_valid else fallback
+    evidence = getattr(broker, "last_server_time_evidence", None)
+    normalized = dict(evidence) if isinstance(evidence, dict) else {}
+    verified = bool(
+        observed_valid
+        and normalized.get("schema_version") == 1
+        and normalized.get("verified") is True
+        and normalized.get("source") == "wallet_cash_date_header"
+        and normalized.get("reason") == "verified"
+        and normalized.get("server_time")
+        and normalized.get("received_at")
+    )
+    if verified:
+        try:
+            evidence_time = datetime.datetime.fromisoformat(str(normalized["server_time"]))
+            received_at = datetime.datetime.fromisoformat(str(normalized["received_at"]))
+            reported_drift = float(normalized.get("drift_seconds"))
+            computed_drift = (
+                evidence_time.astimezone(JST) - received_at.astimezone(JST)
+            ).total_seconds()
+            verified = bool(
+                evidence_time.tzinfo is not None
+                and received_at.tzinfo is not None
+                and math.isfinite(reported_drift)
+                and abs(evidence_time.astimezone(JST) - observed).total_seconds() <= 1.0
+                and abs(reported_drift - computed_drift) <= 0.02
+                and abs(reported_drift) <= SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS
+            )
+        except (TypeError, ValueError, OverflowError):
+            verified = False
+    normalized["max_abs_drift_seconds"] = SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS
+    if not verified:
+        normalized.update(
+            {
+                "schema_version": 1,
+                "verified": False,
+                "source": normalized.get("source") or "local_clock_fallback",
+                "reason": normalized.get("reason") or "broker_time_evidence_missing",
+                "server_time": normalized.get("server_time"),
+                "received_at": normalized.get("received_at") or fallback.isoformat(),
+                "fallback_time": normalized.get("fallback_time") or observed.isoformat(),
+                "drift_seconds": normalized.get("drift_seconds"),
+            }
+        )
+    return observed, verified, normalized
+
+
 def _is_submission_accepted(result) -> bool:
     status = getattr(result, "status", None)
     if status is None:
@@ -107,13 +193,20 @@ from core.config import (
     DEBUG_MODE, TRADE_MODE, RUNTIME_LIVE_ORDER_CONFIG_HASH,
     LEVERAGE_RATE, JST, BULL_GAP_LIMIT, LIQUIDITY_LIMIT_RATE,
     SMA_MEDIUM_PERIOD, SMA_LONG_PERIOD, SMA_TREND_PERIOD, MAX_POSITIONS,
-    SLIPPAGE_RATE, STOP_LOSS_ATR, INITIAL_CASH, load_insider_exclusion_codes,
+    SLIPPAGE_RATE, STOP_LOSS_ATR, INITIAL_CASH, TAX_RATE, load_insider_exclusion_codes,
     INTRADAY_SNAPSHOT_FILE, DATA_CACHE_ROOT,
 )
-from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_json
+from core.file_io import atomic_write_json, append_csv_rows, rotate_csv_if_large, safe_read_csv, safe_read_json
 from core.live_approval_manifest import read_git_commit_sha
+from core.daytrade_opening_discovery import (
+    DaytradeOpeningDiscoveryResult,
+    serialize_daytrade_opening_discovery_result,
+)
 from core.live_readiness_report import build_live_readiness_report
 from core.daytrade_production_replay import (
+    DAYTRADE_OBSERVATION_POLICY_FIXED_49,
+    DAYTRADE_SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS,
+    DAYTRADE_OBSERVATION_POLICY_ROTATING_196,
     append_daytrade_production_snapshot,
     build_daytrade_production_snapshot,
     find_first_daytrade_production_snapshot,
@@ -126,6 +219,7 @@ LOCK_SCHEMA_VERSION = 1
 STOP_FILE = os.path.join(PROJECT_ROOT, "stop.txt")
 ENTRY_SCAN_CUTOFF_TIME = datetime.time(14, 0)
 FORCE_FLATTEN_TIME = datetime.time(14, 30)
+SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS = DAYTRADE_SERVER_CLOCK_MAX_ABS_DRIFT_SECONDS
 SHUTDOWN_REQUESTED = False
 SHUTDOWN_REASON = ""
 ACTIVE_RUNTIME_STATE = {
@@ -447,6 +541,7 @@ from core.logic import (
     calculate_all_technicals_v12, get_prime_tickers,
     manage_positions_live, select_best_candidates,
     calculate_lot_size, cap_daytrade_position_size,
+    resolve_daytrade_entry_risk_envelope,
     is_daytrade_inverse_setup_type,
     get_daytrade_week_key, resolve_daytrade_weekly_leverage,
     is_daytrade_weekly_profit_guard_active,
@@ -464,19 +559,27 @@ from core.logic import (
     cancel_linked_protective_stop_before_exit,
     resolve_protective_stop_order_id,
     DAYTRADE_MAX_RSI2,
-    DAYTRADE_BULL_ETF_CODES,
-    DAYTRADE_INVERSE_CODES,
     resolve_daytrade_scan_min_turnover,
 )
+from core.daytrade_observation_universe import (
+    normalize_daytrade_observation_code as _normalize_daytrade_observation_code,
+    select_daytrade_rotating_discovery_codes,
+    select_daytrade_production_observation_codes,
+)
 from core.watchlist import load_watchlist, save_watchlist
-from core.ai_filter import ai_qualitative_filter, get_recent_news
+from core.ai_filter import (
+    build_operational_review_evidence,
+    evaluate_ai_qualitative_filter,
+    get_recent_news_evidence,
+)
 from core.live_order_gate import (
     EntryAuthorizationContext,
     evaluate_entry_authorization,
     get_kabucom_live_financial_write_gate_status,
     get_live_order_gate_status,
 )
-from core.order_journal import build_order_journal_replay_summary
+from core.order_journal import append_order_journal, build_order_journal_replay_summary, order_journal_context
+from core.portfolio_state import load_portfolio_positions
 from core.startup_recovery import build_startup_recovery_report
 
 
@@ -525,53 +628,88 @@ def build_daytrade_production_observation_universe(
         if breadth_members
         else 0.0
     )
-    excluded = {
-        _normalize_daytrade_observation_code(code)
-        for code in excluded_codes or ()
-    }
-    reserved = {
-        *(_normalize_daytrade_observation_code(code) for code in DAYTRADE_BULL_ETF_CODES),
-        *(_normalize_daytrade_observation_code(code) for code in DAYTRADE_INVERSE_CODES),
-    }
-    reserved.discard("1321")
-    rows = []
+    observations = []
     for ticker in close.index:
         code = _normalize_daytrade_observation_code(ticker)
-        if code == "1321" or code in excluded:
-            continue
-        if ticker not in prime and code not in reserved:
-            continue
-        values = (close.get(ticker), atr.get(ticker), turnover.get(ticker))
-        if any(value is None or pd.isna(value) for value in values):
-            continue
-        prev_close, prev_atr, prev_turnover = map(float, values)
-        if prev_close <= 0 or prev_atr <= 0 or prev_turnover <= 0:
-            continue
-        if prev_turnover < resolve_daytrade_scan_min_turnover(ticker, breadth):
-            continue
-        headroom = (
-            prev_turnover
-            * float(LIQUIDITY_LIMIT_RATE)
-            / (prev_close * 100.0)
+        observations.append(
+            {
+                "ticker": str(ticker),
+                "code": code,
+                "is_prime": ticker in prime,
+                "close": close.get(ticker),
+                "atr": atr.get(ticker),
+                "turnover": turnover.get(ticker),
+            }
         )
-        if headroom < 1.0:
-            continue
-        rows.append({
-            "code": code,
-            "reserved": code in reserved,
-            "headroom": headroom,
-            "turnover": prev_turnover,
-        })
-    rows.sort(
-        key=lambda item: (
-            not item["reserved"],
-            item["code"] if item["reserved"] else "",
-            -item["headroom"],
-            -item["turnover"],
-            item["code"],
-        )
+    return select_daytrade_production_observation_codes(
+        observations,
+        breadth=breadth,
+        max_symbols=max_symbols,
+        excluded_codes=excluded_codes,
+        liquidity_limit=LIQUIDITY_LIMIT_RATE,
+        min_turnover_resolver=resolve_daytrade_scan_min_turnover,
     )
-    return [item["code"] for item in rows[: int(max_symbols)]]
+
+
+def build_daytrade_rotating_discovery_universe(
+    data_df,
+    *,
+    trade_date,
+    excluded_codes=(),
+):
+    """Prepare one live trade day's fixed-196 universe from prior-day history."""
+    if data_df is None or len(data_df.index) < 3 or trade_date is None:
+        return []
+    try:
+        normalized_index = pd.DatetimeIndex(pd.to_datetime(data_df.index))
+        if normalized_index.tz is not None:
+            normalized_index = normalized_index.tz_localize(None)
+        normalized_index = normalized_index.normalize()
+        if not normalized_index.is_monotonic_increasing or not normalized_index.is_unique:
+            return []
+
+        feature_asof = pd.Timestamp(normalized_index[-1]).normalize()
+        trade_day = pd.Timestamp(trade_date)
+        if trade_day.tzinfo is not None:
+            trade_day = trade_day.tz_localize(None)
+        trade_day = trade_day.normalize()
+        if trade_day <= feature_asof:
+            return []
+
+        bundle = calculate_all_technicals_v12(data_df)
+        close = bundle["Close"]
+        tickers = [str(ticker) for ticker in close.columns]
+        low = data_df.xs("Low", axis=1, level=1).reindex(columns=tickers)
+
+        def feature_row(field, offset=-1):
+            return (
+                bundle[field]
+                .reindex(columns=tickers)
+                .iloc[offset]
+                .to_numpy(dtype=float)
+            )
+
+        return select_daytrade_rotating_discovery_codes(
+            tickers=tickers,
+            trade_date=trade_day,
+            feature_asof=feature_asof,
+            close_prev=feature_row("Close"),
+            close_prev2=feature_row("Close", -2),
+            open_prev=feature_row("Open"),
+            low_prev=low.iloc[-1].to_numpy(dtype=float),
+            atr_prev=feature_row("ATR"),
+            turnover_prev=feature_row("Turnover"),
+            rsi2_prev=feature_row("RSI2"),
+            rs_alpha_prev=feature_row("RS_Alpha"),
+            sma_med_prev=feature_row(f"SMA{SMA_MEDIUM_PERIOD}"),
+            sma_long_prev=feature_row(f"SMA{SMA_LONG_PERIOD}"),
+            sma_trend_prev=feature_row(f"SMA{SMA_TREND_PERIOD}"),
+            prime_tickers=get_prime_tickers(),
+            excluded_codes=excluded_codes,
+            liquidity_limit=LIQUIDITY_LIMIT_RATE,
+        )
+    except (KeyError, TypeError, ValueError, IndexError):
+        return []
 
 
 def sync_daytrade_registry(broker, current_targets, already_tracked, market_index_code="1321", is_sim=False):
@@ -631,6 +769,27 @@ def ensure_daytrade_week_state(account, total_equity, server_datetime):
     return account
 
 
+def ensure_daytrade_month_state(account, total_equity, server_datetime):
+    """Roll the live monthly risk anchor using the same verified JST clock as entry."""
+    resolved = dict(account or {})
+    try:
+        timestamp = pd.Timestamp(server_datetime)
+        if pd.isna(timestamp):
+            return resolved
+        timestamp = timestamp.tz_localize(JST) if timestamp.tzinfo is None else timestamp.tz_convert(JST)
+        equity = float(total_equity)
+    except (TypeError, ValueError, OverflowError):
+        return resolved
+    if not math.isfinite(equity) or equity <= 0:
+        return resolved
+    month_key = timestamp.strftime("%Y-%m")
+    month_start = float(resolved.get("month_start_equity", 0.0) or 0.0)
+    if resolved.get("current_month") != month_key or month_start <= 0:
+        resolved["current_month"] = month_key
+        resolved["month_start_equity"] = equity
+    return resolved
+
+
 def mark_daytrade_portfolio(portfolio, realtime_buffers=None, latest_close_map=None, quote_time=None, quote_is_fresh=True):
     latest_close_map = latest_close_map or {}
     quote_time_str = quote_time.strftime('%Y-%m-%d %H:%M:%S') if quote_time is not None else None
@@ -675,12 +834,33 @@ def _portfolio_unrealized_pnl(portfolio):
     )
 
 
+def _conservative_risk_capital_delta(execution_net_pnl):
+    try:
+        value = float(execution_net_pnl)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    if value <= 0:
+        return value
+    return value * max(0.0, 1.0 - float(TAX_RATE))
+
+
 def _resolve_account_equity(account, portfolio, is_sim):
     if is_sim:
         return float(account.get("cash", 0.0)) + _portfolio_market_value(portfolio)
-    configured_risk_capital = float(account.get("configured_risk_capital", INITIAL_CASH) or INITIAL_CASH)
-    realized_pnl_today = float(account.get("realized_pnl_today", 0.0) or 0.0)
-    return configured_risk_capital + realized_pnl_today + _portfolio_unrealized_pnl(portfolio)
+    configured_raw = account.get("configured_risk_capital")
+    configured_risk_capital = INITIAL_CASH if configured_raw is None else float(configured_raw)
+    risk_capital_pnl_today = float(account.get("risk_capital_pnl_today", 0.0) or 0.0)
+    unrealized_pnl = _portfolio_unrealized_pnl(portfolio)
+    conservative_unrealized = _conservative_risk_capital_delta(unrealized_pnl)
+    if (
+        not math.isfinite(configured_risk_capital)
+        or not math.isfinite(risk_capital_pnl_today)
+        or conservative_unrealized is None
+    ):
+        return 0.0
+    return configured_risk_capital + risk_capital_pnl_today + conservative_unrealized
 
 
 def _resolve_live_buying_power(account, key):
@@ -693,12 +873,178 @@ def _resolve_live_buying_power(account, key):
         return 0.0
 
 
-def _apply_live_realized_pnl(account, position, fill_price, filled_shares):
-    if filled_shares <= 0:
+def ensure_live_realized_pnl_state(account, server_datetime):
+    """Roll complete daily PnL into conservative cumulative live risk capital."""
+    resolved = dict(account or {})
+    timestamp = pd.Timestamp(server_datetime)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(JST)
+    else:
+        timestamp = timestamp.tz_convert(JST)
+
+    def mark_risk_capital_incomplete(reason):
+        resolved["risk_capital_evidence_complete"] = False
+        reasons = [
+            str(item)
+            for item in (resolved.get("risk_capital_evidence_reasons") or [])
+        ]
+        if reason not in reasons:
+            reasons.append(reason)
+        resolved["risk_capital_evidence_reasons"] = reasons[-25:]
+
+    trade_date = timestamp.strftime("%Y-%m-%d")
+    previous_trade_date = str(resolved.get("realized_pnl_trade_date") or "")
+    resolved.setdefault("risk_capital_evidence_complete", True)
+    resolved.setdefault("risk_capital_evidence_reasons", [])
+
+    if not previous_trade_date:
+        resolved["realized_pnl_trade_date"] = trade_date
+        legacy_pnl = float(resolved.get("realized_pnl_today", 0.0) or 0.0)
+        if legacy_pnl:
+            resolved["realized_pnl_today"] = 0.0
+            resolved["risk_capital_pnl_today"] = 0.0
+            resolved["realized_pnl_evidence_complete"] = False
+            resolved["realized_pnl_evidence_reasons"] = [
+                "legacy_realized_pnl_trade_date_missing"
+            ]
+            resolved["realized_pnl_unresolved_exit_count"] = max(
+                1,
+                int(resolved.get("realized_pnl_unresolved_exit_count", 0) or 0),
+            )
+            mark_risk_capital_incomplete("legacy_realized_pnl_trade_date_missing")
+        else:
+            resolved["realized_pnl_today"] = 0.0
+            resolved["risk_capital_pnl_today"] = 0.0
+            resolved["realized_pnl_evidence_complete"] = True
+            resolved["realized_pnl_evidence_reasons"] = []
+            resolved["realized_pnl_unresolved_exit_count"] = 0
+    elif previous_trade_date != trade_date:
+        prior_daily_complete = bool(resolved.get("realized_pnl_evidence_complete"))
+        prior_capital_complete = bool(resolved.get("risk_capital_evidence_complete"))
+        try:
+            prior_risk_delta = float(resolved.get("risk_capital_pnl_today", 0.0) or 0.0)
+            configured_capital = float(
+                resolved.get("configured_risk_capital", INITIAL_CASH)
+            )
+            rollover_values_valid = (
+                math.isfinite(prior_risk_delta)
+                and math.isfinite(configured_capital)
+            )
+        except (TypeError, ValueError):
+            rollover_values_valid = False
+            prior_risk_delta = 0.0
+            configured_capital = 0.0
+        if prior_daily_complete and prior_capital_complete and rollover_values_valid:
+            resolved["configured_risk_capital"] = round(
+                configured_capital + prior_risk_delta,
+                4,
+            )
+            resolved["risk_capital_asof_date"] = previous_trade_date
+        else:
+            mark_risk_capital_incomplete(
+                f"prior_day_risk_capital_unsettled:{previous_trade_date}"
+            )
+        resolved["realized_pnl_trade_date"] = trade_date
+        resolved["realized_pnl_today"] = 0.0
+        resolved["risk_capital_pnl_today"] = 0.0
+        resolved["realized_pnl_evidence_complete"] = True
+        resolved["realized_pnl_evidence_reasons"] = []
+        resolved["realized_pnl_unresolved_exit_count"] = 0
+    else:
+        resolved.setdefault("realized_pnl_today", 0.0)
+        resolved.setdefault("realized_pnl_evidence_complete", True)
+        resolved.setdefault("realized_pnl_evidence_reasons", [])
+        resolved.setdefault("realized_pnl_unresolved_exit_count", 0)
+        if "risk_capital_pnl_today" not in resolved:
+            if float(resolved.get("realized_pnl_today", 0.0) or 0.0):
+                resolved["risk_capital_pnl_today"] = 0.0
+                resolved["realized_pnl_evidence_complete"] = False
+                reasons = list(resolved.get("realized_pnl_evidence_reasons") or [])
+                reason = "same_day_risk_capital_delta_missing"
+                if reason not in reasons:
+                    reasons.append(reason)
+                resolved["realized_pnl_evidence_reasons"] = reasons[-25:]
+                mark_risk_capital_incomplete(reason)
+            else:
+                resolved["risk_capital_pnl_today"] = 0.0
+    return resolved
+
+
+def _apply_live_realized_pnl(account, exit_log_row):
+    """Apply only broker-evidenced execution-net PnL to live risk capital."""
+    if not isinstance(exit_log_row, dict) or int(exit_log_row.get("filled_shares", 0) or 0) <= 0:
         return account
-    realized = (float(fill_price) - float(position["buy_price"])) * int(filled_shares)
-    account["realized_pnl_today"] = round(float(account.get("realized_pnl_today", 0.0)) + realized, 4)
+
+    account.setdefault("realized_pnl_evidence_complete", True)
+    account.setdefault("realized_pnl_evidence_reasons", [])
+    account.setdefault("realized_pnl_unresolved_exit_count", 0)
+    account.setdefault("risk_capital_pnl_today", 0.0)
+    account.setdefault("risk_capital_evidence_complete", True)
+    account.setdefault("risk_capital_evidence_reasons", [])
+
+    execution_net_pnl = exit_log_row.get("observed_execution_net_pnl")
+    evidence_complete = bool(exit_log_row.get("actual_cost_evidence_complete"))
+    if evidence_complete:
+        try:
+            execution_net_pnl = float(execution_net_pnl)
+            evidence_complete = math.isfinite(execution_net_pnl)
+        except (TypeError, ValueError):
+            evidence_complete = False
+
+    risk_capital_delta = None
+    if evidence_complete and exit_log_row.get("actual_net_pnl_evidence_complete"):
+        try:
+            risk_capital_delta = float(exit_log_row.get("observed_net_pnl"))
+            if not math.isfinite(risk_capital_delta):
+                risk_capital_delta = None
+        except (TypeError, ValueError):
+            risk_capital_delta = None
+    elif evidence_complete:
+        risk_capital_delta = _conservative_risk_capital_delta(execution_net_pnl)
+    if evidence_complete and risk_capital_delta is None:
+        evidence_complete = False
+
+    if evidence_complete:
+        account["realized_pnl_today"] = round(
+            float(account.get("realized_pnl_today", 0.0)) + execution_net_pnl,
+            4,
+        )
+        account["risk_capital_pnl_today"] = round(
+            float(account.get("risk_capital_pnl_today", 0.0)) + risk_capital_delta,
+            4,
+        )
+        return account
+
+    account["realized_pnl_evidence_complete"] = False
+    account["risk_capital_evidence_complete"] = False
+    account["realized_pnl_unresolved_exit_count"] = (
+        int(account.get("realized_pnl_unresolved_exit_count", 0) or 0) + 1
+    )
+    reason = str(exit_log_row.get("actual_cost_evidence_reason") or "execution_net_pnl_missing")
+    trade_id = str(exit_log_row.get("trade_id") or "unknown_trade")
+    evidence_reason = f"{trade_id}:{reason}"
+    reasons = [str(item) for item in (account.get("realized_pnl_evidence_reasons") or [])]
+    if evidence_reason not in reasons:
+        reasons.append(evidence_reason)
+    account["realized_pnl_evidence_reasons"] = reasons[-25:]
+    risk_reasons = [
+        str(item)
+        for item in (account.get("risk_capital_evidence_reasons") or [])
+    ]
+    if evidence_reason not in risk_reasons:
+        risk_reasons.append(evidence_reason)
+    account["risk_capital_evidence_reasons"] = risk_reasons[-25:]
     return account
+
+
+def _realized_pnl_evidence_allows_entry(account, is_sim):
+    return bool(
+        is_sim
+        or (
+            account.get("realized_pnl_evidence_complete")
+            and account.get("risk_capital_evidence_complete")
+        )
+    )
 
 
 def _collect_protective_stop_order_ids(portfolio):
@@ -733,6 +1079,10 @@ def _coerce_jst_datetime(value):
     if value.tzinfo is None:
         return value.replace(tzinfo=JST)
     return value.astimezone(JST)
+
+
+DAYTRADE_ENTRY_QUOTE_MAX_AGE_SECONDS = 30
+DAYTRADE_ENTRY_QUOTE_BATCH_MAX_SPAN_SECONDS = 5
 
 
 def _describe_board_quote_snapshot_freshness(boards, reference_time, max_age_seconds=300):
@@ -787,6 +1137,211 @@ def _describe_board_quote_snapshot_freshness(boards, reference_time, max_age_sec
 def _is_board_quote_snapshot_fresh(boards, reference_time, max_age_seconds=300):
     return _describe_board_quote_snapshot_freshness(boards, reference_time, max_age_seconds=max_age_seconds)[0]
 
+
+def _finite_float_or_none(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _build_daytrade_entry_quote_evidence(
+    code,
+    board,
+    *,
+    batch_started_at,
+    batch_completed_at,
+    rejection_reasons=(),
+):
+    code_text = _normalize_daytrade_observation_code(code)
+    started_at = _coerce_jst_datetime(batch_started_at)
+    completed_at = _coerce_jst_datetime(batch_completed_at)
+    source = "bid_timestamp"
+    price_timestamp = None
+    received_at = None
+    current_price = None
+    best_sell_price = None
+    best_sell_qty = None
+    reasons = [str(reason) for reason in rejection_reasons if str(reason)]
+    if isinstance(board, dict):
+        raw_price_timestamp = board.get("bid_timestamp")
+        if raw_price_timestamp is None:
+            raw_price_timestamp = board.get("quote_timestamp")
+            source = "quote_timestamp"
+        if raw_price_timestamp is None:
+            raw_price_timestamp = board.get("current_price_timestamp")
+            source = (
+                "current_price_timestamp"
+                if raw_price_timestamp is not None
+                else "missing"
+            )
+        price_timestamp = _coerce_jst_datetime(raw_price_timestamp)
+        received_at = _coerce_jst_datetime(board.get("received_at"))
+        current_price = _finite_float_or_none(
+            board.get("current_price", board.get("price"))
+        )
+        best_sell_price = _finite_float_or_none(board.get("best_sell_price"))
+        try:
+            best_sell_qty = int(board.get("best_sell_qty"))
+        except (TypeError, ValueError):
+            best_sell_qty = None
+    else:
+        reasons.append("invalid_board")
+
+    batch_span_seconds = None
+    quote_age_seconds = None
+    transport_age_seconds = None
+    if started_at is None or completed_at is None:
+        reasons.append("batch_timestamp_missing")
+    else:
+        batch_span_seconds = (completed_at - started_at).total_seconds()
+        if batch_span_seconds < 0:
+            reasons.append("batch_time_reversed")
+        elif batch_span_seconds > DAYTRADE_ENTRY_QUOTE_BATCH_MAX_SPAN_SECONDS:
+            reasons.append("batch_span_exceeded")
+    if price_timestamp is None:
+        reasons.append("price_timestamp_missing")
+    elif completed_at is not None:
+        quote_age_seconds = (completed_at - price_timestamp).total_seconds()
+        if price_timestamp.date() != completed_at.date():
+            reasons.append("price_timestamp_cross_day")
+        elif quote_age_seconds < -60:
+            reasons.append("price_timestamp_future")
+        elif quote_age_seconds > DAYTRADE_ENTRY_QUOTE_MAX_AGE_SECONDS:
+            reasons.append("price_timestamp_stale")
+    if received_at is None:
+        reasons.append("received_at_missing")
+    elif started_at is not None and completed_at is not None:
+        transport_age_seconds = (completed_at - received_at).total_seconds()
+        if received_at < started_at or received_at > completed_at:
+            reasons.append("received_at_outside_batch")
+    if current_price is None or current_price <= 0:
+        reasons.append("current_price_invalid")
+    if best_sell_price is None or best_sell_price <= 0:
+        reasons.append("best_sell_price_invalid")
+
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    return {
+        "entry_quote_evidence_schema_version": 1,
+        "entry_quote_status": "fresh" if not unique_reasons else "rejected",
+        "entry_quote_code": code_text,
+        "entry_quote_batch_started_at": (
+            "" if started_at is None else started_at.isoformat()
+        ),
+        "entry_quote_batch_completed_at": (
+            "" if completed_at is None else completed_at.isoformat()
+        ),
+        "entry_quote_batch_span_seconds": batch_span_seconds,
+        "entry_quote_max_batch_span_seconds": (
+            DAYTRADE_ENTRY_QUOTE_BATCH_MAX_SPAN_SECONDS
+        ),
+        "entry_quote_price_timestamp_source": source,
+        "entry_quote_price_timestamp": (
+            "" if price_timestamp is None else price_timestamp.isoformat()
+        ),
+        "entry_quote_received_at": (
+            "" if received_at is None else received_at.isoformat()
+        ),
+        "entry_quote_age_seconds": quote_age_seconds,
+        "entry_quote_transport_age_seconds": transport_age_seconds,
+        "entry_quote_max_age_seconds": DAYTRADE_ENTRY_QUOTE_MAX_AGE_SECONDS,
+        "entry_quote_current_price": current_price,
+        "entry_quote_best_sell_price": best_sell_price,
+        "entry_quote_best_sell_qty": best_sell_qty,
+        "entry_quote_reason": ",".join(unique_reasons),
+    }
+
+
+def refresh_daytrade_entry_execution_quotes(broker, candidates):
+    """Refresh all reviewed long candidates before sizing; any failure blocks all."""
+    candidate_rows = [dict(item or {}) for item in candidates or ()]
+    if not candidate_rows:
+        return [], {}, ()
+
+    codes = [
+        _normalize_daytrade_observation_code(item.get("code"))
+        for item in candidate_rows
+    ]
+    if any(not code for code in codes) or len(set(codes)) != len(codes):
+        return [], {}, ("entry_quote_candidate_codes_invalid",)
+
+    try:
+        batch = broker.get_board_snapshot_batch(codes)
+    except Exception as exc:
+        reason = f"entry_quote_batch_exception:{type(exc).__name__}"
+        now = datetime.datetime.now(JST)
+        evidence = {
+            code: _build_daytrade_entry_quote_evidence(
+                code,
+                None,
+                batch_started_at=now,
+                batch_completed_at=now,
+                rejection_reasons=(reason,),
+            )
+            for code in codes
+        }
+        return [], evidence, (reason,)
+
+    requested = tuple(
+        _normalize_daytrade_observation_code(code)
+        for code in getattr(batch, "requested", ())
+    )
+    observations = {
+        _normalize_daytrade_observation_code(code): dict(board)
+        for code, board in dict(getattr(batch, "observations", {}) or {}).items()
+        if isinstance(board, dict)
+    }
+    failures = dict(getattr(batch, "failures", {}) or {})
+    started_at = getattr(batch, "started_at", None)
+    completed_at = getattr(batch, "completed_at", None)
+    batch_reasons = []
+    if requested != tuple(codes):
+        batch_reasons.append("entry_quote_batch_request_mismatch")
+
+    evidence_by_code = {}
+    refreshed = []
+    all_reasons = list(batch_reasons)
+    for item, code in zip(candidate_rows, codes):
+        code_reasons = list(batch_reasons)
+        failure = failures.get(code)
+        if failure is not None:
+            failure_reason = (
+                failure.get("reason")
+                if isinstance(failure, dict)
+                else getattr(failure, "reason", None)
+            )
+            code_reasons.append(
+                f"board_failure:{str(failure_reason or 'unknown')}"
+            )
+        board = observations.get(code)
+        if board is None and failure is None:
+            code_reasons.append("board_observation_missing")
+        evidence = _build_daytrade_entry_quote_evidence(
+            code,
+            board,
+            batch_started_at=started_at,
+            batch_completed_at=completed_at,
+            rejection_reasons=code_reasons,
+        )
+        evidence_by_code[code] = evidence
+        if evidence["entry_quote_status"] != "fresh":
+            all_reasons.extend(
+                f"{code}:{reason}"
+                for reason in str(evidence["entry_quote_reason"]).split(",")
+                if reason
+            )
+            continue
+        item["price"] = float(evidence["entry_quote_best_sell_price"])
+        item["entry_quote_evidence"] = evidence
+        refreshed.append(item)
+
+    unique_reasons = tuple(dict.fromkeys(all_reasons))
+    if unique_reasons or len(refreshed) != len(candidate_rows):
+        return [], evidence_by_code, unique_reasons or (
+            "entry_quote_refresh_incomplete",
+        )
+    return refreshed, evidence_by_code, ()
 
 def _find_live_managed_position_for_entry(broker, code, execution_id=None, execution_ids=None, shares=None):
     if broker is None or not hasattr(broker, "get_positions"):
@@ -935,16 +1490,20 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
         exchange = live_position.get("exchange")
         margin_trade_type = live_position.get("margin_trade_type")
 
-    stop_result = broker.execute_stop_order(
-        code,
-        shares,
-        action=StockOrderAction.MARGIN_CLOSE_LONG,
-        trigger_price=trigger_price,
-        hold_id=hold_id,
-        close_positions=close_positions,
-        exchange=None if exchange is None else int(exchange),
-        margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
-    )
+    with order_journal_context(
+        decision_snapshot_id=position.get("decision_snapshot_id"),
+        lifecycle_stage="protective_stop",
+    ):
+        stop_result = broker.execute_stop_order(
+            code,
+            shares,
+            action=StockOrderAction.MARGIN_CLOSE_LONG,
+            trigger_price=trigger_price,
+            hold_id=hold_id,
+            close_positions=close_positions,
+            exchange=None if exchange is None else int(exchange),
+            margin_trade_type=None if margin_trade_type is None else int(margin_trade_type),
+        )
     stop_order_id = getattr(stop_result, "broker_order_id", None)
     stop_accepted = _is_submission_accepted(stop_result)
     stop_confirmed = _is_submission_confirmed(stop_result)
@@ -983,7 +1542,17 @@ def _arm_daytrade_protective_stop(broker, position, trigger_price, expected_shar
     return None
 
 
-def build_daytrade_position_record(item, executed_price, shares, buy_time, execution_id=None, execution_ids=None):
+def build_daytrade_position_record(
+    item,
+    executed_price,
+    shares,
+    buy_time,
+    execution_id=None,
+    execution_ids=None,
+    entry_commission=None,
+    entry_commission_tax=None,
+    entry_execution_costs_complete=False,
+):
     setup_type = str(item.get("setup_type", ""))
     stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
     target_mult = float(item.get("target_mult", resolve_daytrade_intraday_target_mult()))
@@ -1045,6 +1614,9 @@ def build_daytrade_position_record(item, executed_price, shares, buy_time, execu
         "entry_order_unresolved_reason": None,
         "entry_order_submission_status": None,
         "entry_order_filled_qty": int(shares),
+        "entry_commission": coerce_nonnegative_cost(entry_commission),
+        "entry_commission_tax": coerce_nonnegative_cost(entry_commission_tax),
+        "entry_execution_costs_complete": bool(entry_execution_costs_complete),
         "entry_order_remaining_qty": 0,
         "exit_order_execution_status": None,
         "exit_order_unresolved": False,
@@ -1103,6 +1675,13 @@ def build_daytrade_exit_log_row(
     remaining_shares=0,
     is_simulation=True,
     is_partial_fill=False,
+    exit_order_id=None,
+    exit_execution_ids=None,
+    exit_commission=None,
+    exit_commission_tax=None,
+    exit_execution_costs_complete=False,
+    capital_gains_tax=None,
+    capital_gains_tax_evidence_complete=False,
 ):
     buy_price = float(position["buy_price"])
     buy_atr = float(position.get("buy_atr", 0.0))
@@ -1117,6 +1696,67 @@ def build_daytrade_exit_log_row(
     session_low = float(session_low if session_low not in (None, 0) else min(buy_price, observed_price))
 
     observed_pnl = (observed_price - buy_price) * shares
+    position_commission = coerce_nonnegative_cost(position.get("broker_position_commission"))
+    position_commission_tax = coerce_nonnegative_cost(position.get("broker_position_commission_tax"))
+    order_entry_commission = coerce_nonnegative_cost(position.get("entry_commission"))
+    order_entry_commission_tax = coerce_nonnegative_cost(position.get("entry_commission_tax"))
+    position_expenses = coerce_nonnegative_cost(position.get("broker_position_expenses"))
+    exit_commission = coerce_nonnegative_cost(exit_commission)
+    exit_commission_tax = coerce_nonnegative_cost(exit_commission_tax)
+    capital_gains_tax = coerce_nonnegative_cost(capital_gains_tax)
+    entry_cost_source = None
+    entry_commission = None
+    entry_commission_tax = None
+    cost_evidence_reasons = []
+
+    position_entry_costs_complete = position_commission is not None and position_commission_tax is not None
+    order_entry_costs_complete = bool(
+        position.get("entry_execution_costs_complete")
+        and order_entry_commission is not None
+        and order_entry_commission_tax is not None
+    )
+    if position_entry_costs_complete:
+        entry_cost_source = "positions_api"
+        entry_commission = position_commission
+        entry_commission_tax = position_commission_tax
+        if order_entry_costs_complete and (
+            abs(position_commission - order_entry_commission) > 1e-6
+            or abs(position_commission_tax - order_entry_commission_tax) > 1e-6
+        ):
+            cost_evidence_reasons.append("entry_cost_source_mismatch")
+    elif order_entry_costs_complete:
+        entry_cost_source = "orders_api"
+        entry_commission = order_entry_commission
+        entry_commission_tax = order_entry_commission_tax
+    else:
+        cost_evidence_reasons.append("entry_execution_costs_incomplete")
+
+    entry_filled_qty = int(position.get("entry_order_filled_qty", 0) or 0)
+    if is_simulation:
+        cost_evidence_reasons.append("simulation")
+    if entry_filled_qty <= 0:
+        cost_evidence_reasons.append("entry_filled_qty_missing")
+    elif shares != entry_filled_qty or int(remaining_shares) != 0 or is_partial_fill:
+        cost_evidence_reasons.append("partial_exit_cost_allocation_unverified")
+    if position_expenses is None:
+        cost_evidence_reasons.append("position_expenses_missing")
+    if not exit_execution_costs_complete or exit_commission is None or exit_commission_tax is None:
+        cost_evidence_reasons.append("exit_execution_costs_incomplete")
+
+    actual_cost_evidence_complete = not cost_evidence_reasons
+    actual_total_cost = None
+    observed_execution_net_pnl = None
+    observed_net_pnl = None
+    if actual_cost_evidence_complete:
+        actual_total_cost = entry_commission + entry_commission_tax + position_expenses + exit_commission + exit_commission_tax
+        observed_execution_net_pnl = observed_pnl - actual_total_cost
+    actual_net_pnl_evidence_complete = bool(
+        actual_cost_evidence_complete
+        and capital_gains_tax_evidence_complete
+        and capital_gains_tax is not None
+    )
+    if actual_net_pnl_evidence_complete:
+        observed_net_pnl = observed_execution_net_pnl - capital_gains_tax
     modeled_pnl = (modeled_exit_price - buy_price) * shares
     observed_return_pct = (observed_price / buy_price - 1.0) if buy_price > 0 else 0.0
     modeled_return_pct = (modeled_exit_price / buy_price - 1.0) if buy_price > 0 else 0.0
@@ -1140,6 +1780,22 @@ def build_daytrade_exit_log_row(
         "modeled_exit_price": round(modeled_exit_price, 4),
         "observed_pnl": round(observed_pnl, 4),
         "modeled_pnl": round(modeled_pnl, 4),
+        "observed_gross_pnl": round(observed_pnl, 4),
+        "observed_execution_net_pnl": None if observed_execution_net_pnl is None else round(observed_execution_net_pnl, 4),
+        "observed_net_pnl": None if observed_net_pnl is None else round(observed_net_pnl, 4),
+        "actual_cost_evidence_complete": bool(actual_cost_evidence_complete),
+        "actual_cost_evidence_schema_version": 1,
+        "capital_gains_tax": capital_gains_tax,
+        "capital_gains_tax_evidence_complete": bool(capital_gains_tax_evidence_complete),
+        "actual_net_pnl_evidence_complete": actual_net_pnl_evidence_complete,
+        "actual_cost_evidence_reason": ",".join(sorted(set(cost_evidence_reasons))),
+        "entry_cost_source": entry_cost_source,
+        "entry_commission": entry_commission,
+        "entry_commission_tax": entry_commission_tax,
+        "position_expenses": position_expenses,
+        "exit_commission": exit_commission,
+        "exit_commission_tax": exit_commission_tax,
+        "actual_total_cost": None if actual_total_cost is None else round(actual_total_cost, 4),
         "observed_return_pct": round(observed_return_pct, 6),
         "modeled_return_pct": round(modeled_return_pct, 6),
         "session_open": round(session_open, 4),
@@ -1148,6 +1804,12 @@ def build_daytrade_exit_log_row(
         "held_shares": int(position.get("shares", 0)),
         "filled_shares": int(shares),
         "remaining_shares": int(remaining_shares),
+        "entry_execution_ids": tuple(
+            str(item)
+            for item in (position.get("execution_ids") or ())
+        ),
+        "exit_order_id": None if exit_order_id in (None, "") else str(exit_order_id),
+        "exit_execution_ids": tuple(str(item) for item in (exit_execution_ids or ())),
         "buy_price": round(buy_price, 4),
         "buy_atr": round(buy_atr, 4),
         "entry_candidate_rank": position.get("entry_candidate_rank"),
@@ -1183,6 +1845,301 @@ def append_daytrade_exit_log(row):
     append_csv_rows(DAYTRADE_EXIT_LOG_FILE, [row])
 
 
+def _position_execution_id_set(position):
+    values = []
+    direct = position.get("execution_id") if isinstance(position, dict) else None
+    if direct not in (None, ""):
+        values.append(direct)
+    extra = position.get("execution_ids") if isinstance(position, dict) else None
+    if isinstance(extra, str):
+        values.append(extra)
+    elif isinstance(extra, (list, tuple, set)):
+        values.extend(extra)
+    return {
+        str(value).strip()
+        for value in values
+        if str(value or "").strip()
+    }
+
+
+def _broker_portfolio_contains_position(position, broker_portfolio):
+    expected_ids = _position_execution_id_set(position)
+    for current in broker_portfolio or []:
+        current_ids = _position_execution_id_set(current)
+        if expected_ids and expected_ids.intersection(current_ids):
+            return True
+        if (
+            not expected_ids
+            and str(current.get("code") or "") == str(position.get("code") or "")
+            and str(current.get("ownership") or "").upper() == "MANAGED_BY_BOT"
+        ):
+            return True
+    return False
+
+
+def _stop_exit_already_recorded(decision_snapshot_id, stop_order_id):
+    frame = safe_read_csv(DAYTRADE_EXIT_LOG_FILE)
+    if frame is None or frame.empty:
+        return False
+    required = {"decision_snapshot_id", "exit_order_id", "remaining_shares"}
+    if not required.issubset(frame.columns):
+        return False
+    snapshot_text = str(decision_snapshot_id or "")
+    order_text = str(stop_order_id or "")
+    matches = frame[
+        frame["decision_snapshot_id"].fillna("").astype(str).eq(snapshot_text)
+        & frame["exit_order_id"].fillna("").astype(str).eq(order_text)
+    ]
+    if matches.empty:
+        return False
+    remaining = pd.to_numeric(matches["remaining_shares"], errors="coerce")
+    return bool((remaining == 0).any())
+
+
+def reconcile_disappeared_protective_stop_positions(
+    previous_portfolio,
+    broker_portfolio,
+    broker,
+    account,
+    *,
+    event_time=None,
+):
+    """Reconcile a vanished managed position only from an actual filled stop order."""
+    reconciled = [dict(position) for position in (broker_portfolio or [])]
+    updated_account = dict(account or {})
+    evidence = []
+    event_dt = event_time or datetime.datetime.now(JST)
+    exit_time = (
+        event_dt.strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(event_dt, "strftime")
+        else str(event_dt)
+    )
+
+    for previous in previous_portfolio or []:
+        position = dict(previous or {})
+        if str(position.get("ownership") or "").upper() != "MANAGED_BY_BOT":
+            continue
+        if _broker_portfolio_contains_position(position, reconciled):
+            continue
+
+        snapshot_id = str(position.get("decision_snapshot_id") or "").strip()
+        stop_order_id = resolve_protective_stop_order_id(position)
+        expected_shares = int(position.get("shares", 0) or 0)
+        reason = None
+        parsed = None
+        details = None
+
+        if not snapshot_id:
+            reason = "missing_decision_snapshot_id"
+        elif not stop_order_id:
+            reason = "missing_protective_stop_order_id"
+        elif expected_shares <= 0:
+            reason = "invalid_expected_shares"
+        elif _stop_exit_already_recorded(snapshot_id, stop_order_id):
+            evidence.append({
+                "status": "already_reconciled",
+                "decision_snapshot_id": snapshot_id,
+                "stop_order_id": stop_order_id,
+                "code": str(position.get("code") or ""),
+            })
+            continue
+        elif broker is None or not hasattr(broker, "get_order_details"):
+            reason = "order_details_unavailable"
+        else:
+            try:
+                details = broker.get_order_details(stop_order_id)
+            except Exception as exc:
+                reason = f"order_details_error:{exc}"
+            if reason is None and not isinstance(details, dict):
+                reason = "order_details_missing"
+            if reason is None:
+                parsed = parse_kabucom_order(details)
+                if not parsed.is_consistent:
+                    reason = "inconsistent_order_details"
+                elif parsed.process_state != OrderProcessState.TERMINAL:
+                    reason = f"stop_not_terminal:{parsed.process_state.value}"
+                elif parsed.terminal_reason != OrderTerminalReason.FILLED:
+                    terminal = parsed.terminal_reason.value if parsed.terminal_reason else "unknown"
+                    reason = f"stop_not_filled:{terminal}"
+                elif parsed.cumulative_qty != expected_shares or parsed.unfilled_qty != 0:
+                    reason = (
+                        "stop_fill_qty_mismatch:"
+                        f"expected={expected_shares},filled={parsed.cumulative_qty},"
+                        f"remaining={parsed.unfilled_qty}"
+                    )
+                elif parsed.average_fill_price is None or float(parsed.average_fill_price) <= 0:
+                    reason = "stop_fill_price_missing"
+                elif not parsed.execution_ids:
+                    reason = "stop_execution_id_missing"
+
+        if reason is not None:
+            unresolved = dict(position)
+            unresolved["protective_stop_reconcile_unresolved"] = True
+            unresolved["exit_order_unresolved"] = True
+            unresolved["exit_order_unresolved_reason"] = reason
+            unresolved["exit_order_remaining_qty"] = expected_shares
+            if not _broker_portfolio_contains_position(unresolved, reconciled):
+                reconciled.append(unresolved)
+            evidence.append({
+                "status": "unresolved",
+                "decision_snapshot_id": snapshot_id or None,
+                "stop_order_id": stop_order_id or None,
+                "code": str(position.get("code") or ""),
+                "reason": reason,
+            })
+            continue
+
+        fill_price = float(parsed.average_fill_price)
+        execution_ids = tuple(str(item) for item in parsed.execution_ids)
+        exit_commission, exit_commission_tax, exit_costs_complete = summarize_kabucom_execution_costs(details)
+        with order_journal_context(
+            decision_snapshot_id=snapshot_id,
+            lifecycle_stage="protective_stop",
+        ):
+            append_order_journal({
+                "event": "FILLED",
+                "kind": "stop",
+                "side": "1",
+                "qty": expected_shares,
+                "execution_evidence_schema_version": 1,
+                "aggregate_execution": True,
+                "requested_qty": expected_shares,
+                "average_price": fill_price,
+                "symbol": str(position.get("code") or ""),
+                "order_id": stop_order_id,
+                "order_ids": (stop_order_id,),
+                "execution_ids": execution_ids,
+                "execution_id": execution_ids[0],
+                "filled_qty": expected_shares,
+                "remaining_qty": 0,
+                "average_fill_price": fill_price,
+                "process_state": "terminal",
+                "terminal_reason": "filled",
+                "reconciliation_source": "broker_position_disappearance",
+                "commission": exit_commission,
+                "commission_tax": exit_commission_tax,
+                "execution_costs_complete": exit_costs_complete,
+            })
+
+        exit_log_row = build_daytrade_exit_log_row(
+            position,
+            exit_reason="protective_stop_fill",
+            observed_price=fill_price,
+            modeled_exit_price=position.get("entry_stop_price", fill_price),
+            exit_time=exit_time,
+            session_open=position.get("buy_price"),
+            session_high=position.get("post_entry_high", position.get("buy_price")),
+            session_low=position.get("post_entry_low", fill_price),
+            filled_shares=expected_shares,
+            remaining_shares=0,
+            is_simulation=False,
+            is_partial_fill=False,
+            exit_order_id=stop_order_id,
+            exit_execution_ids=execution_ids,
+            exit_commission=exit_commission,
+            exit_commission_tax=exit_commission_tax,
+            exit_execution_costs_complete=exit_costs_complete,
+        )
+        updated_account = _apply_live_realized_pnl(updated_account, exit_log_row)
+        append_daytrade_exit_log(exit_log_row)
+        if broker is not None and hasattr(broker, "log_trade"):
+            broker.log_trade({
+                "time": exit_time,
+                "code": position.get("code"),
+                "name": position.get("name", position.get("code")),
+                "side": "DAYTRADE_SELL",
+                "shares": expected_shares,
+                "buy_price": round(float(position.get("buy_price", 0.0)), 4),
+                "sell_price": round(fill_price, 4),
+                "pnl": round(
+                    (fill_price - float(position.get("buy_price", 0.0)))
+                    * expected_shares,
+                    4,
+                ),
+                "holding_days": 0,
+                "note": "protective_stop_fill_reconciled",
+                "decision_snapshot_id": snapshot_id,
+                "order_id": stop_order_id,
+                "execution_ids": execution_ids,
+            })
+        evidence.append({
+            "status": "reconciled",
+            "decision_snapshot_id": snapshot_id,
+            "stop_order_id": stop_order_id,
+            "execution_ids": execution_ids,
+            "code": str(position.get("code") or ""),
+            "filled_shares": expected_shares,
+            "fill_price": fill_price,
+            "remaining_shares": 0,
+        })
+
+    return reconciled, updated_account, evidence
+
+
+DAYTRADE_OPERATIONAL_EVIDENCE_FIELDS = (
+    "operational_evidence_schema_version",
+    "news_fetch_status",
+    "news_query_url",
+    "news_text",
+    "news_sha256",
+    "news_error",
+    "ai_outcome",
+    "ai_provider",
+    "ai_model",
+    "ai_prompt",
+    "ai_prompt_sha256",
+    "ai_raw_response",
+    "ai_raw_response_sha256",
+    "ai_error",
+)
+DAYTRADE_ENTRY_QUOTE_EVIDENCE_FIELDS = (
+    "entry_quote_evidence_schema_version",
+    "entry_quote_status",
+    "entry_quote_code",
+    "entry_quote_batch_started_at",
+    "entry_quote_batch_completed_at",
+    "entry_quote_batch_span_seconds",
+    "entry_quote_max_batch_span_seconds",
+    "entry_quote_price_timestamp_source",
+    "entry_quote_price_timestamp",
+    "entry_quote_received_at",
+    "entry_quote_age_seconds",
+    "entry_quote_transport_age_seconds",
+    "entry_quote_max_age_seconds",
+    "entry_quote_current_price",
+    "entry_quote_best_sell_price",
+    "entry_quote_best_sell_qty",
+    "entry_quote_reason",
+)
+DAYTRADE_ENTRY_RISK_EVIDENCE_FIELDS = (
+    "entry_risk_evidence_schema_version",
+    "entry_risk_status",
+    "entry_risk_reason",
+    "entry_risk_code",
+    "entry_risk_current_equity",
+    "entry_risk_theoretical_buying_power",
+    "entry_risk_wallet_margin_buying_power",
+    "entry_risk_buying_power",
+    "entry_risk_dynamic_leverage",
+    "entry_risk_quote_price",
+    "entry_risk_sizing_price",
+    "entry_risk_stop_price",
+    "entry_risk_turnover",
+    "entry_risk_max_positions",
+    "entry_risk_raw_shares",
+    "entry_risk_shares",
+    "entry_risk_max_entry_price",
+    "entry_risk_notional_pct",
+    "entry_risk_equity_notional_pct",
+    "entry_risk_risk_budget_pct",
+    "entry_risk_size_multiplier",
+)
+
+
+
+
+
+
 def build_daytrade_decision_log_rows(
     candidates,
     *,
@@ -1197,6 +2154,9 @@ def build_daytrade_decision_log_rows(
     entry_price=None,
     is_simulation=True,
     trade_mode=None,
+    operational_evidence=None,
+    entry_quote_evidence=None,
+    entry_risk_evidence=None,
 ):
     if hasattr(event_time, "strftime"):
         timestamp = event_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1206,7 +2166,7 @@ def build_daytrade_decision_log_rows(
     rows = []
     for fallback_rank, candidate in enumerate(candidates or [], start=1):
         item = dict(candidate or {})
-        rows.append(
+        row = (
             {
                 "time": timestamp,
                 "trade_mode": mode,
@@ -1237,6 +2197,31 @@ def build_daytrade_decision_log_rows(
                 "entry_price": entry_price,
             }
         )
+        if operational_evidence:
+            evidence = dict(operational_evidence)
+            row.update(
+                {
+                    field: evidence.get(field, "")
+                    for field in DAYTRADE_OPERATIONAL_EVIDENCE_FIELDS
+                }
+            )
+        if entry_quote_evidence:
+            evidence = dict(entry_quote_evidence)
+            row.update(
+                {
+                    field: evidence.get(field, "")
+                    for field in DAYTRADE_ENTRY_QUOTE_EVIDENCE_FIELDS
+                }
+            )
+        if entry_risk_evidence:
+            evidence = dict(entry_risk_evidence)
+            row.update(
+                {
+                    field: evidence.get(field, "")
+                    for field in DAYTRADE_ENTRY_RISK_EVIDENCE_FIELDS
+                }
+            )
+        rows.append(row)
     return rows
 
 
@@ -1254,6 +2239,9 @@ def record_daytrade_decision(
     entry_price=None,
     is_simulation=True,
     trade_mode=None,
+    operational_evidence=None,
+    entry_quote_evidence=None,
+    entry_risk_evidence=None,
 ):
     rows = build_daytrade_decision_log_rows(
         candidates,
@@ -1268,6 +2256,9 @@ def record_daytrade_decision(
         entry_price=entry_price,
         is_simulation=is_simulation,
         trade_mode=trade_mode,
+        operational_evidence=operational_evidence,
+        entry_quote_evidence=entry_quote_evidence,
+        entry_risk_evidence=entry_risk_evidence,
     )
     if rows:
         append_csv_rows(DAYTRADE_DECISION_LOG_FILE, rows)
@@ -1316,11 +2307,6 @@ def compute_daytrade_snapshot(data_df, symbols_df, targets, regime):
         "market_ratio": market_ratio,
         "latest_close_map": latest_close_map,
     }
-
-
-def _normalize_daytrade_observation_code(value):
-    code = str(value or "").strip().upper()
-    return code[:-2] if code.endswith(".T") else code
 
 
 def _serialize_board_failure(code, failure):
@@ -1381,13 +2367,18 @@ def compute_observed_daytrade_production_snapshot(
     requested_codes,
     boards,
     board_failures,
+    board_batch_started_at,
+    board_batch_completed_at,
     event_time,
     current_equity,
     week_start_equity,
     account_cash,
+    server_clock_evidence,
     trade_mode=None,
     is_simulation=False,
     operational_reasons=(),
+    observation_policy=DAYTRADE_OBSERVATION_POLICY_FIXED_49,
+    opening_discovery_evidence=None,
 ):
     mode = str(TRADE_MODE if trade_mode is None else trade_mode).strip().upper()
     trade_day = pd.Timestamp(event_time)
@@ -1477,6 +2468,7 @@ def compute_observed_daytrade_production_snapshot(
 
             symbol_inputs.append({
                 "code": code,
+                "previous_close_timestamp": board.get("previous_close_timestamp"),
                 "opening_price_timestamp": board.get("opening_price_timestamp"),
                 "open_today": board.get("open"),
                 "close_prev": cache_prev_close,
@@ -1525,6 +2517,7 @@ def compute_observed_daytrade_production_snapshot(
             "session_low": board.get("low"),
             "volume": board.get("volume"),
             "prev_close": board.get("prev_close"),
+            "previous_close_timestamp": board.get("previous_close_timestamp"),
         })
 
     base_leverage = calculate_dynamic_leverage(
@@ -1536,6 +2529,8 @@ def compute_observed_daytrade_production_snapshot(
         feature_asof=feature_asof,
         open_asof=trade_day,
         captured_at=event_time,
+        board_batch_started_at=board_batch_started_at,
+        board_batch_completed_at=board_batch_completed_at,
         trade_mode=mode,
         is_simulation=is_simulation,
         requested_codes=requested,
@@ -1559,6 +2554,9 @@ def compute_observed_daytrade_production_snapshot(
             "bull_gap_limit": float(BULL_GAP_LIMIT),
             "rsi_threshold": float(DAYTRADE_MAX_RSI2),
         },
+        server_clock_evidence=server_clock_evidence,
+        observation_policy=observation_policy,
+        opening_discovery_evidence=opening_discovery_evidence,
         board_failures=serialized_failures,
         operational_reasons=extra_reasons,
         execution_quotes=execution_quotes,
@@ -1574,6 +2572,58 @@ def compute_observed_daytrade_production_snapshot(
         "decision_allowed": bool(snapshot.get("decision_allowed")),
         "rejection_reasons": list(snapshot.get("rejection_reasons") or ()),
     }
+
+
+
+
+def compute_rotating_daytrade_production_snapshot(
+    *,
+    data_df,
+    symbols_df,
+    discovery_result: DaytradeOpeningDiscoveryResult,
+    current_equity,
+    week_start_equity,
+    account_cash,
+    server_clock_evidence,
+    trade_mode=None,
+    is_simulation=False,
+    operational_reasons=(),
+):
+    """Convert one collector result into the only rotating snapshot input shape."""
+    evidence = serialize_daytrade_opening_discovery_result(discovery_result)
+    protected_codes = (
+        evidence.get("protected_board", {}).get("requested", ())
+    )
+    requested_codes = list(dict.fromkeys([
+        *discovery_result.requested,
+        *protected_codes,
+    ]))
+    board_failures = {
+        code: {"reason": reason}
+        for code, reason in discovery_result.failures.items()
+    }
+    return compute_observed_daytrade_production_snapshot(
+        data_df=data_df,
+        symbols_df=symbols_df,
+        requested_codes=requested_codes,
+        boards=discovery_result.observations,
+        board_failures=board_failures,
+        board_batch_started_at=discovery_result.started_at,
+        board_batch_completed_at=discovery_result.completed_at,
+        event_time=discovery_result.completed_at,
+        current_equity=current_equity,
+        week_start_equity=week_start_equity,
+        account_cash=account_cash,
+        server_clock_evidence=server_clock_evidence,
+        trade_mode=trade_mode,
+        is_simulation=is_simulation,
+        operational_reasons=[
+            *operational_reasons,
+            *discovery_result.rejection_reasons,
+        ],
+        observation_policy=DAYTRADE_OBSERVATION_POLICY_ROTATING_196,
+        opening_discovery_evidence=evidence,
+    )
 
 
 def resolve_daytrade_entry_shares(
@@ -1607,6 +2657,72 @@ def resolve_daytrade_entry_shares(
     )
 
 
+
+
+def build_daytrade_entry_risk_evidence(
+    item,
+    *,
+    day_equity,
+    theoretical_buying_power,
+    wallet_margin_buying_power,
+    candidate_buying_power,
+    candidate_dynamic_leverage,
+    quote_price,
+    buy_price,
+    stop_price,
+):
+    turnover = item.get("turnover", item.get("adv_yen"))
+    envelope = resolve_daytrade_entry_risk_envelope(
+        current_equity=day_equity,
+        buying_power=candidate_buying_power,
+        entry_price=buy_price,
+        stop_price=stop_price,
+        dynamic_leverage=candidate_dynamic_leverage,
+        max_positions=MAX_POSITIONS,
+        turnover=turnover,
+        notional_pct=item.get("notional_pct"),
+        equity_notional_pct=item.get("equity_notional_pct"),
+        risk_budget_pct=item.get("risk_budget_pct"),
+        size_multiplier=item.get("size_multiplier"),
+    )
+    evidence = {
+        "entry_risk_evidence_schema_version": 1,
+        "entry_risk_status": envelope.get("status", "blocked"),
+        "entry_risk_reason": envelope.get("reason", "invalid_envelope"),
+        "entry_risk_code": _normalize_daytrade_observation_code(
+            item.get("code")
+        ),
+        "entry_risk_current_equity": day_equity,
+        "entry_risk_theoretical_buying_power": theoretical_buying_power,
+        "entry_risk_wallet_margin_buying_power": wallet_margin_buying_power,
+        "entry_risk_buying_power": candidate_buying_power,
+        "entry_risk_dynamic_leverage": candidate_dynamic_leverage,
+        "entry_risk_quote_price": quote_price,
+        "entry_risk_sizing_price": buy_price,
+        "entry_risk_stop_price": stop_price,
+        "entry_risk_turnover": turnover,
+        "entry_risk_max_positions": MAX_POSITIONS,
+        "entry_risk_raw_shares": envelope.get("raw_shares", 0),
+        "entry_risk_shares": envelope.get("shares", 0),
+        "entry_risk_max_entry_price": envelope.get("max_entry_price", 0.0),
+        "entry_risk_notional_pct": envelope.get(
+            "notional_pct",
+            item.get("notional_pct"),
+        ),
+        "entry_risk_equity_notional_pct": envelope.get(
+            "equity_notional_pct",
+            item.get("equity_notional_pct"),
+        ),
+        "entry_risk_risk_budget_pct": envelope.get(
+            "risk_budget_pct",
+            item.get("risk_budget_pct"),
+        ),
+        "entry_risk_size_multiplier": envelope.get(
+            "size_multiplier",
+            item.get("size_multiplier"),
+        ),
+    }
+    return envelope, evidence
 def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffers):
     original_positions = [dict(position) for position in portfolio]
     updated_portfolio, sell_actions, fill_events = manage_positions_live(
@@ -1659,7 +2775,6 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
             modeled_exit_price = float(fill_event["modeled_exit_price"])
             exit_reason = fill_event["exit_reason"]
             remaining_shares = int(fill_event["remaining_shares"])
-            account = _apply_live_realized_pnl(account, position, observed_price, shares)
             broker.log_trade({
                 "time": fill_event["exit_time"],
                 "code": position["code"],
@@ -1672,22 +2787,30 @@ def close_daytrade_positions(portfolio, account, broker, is_sim, realtime_buffer
                 "holding_days": 0,
                 "note": exit_reason,
             })
-            append_daytrade_exit_log(
-                build_daytrade_exit_log_row(
-                    position,
-                    exit_reason=exit_reason,
-                    observed_price=observed_price,
-                    modeled_exit_price=modeled_exit_price,
-                    exit_time=fill_event["exit_time"],
-                    session_open=fill_event.get("session_open"),
-                    session_high=fill_event.get("session_high"),
-                    session_low=fill_event.get("session_low"),
-                    filled_shares=shares,
-                    remaining_shares=remaining_shares,
-                    is_simulation=False,
-                    is_partial_fill=remaining_shares > 0,
-                )
+            exit_log_row = build_daytrade_exit_log_row(
+                position,
+                exit_reason=exit_reason,
+                observed_price=observed_price,
+                modeled_exit_price=modeled_exit_price,
+                exit_time=fill_event["exit_time"],
+                session_open=fill_event.get("session_open"),
+                session_high=fill_event.get("session_high"),
+                session_low=fill_event.get("session_low"),
+                filled_shares=shares,
+                remaining_shares=remaining_shares,
+                is_simulation=False,
+                is_partial_fill=remaining_shares > 0,
+                exit_order_id=fill_event.get("exit_order_id"),
+                exit_execution_ids=fill_event.get("exit_execution_ids"),
+                exit_commission=fill_event.get("exit_commission"),
+                exit_commission_tax=fill_event.get("exit_commission_tax"),
+                exit_execution_costs_complete=fill_event.get(
+                    "exit_execution_costs_complete",
+                    False,
+                ),
             )
+            account = _apply_live_realized_pnl(account, exit_log_row)
+            append_daytrade_exit_log(exit_log_row)
     return updated_portfolio, sell_actions, account
 
 
@@ -1752,6 +2875,7 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             stop_price=stop_price,
             target_price=target_price,
             session_high=session_high,
+            exit_slippage_rate=SLIPPAGE_RATE,
             allow_close_exit=False,
         )
         if not exit_reason or modeled_exit_price is None:
@@ -1761,11 +2885,15 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
         shares = int(position["shares"])
         stop_order_id = resolve_protective_stop_order_id(position)
         if not is_sim and stop_order_id:
-            stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
-                broker=broker,
-                position=position,
-                stop_order_id=stop_order_id,
-            )
+            with order_journal_context(
+                decision_snapshot_id=position.get("decision_snapshot_id"),
+                lifecycle_stage="protective_stop_cancel",
+            ):
+                stop_cancel_ok, stop_cancel_result = cancel_linked_protective_stop_before_exit(
+                    broker=broker,
+                    position=position,
+                    stop_order_id=stop_order_id,
+                )
             if not stop_cancel_ok:
                 unresolved_position = dict(position)
                 unresolved_position["protective_stop_cancel_unresolved"] = True
@@ -1817,7 +2945,11 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             exit_actions.append(f"SELL {code} - {exit_reason} (@{observed_price:,.1f})")
             continue
 
-        details = broker.execute_chase_order(code, shares, action=StockOrderAction.MARGIN_CLOSE_LONG, atr=buy_atr)
+        with order_journal_context(
+            decision_snapshot_id=position.get("decision_snapshot_id"),
+            lifecycle_stage="exit",
+        ):
+            details = broker.execute_chase_order(code, shares, action=StockOrderAction.MARGIN_CLOSE_LONG, atr=buy_atr)
         filled_shares = 0
         observed_price = current_price
         if isinstance(details, dict) and details:
@@ -1837,7 +2969,6 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             continue
 
         remaining_shares = max(0, shares - filled_shares)
-        account = _apply_live_realized_pnl(account, position, observed_price, filled_shares)
         broker.log_trade({
             "time": exit_time,
             "code": position["code"],
@@ -1850,22 +2981,27 @@ def close_daytrade_positions_by_signal(portfolio, account, broker, is_sim, realt
             "holding_days": 0,
             "note": exit_reason,
         })
-        append_daytrade_exit_log(
-            build_daytrade_exit_log_row(
-                position,
-                exit_reason=exit_reason,
-                observed_price=observed_price,
-                modeled_exit_price=modeled_exit_price,
-                exit_time=exit_time,
-                session_open=session_open,
-                session_high=session_high,
-                session_low=session_low,
-                filled_shares=filled_shares,
-                remaining_shares=remaining_shares,
-                is_simulation=False,
-                is_partial_fill=remaining_shares > 0,
-            )
+        exit_log_row = build_daytrade_exit_log_row(
+            position,
+            exit_reason=exit_reason,
+            observed_price=observed_price,
+            modeled_exit_price=modeled_exit_price,
+            exit_time=exit_time,
+            session_open=session_open,
+            session_high=session_high,
+            session_low=session_low,
+            filled_shares=filled_shares,
+            remaining_shares=remaining_shares,
+            is_simulation=False,
+            is_partial_fill=remaining_shares > 0,
+            exit_order_id=details.get("order_id"),
+            exit_execution_ids=details.get("execution_ids"),
+            exit_commission=details.get("commission"),
+            exit_commission_tax=details.get("commission_tax"),
+            exit_execution_costs_complete=details.get("execution_costs_complete", False),
         )
+        account = _apply_live_realized_pnl(account, exit_log_row)
+        append_daytrade_exit_log(exit_log_row)
         exit_actions.append(f"SELL {code} - {exit_reason} (@{observed_price:,.1f})")
         if remaining_shares > 0:
             remaining_position = dict(position)
@@ -2278,6 +3414,8 @@ def main():
         release_lock()
 
 def _main_exec():
+    setup_logging()
+
     from core.kabu_launcher import ensure_kabu_station_running, terminate_kabu_station, check_api_health
 
     # --- 【新規】kabuステーションの自動起動・ログイン ---
@@ -2298,8 +3436,6 @@ def _main_exec():
     if not pre_flight_check():
         print("❌ [Pre-flight Error] 起動前点検に失敗しました。処理を中断します。")
         return
-    
-    setup_logging()
     
     from core.file_io import rotate_csv_if_large
     rotate_csv_if_large(EXECUTION_LOG_FILE, max_size_mb=2)
@@ -2442,31 +3578,57 @@ def _main_exec():
     breadth_val = 0.5    # [Parity] Market breadth (updated each scan, default neutral)
     
     # --- [Aegis Protocol State] ---
-    current_month_str = datetime.datetime.now(JST).strftime('%Y-%m')
     account_data = safe_read_json(ACCOUNT_FILE, default={}) or {}
-    month_start_equity = account_data.get('month_start_equity', 0)
-
-    # 初回起動時または月替わり時に月初資産を記録
     account = merge_account_state(broker.get_account_balance(), account_data, is_sim=is_sim)
-    if float(account.get("configured_risk_capital", 0.0) or 0.0) <= 0:
+    if account.get("configured_risk_capital") is None:
         account["configured_risk_capital"] = float(INITIAL_CASH)
-    account.setdefault("realized_pnl_today", float(account.get("realized_pnl_today", 0.0) or 0.0))
+    if is_sim:
+        account.setdefault("realized_pnl_today", float(account.get("realized_pnl_today", 0.0) or 0.0))
+    else:
+        startup_server_datetime, startup_clock_verified, startup_clock_evidence = (
+            resolve_runtime_server_clock(broker, is_sim=False)
+        )
+        account["server_clock_verified"] = bool(startup_clock_verified)
+        account["server_clock_evidence"] = dict(startup_clock_evidence)
+        if startup_clock_verified:
+            account = ensure_live_realized_pnl_state(account, startup_server_datetime)
+    if is_sim:
+        startup_server_datetime, startup_clock_verified, startup_clock_evidence = (
+            resolve_runtime_server_clock(broker, is_sim=True)
+        )
     positions_snapshot_fresh = True
+    stored_portfolio = load_portfolio_positions(PORTFOLIO_FILE) if not is_sim else []
     try:
         initial_portfolio = broker.get_positions()
     except Exception:
         initial_portfolio = []
         positions_snapshot_fresh = False
+    if not is_sim and positions_snapshot_fresh:
+        initial_portfolio, account, initial_stop_reconciliations = (
+            reconcile_disappeared_protective_stop_positions(
+                previous_portfolio=stored_portfolio,
+                broker_portfolio=initial_portfolio,
+                broker=broker,
+                account=account,
+            )
+        )
+        if initial_stop_reconciliations:
+            broker.save_portfolio(initial_portfolio)
+            broker.save_account(account)
     portfolio = list(initial_portfolio)
     initial_total = _resolve_account_equity(account, initial_portfolio, is_sim)
     _set_active_runtime_state(portfolio=portfolio, account=account)
-    if month_start_equity <= 0 or current_month_str != account_data.get('current_month', ''):
-        month_start_equity = initial_total
-        account['month_start_equity'] = month_start_equity
-        account['current_month'] = current_month_str
+    if is_sim or startup_clock_verified:
+        previous_month = account.get("current_month")
+        account = ensure_daytrade_month_state(account, initial_total, startup_server_datetime)
+        account = ensure_daytrade_week_state(account, initial_total, startup_server_datetime)
+        if account.get("current_month") != previous_month:
+            print(
+                "🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: "
+                f"Y{float(account.get('month_start_equity', 0.0)):,.0f}"
+            )
         atomic_write_json(ACCOUNT_FILE, account)
-        print(f"🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: Y{month_start_equity:,.0f}")
-    account = ensure_daytrade_week_state(account, initial_total, datetime.datetime.now(JST))
+    month_start_equity = float(account.get("month_start_equity", 0.0) or 0.0)
 
     initial_active_orders_info = None
     if not is_sim:
@@ -2514,7 +3676,7 @@ def _main_exec():
         startup_recovery_report=startup_recovery_report,
         order_journal_summary=order_journal_replay_summary,
         quote_fresh=None,
-        checked_at=datetime.datetime.now(JST),
+        checked_at=startup_server_datetime,
     )
     account["live_readiness_allowed"] = startup_live_readiness_report.allowed
     account["live_readiness_reason"] = startup_live_readiness_report.reason
@@ -2554,7 +3716,10 @@ def _main_exec():
             break
 
         loop_start_time = time.time()
-        server_datetime = broker.get_server_time() if hasattr(broker, 'get_server_time') else datetime.datetime.now(JST)
+        server_datetime, server_clock_verified, server_clock_evidence = resolve_runtime_server_clock(
+            broker,
+            is_sim=is_sim,
+        )
         now_time = server_datetime.time()
         phase = get_market_phase(now_time)
         
@@ -2571,7 +3736,12 @@ def _main_exec():
         else:
             should_scan_override = True
 
-        phase_entry_blocked = False
+        phase_entry_blocked = bool(not is_sim and not server_clock_verified)
+        if phase_entry_blocked:
+            print(
+                "🛑 [CLOCK] 証券会社サーバー時刻を検証できないため、"
+                f"新規エントリーとproduction snapshotを停止します: {server_clock_evidence.get('reason')}"
+            )
         if not DEBUG_MODE:
             jpx_day_status = get_jpx_trading_day_status(
                 server_datetime,
@@ -2676,7 +3846,25 @@ def _main_exec():
                 safe_read_json(ACCOUNT_FILE, default={}) or {},
                 is_sim=is_sim,
             )
-            portfolio = broker.get_positions()
+            account["server_clock_verified"] = bool(server_clock_verified)
+            account["server_clock_evidence"] = dict(server_clock_evidence)
+            if not is_sim and server_clock_verified:
+                account = ensure_live_realized_pnl_state(account, server_datetime)
+            broker_portfolio = broker.get_positions()
+            if is_sim:
+                portfolio = broker_portfolio
+            else:
+                portfolio, account, stop_reconciliations = (
+                    reconcile_disappeared_protective_stop_positions(
+                        previous_portfolio=portfolio,
+                        broker_portfolio=broker_portfolio,
+                        broker=broker,
+                        account=account,
+                    )
+                )
+                if stop_reconciliations:
+                    broker.save_portfolio(portfolio)
+                    broker.save_account(account)
         except Exception as e:
             print(f"[WARNING] 口座情報取得エラー: {e}")
             time.sleep(MONITOR_INTERVAL_SEC)
@@ -2722,6 +3910,7 @@ def _main_exec():
         boards = {}
         board_failures = {}
         current_targets = set()
+        board_batch = None
         registry_sync_ok = True
         try:
             watch_plan = build_daytrade_watch_plan(
@@ -2807,17 +3996,6 @@ def _main_exec():
             regime, is_trend_snapped = "RANGE", False
             last_scan_time = loop_start_time
 
-        # Calculate Monthly Drawdown for Aegis Protocol
-        current_total = _resolve_account_equity(account, portfolio, is_sim)
-        account = ensure_daytrade_week_state(account, current_total, server_datetime)
-        month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
-        monthly_risk_blocked = is_daytrade_monthly_risk_blocked(month_start_equity, current_total)
-        
-        print(
-            f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} "
-            f"| MonthDD: {month_drawdown:+.2%}"
-        )
-        
         latest_close_map = {
             str(code).replace(".T", ""): float(info.get("Close", 0) or 0)
             for code, info in jp_cache.items()
@@ -2840,6 +4018,29 @@ def _main_exec():
         if signal_close_actions:
             actions_taken.extend(signal_close_actions)
 
+        # Revalue after exits so a new entry never uses stale pre-exit risk capital.
+        current_total = _resolve_account_equity(account, portfolio, is_sim)
+        if is_sim or server_clock_verified:
+            previous_month = account.get("current_month")
+            account = ensure_daytrade_month_state(account, current_total, server_datetime)
+            account = ensure_daytrade_week_state(account, current_total, server_datetime)
+            if account.get("current_month") != previous_month:
+                print(
+                    "🛡️ [Aegis] 新しい月の開始です。月初資産を記録しました: "
+                    f"Y{float(account.get('month_start_equity', 0.0)):,.0f}"
+                )
+        month_start_equity = float(account.get("month_start_equity", 0.0) or 0.0)
+        month_drawdown = (current_total / month_start_equity) - 1.0 if month_start_equity > 0 else 0
+        monthly_risk_blocked = bool(
+            (not is_sim and not server_clock_verified)
+            or is_daytrade_monthly_risk_blocked(month_start_equity, current_total)
+        )
+
+        print(
+            f"[STAT] レジーム: 【{regime}】 | TrendSnapped: {is_trend_snapped} "
+            f"| MonthDD: {month_drawdown:+.2%} | ClockVerified: {server_clock_verified}"
+        )
+
         # [V17.0 Final Persistence]
         # [V17.0 Imperial Sync] Finalizing position and equity state for the current loop.
         broker.save_account(account)
@@ -2852,6 +4053,7 @@ def _main_exec():
         elif phase_entry_blocked: should_scan = False
         elif active_orders_block_entry: should_scan = False
         elif not is_sim and account.get("wallet_snapshot_incomplete"): should_scan = False
+        elif not _realized_pnl_evidence_allows_entry(account, is_sim): should_scan = False
         elif not is_sim and any(str(position.get("ownership", "")).upper() != "MANAGED_BY_BOT" for position in portfolio): should_scan = False
         elif not is_sim and _portfolio_has_unresolved_execution_state(portfolio): should_scan = False
         elif not is_sim and loop_recovery_report.needs_manual_review: should_scan = False
@@ -2886,7 +4088,10 @@ def _main_exec():
             orders_snapshot_fresh=is_sim or active_orders_info is not None,
             quote_fresh=is_sim or quote_fresh_ok,
             registry_ready=is_sim or registry_sync_ok,
-            critical_state_valid=not loop_recovery_report.needs_manual_review,
+            critical_state_valid=(
+                not loop_recovery_report.needs_manual_review
+                and _realized_pnl_evidence_allows_entry(account, is_sim)
+            ),
             session_allows_entry=(
                 should_scan_override
                 and not phase_entry_blocked
@@ -2894,7 +4099,7 @@ def _main_exec():
                 and now_time >= datetime.time(9, 30)
                 and now_time < ENTRY_SCAN_CUTOFF_TIME
             ),
-            clock_healthy=server_datetime is not None,
+            clock_healthy=is_sim or server_clock_verified,
             shutdown_requested=SHUTDOWN_REQUESTED,
             protective_stop_pending_count=loop_recovery_report.protective_stop_pending_count,
             protective_stop_orphan_count=loop_recovery_report.protective_stop_orphan_count,
@@ -2973,19 +4178,28 @@ def _main_exec():
                                 operational_reasons.append("registry_sync_failed")
                             if not quote_fresh_ok:
                                 operational_reasons.append("board_quote_not_fresh")
+                            if not _realized_pnl_evidence_allows_entry(account, is_sim):
+                                operational_reasons.append("live_risk_capital_evidence_incomplete")
                             snapshot = compute_observed_daytrade_production_snapshot(
                                 data_df=data_df,
                                 symbols_df=df_symbols,
                                 requested_codes=current_targets,
                                 boards=boards,
                                 board_failures=board_failures,
-                                event_time=server_datetime,
+                                event_time=getattr(board_batch, "completed_at", server_datetime),
+                                board_batch_started_at=getattr(
+                                    board_batch, "started_at", server_datetime
+                                ),
+                                board_batch_completed_at=getattr(
+                                    board_batch, "completed_at", server_datetime
+                                ),
                                 current_equity=current_total,
                                 week_start_equity=account.get(
                                     "daytrade_week_start_equity",
                                     current_total,
                                 ),
                                 account_cash=account.get("cash", 0.0),
+                                server_clock_evidence=server_clock_evidence,
                                 trade_mode=TRADE_MODE,
                                 is_simulation=False,
                                 operational_reasons=operational_reasons,
@@ -3183,26 +4397,117 @@ def _main_exec():
                             break
                         item["price"] = float(c_price)
 
-                    news = get_recent_news(item['code'], item['name'])
-                    if news and news != "ニュースなし":
-                        is_safe, reason = ai_qualitative_filter(item['code'], item['name'], news)
-                        if not is_safe:
-                            print(f"🚫 [AI Filter] {item['code']} skipped: {reason}")
-                            record_daytrade_decision(
-                                [item],
-                                decision="blocked_operational_veto",
-                                event_time=server_datetime,
-                                reason=f"ai_filter:{reason}",
-                                breadth=breadth_val,
-                                market_ratio=snapshot.get("market_ratio"),
-                                selected_count=1,
-                                dynamic_leverage=selected_dynamic_lev,
-                                is_simulation=is_sim,
-                            )
-                            entry_flow_halted = True
-                            break
-
+                    news_result = get_recent_news_evidence(
+                        item.get("code"),
+                        item.get("name"),
+                    )
+                    ai_result = None
+                    operational_reason = "no_recent_news"
+                    if news_result.status == "error":
+                        operational_evidence = build_operational_review_evidence(
+                            news_result,
+                        )
+                        print(
+                            f"🚫 [News Evidence] {item.get('code')} skipped: "
+                            f"{news_result.error}"
+                        )
+                        record_daytrade_decision(
+                            [item],
+                            decision="blocked_operational_veto",
+                            event_time=server_datetime,
+                            reason="news_fetch:error",
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            selected_count=1,
+                            dynamic_leverage=selected_dynamic_lev,
+                            is_simulation=is_sim,
+                            operational_evidence=operational_evidence,
+                        )
+                        entry_flow_halted = True
+                        break
+                    if news_result.status == "ok":
+                        ai_result = evaluate_ai_qualitative_filter(
+                            item.get("code"),
+                            item.get("name"),
+                            news_result.news_text,
+                        )
+                        operational_reason = f"ai_filter:{ai_result.outcome}"
+                    operational_evidence = build_operational_review_evidence(
+                        news_result,
+                        ai_result,
+                    )
+                    if ai_result is not None and not ai_result.allowed:
+                        print(
+                            f"🚫 [AI Filter] {item.get('code')} skipped: "
+                            f"{ai_result.reason}"
+                        )
+                        record_daytrade_decision(
+                            [item],
+                            decision="blocked_operational_veto",
+                            event_time=server_datetime,
+                            reason=operational_reason,
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            selected_count=1,
+                            dynamic_leverage=selected_dynamic_lev,
+                            is_simulation=is_sim,
+                            operational_evidence=operational_evidence,
+                        )
+                        entry_flow_halted = True
+                        break
+                    record_daytrade_decision(
+                        [item],
+                        decision="operational_review_passed",
+                        event_time=server_datetime,
+                        reason=operational_reason,
+                        breadth=breadth_val,
+                        market_ratio=snapshot.get("market_ratio"),
+                        selected_count=1,
+                        dynamic_leverage=selected_dynamic_lev,
+                        is_simulation=is_sim,
+                        operational_evidence=operational_evidence,
+                    )
                     selected_candidates.append(item)
+
+                if not is_sim and selected_candidates:
+                    reviewed_candidates = list(selected_candidates)
+                    refreshed_candidates, quote_evidence, quote_reasons = (
+                        refresh_daytrade_entry_execution_quotes(
+                            broker,
+                            reviewed_candidates,
+                        )
+                    )
+                    for item in reviewed_candidates:
+                        code = _normalize_daytrade_observation_code(item.get("code"))
+                        evidence = quote_evidence.get(code, {})
+                        quote_status = str(evidence.get("entry_quote_status") or "")
+                        quote_reason = str(evidence.get("entry_quote_reason") or "")
+                        record_daytrade_decision(
+                            [item],
+                            decision=(
+                                "entry_quote_refresh_passed"
+                                if quote_status == "fresh"
+                                else "blocked_entry_quote_refresh"
+                            ),
+                            event_time=server_datetime,
+                            reason=quote_reason or "fresh_execution_quote",
+                            breadth=breadth_val,
+                            market_ratio=snapshot.get("market_ratio"),
+                            selected_count=len(reviewed_candidates),
+                            dynamic_leverage=selected_dynamic_lev,
+                            entry_price=evidence.get("entry_quote_best_sell_price"),
+                            is_simulation=False,
+                            entry_quote_evidence=evidence,
+                        )
+                    if quote_reasons:
+                        print(
+                            "🚫 [Entry Quote] 発注直前の板鮮度を保証できないため、"
+                            f"候補全体を停止しました: {';'.join(quote_reasons)}"
+                        )
+                        selected_candidates = []
+                        entry_flow_halted = True
+                    else:
+                        selected_candidates = refreshed_candidates
 
                 record_daytrade_decision(
                     selected_candidates,
@@ -3217,60 +4522,95 @@ def _main_exec():
                 )
                 current_exposure = _portfolio_market_value(portfolio)
                 day_equity = _resolve_account_equity(account, portfolio, is_sim)
-                day_buying_power = resolve_daytrade_buying_power(
+                theoretical_day_buying_power = resolve_daytrade_buying_power(
                     current_equity=day_equity,
                     account_cash=float(account.get("cash", 0.0)) if is_sim else 0.0,
                     dynamic_leverage=selected_dynamic_lev,
                     current_exposure=current_exposure,
                 )
-                if not is_sim:
-                    margin_buying_power = _resolve_live_buying_power(account, "margin_buying_power")
-                    if margin_buying_power > 0:
-                        day_buying_power = min(day_buying_power, margin_buying_power)
+                margin_buying_power = (
+                    None
+                    if is_sim
+                    else _resolve_live_buying_power(account, "margin_buying_power")
+                )
+                day_buying_power = theoretical_day_buying_power
+                if margin_buying_power is not None:
+                    day_buying_power = min(day_buying_power, margin_buying_power)
                 inverse_day_buying_power = 0.0
+                theoretical_inverse_day_buying_power = 0.0
                 inverse_buying_power_leverage = 1.0
                 if inverse_only:
                     inverse_buying_power_leverage = resolve_daytrade_selected_inverse_buying_power_leverage(
                         top_candidates,
                         breadth_val,
                     )
-                    inverse_day_buying_power = resolve_daytrade_inverse_buying_power(
+                    theoretical_inverse_day_buying_power = resolve_daytrade_inverse_buying_power(
                         current_equity=day_equity,
                         account_cash=float(account.get("cash", 0.0)) if is_sim else 0.0,
                         current_exposure=current_exposure,
                         leverage=inverse_buying_power_leverage,
                     )
-                    if not is_sim:
-                        margin_buying_power = _resolve_live_buying_power(account, "margin_buying_power")
-                        if margin_buying_power > 0:
-                            inverse_day_buying_power = min(inverse_day_buying_power, margin_buying_power)
+                    inverse_day_buying_power = theoretical_inverse_day_buying_power
+                    if margin_buying_power is not None:
+                        inverse_day_buying_power = min(inverse_day_buying_power, margin_buying_power)
                 opened_count = 0
                 for item in selected_candidates:
                     if opened_count >= max_to_buy:
                         break
 
-                    buy_price = normalize_tick_size(float(item['price']), is_buy=True)
+                    quote_price = float(item['price'])
+                    buy_price = normalize_tick_size(quote_price, is_buy=True)
                     stop_mult = float(item.get("stop_mult", resolve_daytrade_intraday_stop_mult(STOP_LOSS_ATR)))
                     stop_price = max(0.01, buy_price - (float(item.get('atr', 0.0)) * stop_mult))
+                    candidate_theoretical_buying_power = theoretical_day_buying_power
                     candidate_buying_power = day_buying_power
                     candidate_dynamic_lev = selected_dynamic_lev
                     if is_daytrade_inverse_setup_type(item.get("setup_type")):
+                        candidate_theoretical_buying_power = theoretical_inverse_day_buying_power
                         candidate_buying_power = inverse_day_buying_power
                         candidate_dynamic_lev = inverse_buying_power_leverage
-                    shares = resolve_daytrade_entry_shares(
-                        item=item,
+                    risk_envelope, risk_evidence = build_daytrade_entry_risk_evidence(
+                        item,
                         day_equity=day_equity,
+                        theoretical_buying_power=candidate_theoretical_buying_power,
+                        wallet_margin_buying_power=margin_buying_power,
                         candidate_buying_power=candidate_buying_power,
-                        candidate_dynamic_lev=candidate_dynamic_lev,
+                        candidate_dynamic_leverage=candidate_dynamic_lev,
+                        quote_price=quote_price,
                         buy_price=buy_price,
                         stop_price=stop_price,
                     )
-                    if shares < 100:
+                    shares = int(risk_envelope.get("shares", 0) or 0)
+                    max_entry_price = float(
+                        risk_envelope.get("max_entry_price", 0.0) or 0.0
+                    )
+                    record_daytrade_decision(
+                        [item],
+                        decision="entry_risk_resolved",
+                        event_time=server_datetime,
+                        reason=risk_evidence["entry_risk_reason"] or "approved",
+                        breadth=breadth_val,
+                        market_ratio=snapshot.get("market_ratio"),
+                        selected_count=len(selected_candidates),
+                        dynamic_leverage=candidate_dynamic_lev,
+                        shares=shares,
+                        entry_price=buy_price,
+                        is_simulation=is_sim,
+                        entry_risk_evidence=risk_evidence,
+                    )
+                    if (
+                        risk_evidence["entry_risk_status"] != "approved"
+                        or shares < 100
+                        or max_entry_price < buy_price
+                    ):
                         record_daytrade_decision(
                             [item],
                             decision="skipped_size_floor",
                             event_time=server_datetime,
-                            reason="capped_lot_below_100",
+                            reason=(
+                                risk_evidence["entry_risk_reason"]
+                                or "entry_risk_envelope_rejected"
+                            ),
                             breadth=breadth_val,
                             market_ratio=snapshot.get("market_ratio"),
                             selected_count=len(selected_candidates),
@@ -3278,6 +4618,7 @@ def _main_exec():
                             shares=shares,
                             entry_price=buy_price,
                             is_simulation=is_sim,
+                            entry_risk_evidence=risk_evidence,
                         )
                         continue
 
@@ -3308,12 +4649,21 @@ def _main_exec():
                         )
                         opened_count += 1
                     else:
-                        details = broker.execute_chase_order(
-                            item['code'],
-                            shares,
-                            action=StockOrderAction.MARGIN_NEW_LONG,
-                            atr=float(item.get('atr', 0.0)),
-                        )
+                        with order_journal_context(
+                            decision_snapshot_id=item.get("decision_snapshot_id"),
+                            lifecycle_stage="entry",
+                            entry_risk_evidence_schema_version=1,
+                            entry_sizing_price=buy_price,
+                            entry_price_ceiling=max_entry_price,
+                            entry_sizing_shares=shares,
+                        ):
+                            details = broker.execute_chase_order(
+                                item['code'],
+                                shares,
+                                action=StockOrderAction.MARGIN_NEW_LONG,
+                                atr=float(item.get('atr', 0.0)),
+                                max_entry_price=max_entry_price,
+                            )
                         actual_qty = int(details.get("filled_qty", details.get("Qty", 0)) or 0) if isinstance(details, dict) else 0
                         unresolved_entry = bool(isinstance(details, dict) and details.get("unresolved"))
                         if actual_qty > 0:
@@ -3342,6 +4692,9 @@ def _main_exec():
                                 buy_time=datetime.datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S'),
                                 execution_id=execution_id,
                                 execution_ids=execution_ids,
+                                entry_commission=details.get("commission"),
+                                entry_commission_tax=details.get("commission_tax"),
+                                entry_execution_costs_complete=details.get("execution_costs_complete", False),
                             )
                             if isinstance(details, dict) and details.get("unresolved"):
                                 entry_execution_status = details.get("entry_execution_status") or details.get("execution_status") or details.get("unresolved_reason") or "partial_unresolved"
@@ -3390,9 +4743,49 @@ def _main_exec():
                             else:
                                 break
                         elif unresolved_entry:
+                            record_daytrade_decision(
+                                [item],
+                                decision="entry_unresolved",
+                                event_time=server_datetime,
+                                reason=(
+                                    details.get("unresolved_reason")
+                                    or details.get("process_state")
+                                    or "zero_fill_unresolved"
+                                ),
+                                breadth=breadth_val,
+                                market_ratio=snapshot.get("market_ratio"),
+                                selected_count=len(selected_candidates),
+                                dynamic_leverage=candidate_dynamic_lev,
+                                shares=0,
+                                entry_price=None,
+                                is_simulation=False,
+                            )
                             actions_taken.append(f"BUY {item['code']} - Daytrade entry unresolved (no fill)")
                             entry_flow_halted = True
                             break
+                        else:
+                            rejection_reason = (
+                                details.get("rejection_reason")
+                                or details.get("terminal_reason")
+                                or details.get("process_state")
+                                or "no_fill_terminal"
+                            ) if isinstance(details, dict) else "invalid_order_result"
+                            record_daytrade_decision(
+                                [item],
+                                decision="entry_rejected",
+                                event_time=server_datetime,
+                                reason=rejection_reason,
+                                breadth=breadth_val,
+                                market_ratio=snapshot.get("market_ratio"),
+                                selected_count=len(selected_candidates),
+                                dynamic_leverage=candidate_dynamic_lev,
+                                shares=0,
+                                entry_price=None,
+                                is_simulation=False,
+                            )
+                            actions_taken.append(
+                                f"BUY {item['code']} - Daytrade entry rejected ({rejection_reason})"
+                            )
 
                     if is_sim:
                         broker.save_portfolio(portfolio)
@@ -3410,6 +4803,20 @@ def _main_exec():
             "margin_buying_power_yen": _resolve_live_buying_power(account, "margin_buying_power") if not is_sim else None,
             "stock_buying_power_yen": _resolve_live_buying_power(account, "stock_buying_power") if not is_sim else None,
             "realized_pnl_today": float(account.get("realized_pnl_today", 0.0) or 0.0),
+            "risk_capital_pnl_today": float(account.get("risk_capital_pnl_today", 0.0) or 0.0),
+            "configured_risk_capital": float(account.get("configured_risk_capital", 0.0) or 0.0),
+            "risk_capital_asof_date": account.get("risk_capital_asof_date") if not is_sim else None,
+            "risk_capital_evidence_complete": (
+                bool(account.get("risk_capital_evidence_complete")) if not is_sim else None
+            ),
+            "risk_capital_evidence_reasons": list(
+                account.get("risk_capital_evidence_reasons") or ()
+            ),
+            "realized_pnl_trade_date": account.get("realized_pnl_trade_date") if not is_sim else None,
+            "realized_pnl_evidence_complete": (
+                bool(account.get("realized_pnl_evidence_complete")) if not is_sim else None
+            ),
+            "realized_pnl_evidence_reasons": list(account.get("realized_pnl_evidence_reasons") or ()),
             "regime": regime
         }
         if hasattr(broker, 'log_execution_summary'):

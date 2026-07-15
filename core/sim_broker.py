@@ -105,7 +105,14 @@ class SimulationBroker(BaseBroker):
             "pnl": gross_pnl
         }
 
-    def execute_chase_order(self, code: str, shares: int, action: StockOrderAction, atr: float = 0) -> str:
+    def execute_chase_order(
+        self,
+        code: str,
+        shares: int,
+        action: StockOrderAction,
+        atr: float = 0,
+        max_entry_price: float | None = None,
+    ) -> str:
         """ シミュレーションでは追従せず、成行注文として即時決済する(互換性維持) """
         # 成行注文としてスリッページを適用
         return self.execute_market_order(code, shares, action)

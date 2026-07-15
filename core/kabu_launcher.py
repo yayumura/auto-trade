@@ -247,6 +247,14 @@ def ensure_kabu_station_running():
         send_discord_notify(msg)
         return _wait_for_manual_login_and_api(timeout_mins=5)
 
+def _describe_api_readiness_failure(*, port_reachable: bool, api_password_ready: bool) -> str:
+    if not port_reachable:
+        return "api_port_not_listening"
+    if not api_password_ready:
+        return "api_password_missing"
+    return "api_token_authentication_failed"
+
+
 def _wait_for_manual_login_and_api(timeout_mins=5):
     """ユーザーが手動でログインを完了し、APIサーバーが立ち上がるのを待つ"""
     print(f"⏳ ログイン完了（およびAPI認証の完了）を待機しています（最長{timeout_mins}分）...")
@@ -257,8 +265,25 @@ def _wait_for_manual_login_and_api(timeout_mins=5):
         if is_api_authenticated_ready(timeout_sec=10, silent=True):
             return True
         time.sleep(5)
-    
-    print(f"❌ {timeout_mins}分以内にログインが確認できませんでした。")
+
+    port_reachable = is_api_port_reachable(timeout_sec=2, silent=True)
+    failure_reason = _describe_api_readiness_failure(
+        port_reachable=port_reachable,
+        api_password_ready=not is_placeholder_secret(KABUCOM_API_PASSWORD),
+    )
+    if failure_reason == "api_port_not_listening":
+        print(
+            f"❌ {timeout_mins}分以内にAPIポートが起動しませんでした。"
+            "kabuステーション右上の </> を右クリックし、APIシステム設定で"
+            "「APIを利用する」とAPIパスワードを設定してから、kabuステーションを再起動してください。"
+        )
+    elif failure_reason == "api_password_missing":
+        print("❌ APIポートは起動していますが、KABUCOM_API_PASSWORD が未設定です。")
+    else:
+        print(
+            "❌ APIポートは起動していますが、token認証に失敗しました。"
+            "KABUCOM_API_PASSWORD とkabuステーションのAPIシステム設定を照合してください。"
+        )
     return False
 
 def _wait_for_api_server(timeout_sec=60, silent=False):

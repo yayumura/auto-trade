@@ -20,7 +20,7 @@ from core.config import (
     TAX_RATE,
 )
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
-from jp_backtest import WARMUP_START, _refresh_cache_if_requested, _summarize_window
+from jp_backtest import FROZEN_HOLDOUT_START, WARMUP_START, _refresh_cache_if_requested, _summarize_window
 
 
 def parse_args():
@@ -86,6 +86,39 @@ def parse_args():
 
 def _normalize_day_keys(timeline):
     return [pd.Timestamp(ts).strftime("%Y-%m-%d") for ts in timeline]
+
+
+def _truncate_replay_before_frozen_holdout(timeline, bundle_np, breadth_series):
+    frozen_start = pd.Timestamp(FROZEN_HOLDOUT_START).normalize()
+    keep_mask = np.asarray(pd.DatetimeIndex(timeline).normalize() < frozen_start)
+    keep_count = int(keep_mask.sum())
+    if keep_count <= 0:
+        raise ValueError(
+            f"No replay data exists before frozen holdout start {FROZEN_HOLDOUT_START}."
+        )
+    if not bool(keep_mask[:keep_count].all()) or bool(keep_mask[keep_count:].any()):
+        raise ValueError("Timeline must be sorted before applying the frozen holdout boundary.")
+
+    original_count = len(timeline)
+    truncated_bundle = {
+        key: (
+            value[:keep_count]
+            if isinstance(value, np.ndarray)
+            and value.ndim >= 1
+            and value.shape[0] == original_count
+            else value
+        )
+        for key, value in bundle_np.items()
+    }
+    return (
+        timeline[:keep_count],
+        truncated_bundle,
+        np.asarray(breadth_series)[:keep_count],
+    )
+
+
+def _resolve_production_univ_indices(prepared):
+    return np.asarray(prepared.get("univ_indices", []), dtype=int)
 
 
 def _resolve_day_index(day_keys):
@@ -346,15 +379,16 @@ def run_jp_walkforward(
     bundle_np = prepared["bundle_np"]
     timeline = prepared["timeline"]
     breadth_series = prepared["breadth_series"]
-    tickers = list(bundle_np.get("tickers", []))
-    univ_indices = np.array(
-        [
-            idx
-            for idx, ticker in enumerate(tickers)
-            if str(ticker).endswith(".T") and ticker not in {"1306.T", "1321.T"}
-        ],
-        dtype=int,
+    timeline, bundle_np, breadth_series = _truncate_replay_before_frozen_holdout(
+        timeline,
+        bundle_np,
+        breadth_series,
     )
+    print(
+        f"FROZEN ANALYSIS WINDOW: through {pd.Timestamp(timeline[-1]).date()} "
+        f"(excludes {FROZEN_HOLDOUT_START} onward)"
+    )
+    univ_indices = _resolve_production_univ_indices(prepared)
 
     if "1321.T" in bundle["Close"].columns:
         print("1321.T Found and Normalized.")

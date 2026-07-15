@@ -1,8 +1,14 @@
 import unittest
 
+import numpy as np
 import pandas as pd
 
-from jp_walkforward import _aggregate_holdout_summaries, _build_walkforward_windows
+from jp_walkforward import (
+    _aggregate_holdout_summaries,
+    _build_walkforward_windows,
+    _truncate_replay_before_frozen_holdout,
+    _resolve_production_univ_indices,
+)
 
 
 class TestJpWalkforwardWindowing(unittest.TestCase):
@@ -37,6 +43,30 @@ class TestJpWalkforwardWindowing(unittest.TestCase):
                 },
             ],
         )
+
+    def test_truncate_replay_excludes_frozen_holdout_from_analysis(self):
+        timeline = pd.bdate_range("2026-01-08", "2026-01-15")
+        bundle_np = {
+            "Open": np.arange(len(timeline) * 2).reshape(len(timeline), 2),
+            "tickers": ["1000.T", "1321.T"],
+        }
+        breadth = np.linspace(0.4, 0.8, len(timeline))
+
+        truncated_timeline, truncated_bundle, truncated_breadth = (
+            _truncate_replay_before_frozen_holdout(timeline, bundle_np, breadth)
+        )
+
+        self.assertEqual(str(truncated_timeline[-1].date()), "2026-01-12")
+        self.assertEqual(truncated_bundle["Open"].shape[0], len(truncated_timeline))
+        self.assertEqual(len(truncated_breadth), len(truncated_timeline))
+        self.assertEqual(truncated_bundle["tickers"], bundle_np["tickers"])
+
+    def test_walkforward_uses_prepared_production_universe(self):
+        prepared = {"univ_indices": np.array([1, 7, 11], dtype=np.int64)}
+
+        resolved = _resolve_production_univ_indices(prepared)
+
+        np.testing.assert_array_equal(resolved, prepared["univ_indices"])
 
     def test_aggregate_holdout_summaries_rolls_up_window_level_metrics(self):
         window_results = [
