@@ -22,7 +22,12 @@ from core.kabucom_broker import (
 )
 from core.kabucom_broker import BrokerEndpointConfig
 from core.kabucom_broker import BrokerEnvironment
-from core.kabu_launcher import _wait_for_api_server, check_api_health
+from core.kabu_launcher import (
+    _describe_api_readiness_failure,
+    _wait_for_api_server,
+    _wait_for_manual_login_and_api,
+    check_api_health,
+)
 from core.kabucom_order_state import (
     CancelResult,
     CancelStatus,
@@ -143,6 +148,7 @@ def _valid_board_payload(price=1000.0):
         "LowPrice": price - 10.0,
         "TradingVolume": 1_000_000,
         "PreviousClose": price - 2.0,
+        "PreviousCloseTime": "2026-07-10T00:00:00+09:00",
         "UpperLimit": price + 300.0,
         "LowerLimit": price - 300.0,
     }
@@ -189,8 +195,8 @@ def _write_jpx_calendar_artifact(tmpdir: str, payload: dict[str, object]) -> Pat
 
 def _make_jpx_calendar_payload(
     *,
-    source_url: str | None = "https://example.com/jpx_trading_calendar.json",
-    source_hash: str | None = "sha256:jpx-calendar",
+    source_url: str | None = "https://www.jpx.co.jp/corporate/about-jpx/calendar/index.html",
+    source_hash: str | None = "sha256:" + ("a" * 64),
     generated_at: str | None = None,
     coverage_start: str | None = None,
     coverage_end: str | None = None,
@@ -315,6 +321,23 @@ def _build_live_write_attestation_artifact_source_responses(
 
 
 class TestKabucomBroker(unittest.TestCase):
+    def setUp(self):
+        self._journal_tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._journal_tmpdir.cleanup)
+        self._journal_path = str(
+            Path(self._journal_tmpdir.name) / "broker_order_journal.jsonl"
+        )
+
+        def append_test_journal(event, path=None):
+            return append_order_journal(event, path=path or self._journal_path)
+
+        self._journal_patcher = patch(
+            "core.kabucom_broker.append_order_journal",
+            side_effect=append_test_journal,
+        )
+        self._journal_patcher.start()
+        self.addCleanup(self._journal_patcher.stop)
+
     def test_broker_endpoint_config_rejects_mismatched_environment_and_port(self):
         with self.assertRaises(ValueError):
             BrokerEndpointConfig(BrokerEnvironment.LIVE, 18081).validate()
@@ -530,6 +553,7 @@ class TestKabucomBroker(unittest.TestCase):
                 "BidTime": "2026-04-21T09:00:58",
                 "AskTime": "2026-04-21T09:00:59",
                 "OpeningPriceTime": "2026-04-21T09:00:00",
+                "PreviousCloseTime": "2026-04-20T00:00:00+09:00",
                 "ReceivedAt": "2026-04-21T09:01:01",
             },
         )
@@ -542,6 +566,7 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(quote.bid_timestamp.isoformat(), "2026-04-21T09:00:58")
         self.assertEqual(quote.ask_timestamp.isoformat(), "2026-04-21T09:00:59")
         self.assertEqual(quote.opening_price_timestamp.isoformat(), "2026-04-21T09:00:00")
+        self.assertEqual(quote.previous_close_timestamp.isoformat(), "2026-04-20T00:00:00+09:00")
 
         inverted = parse_board_quote(
             "1234",
@@ -2468,8 +2493,16 @@ class TestKabucomBroker(unittest.TestCase):
     def test_live_financial_write_gate_blocks_when_jpx_calendar_source_is_missing_in_live_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture_path, attestation_path, _ = _write_live_write_attestation_artifact(tmpdir)
-            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, clear=False), \
-                patch("core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"):
+            with patch.dict(os.environ, {"KABUCOM_LIVE_OPERATOR_ACK": "true"}, clear=False), patch(
+                "core.live_order_gate.TRADE_MODE", "KABUCOM_LIVE"
+            ), patch(
+                "core.live_order_gate.get_jpx_trading_day_status",
+                return_value=SimpleNamespace(
+                    source_ready=False,
+                    trading_day=False,
+                    source_reason="jpx_calendar_missing",
+                ),
+            ):
                 status = get_kabucom_live_financial_write_gate_status(
                     base_gate_status=SimpleNamespace(
                         allowed=True,
@@ -2556,6 +2589,9 @@ class TestKabucomBroker(unittest.TestCase):
             )
             cases = [
                 ("invalid_json", "{ not json", "jpx_calendar_invalid"),
+                ("untrusted_source_url", {**base_payload, "source_url": "https://example.com/calendar"}, "jpx_calendar_invalid"),
+                ("insecure_source_url", {**base_payload, "source_url": "http://www.jpx.co.jp/corporate/about-jpx/calendar/index.html"}, "jpx_calendar_invalid"),
+                ("malformed_source_hash", {**base_payload, "source_hash": "sha256:not-a-digest"}, "jpx_calendar_invalid"),
                 ("missing_source_hash", {**base_payload, "source_hash": None}, "jpx_calendar_invalid"),
                 ("missing_generated_at", {**base_payload, "generated_at": None}, "jpx_calendar_invalid"),
                 ("missing_coverage_start", {**base_payload, "coverage_start": None}, "jpx_calendar_invalid"),
@@ -2871,6 +2907,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-1",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -2952,6 +2989,43 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(journal_events[1]["hold_ids"], ["HOLD-1"])
         self.assertEqual(journal_events[2]["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
         self.assertEqual(journal_events[2]["route_resolution_stage"], "fallback_single_hold")
+        self.assertEqual(journal_events[3]["event"], "ACCEPTED")
+        self.assertTrue(journal_events[3]["confirmed"])
+        self.assertEqual(journal_events[3]["confirmation_evidence_schema_version"], 1)
+        evidence = journal_events[3]["confirmation_details"]
+        self.assertEqual(evidence["response_shape_version"], 2)
+        self.assertEqual(evidence["requested_order_id"], "STOP-1")
+        self.assertEqual(evidence["order_id"], "STOP-1")
+        self.assertEqual(evidence["symbol"], "1234")
+        self.assertEqual(evidence["process_state"], "active")
+        self.assertEqual(evidence["order_qty"], 100)
+        self.assertEqual(evidence["remaining_qty"], 100)
+        self.assertEqual(evidence["side"], "1")
+        self.assertEqual(evidence["trigger_price"], 3000.0)
+        self.assertEqual(evidence["reverse_limit"]["UnderOver"], 1)
+        self.assertEqual(evidence["close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
+        self.assertEqual(evidence["mismatch_reason"], "confirmed")
+    def test_confirm_stop_order_fails_closed_when_orders_evidence_lacks_symbol(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.get_order_details = lambda order_id: {"OrderId": order_id}
+
+        confirmed, reason, evidence = broker._confirm_stop_order_submission(
+            order_id="STOP-1",
+            expected_symbol="1234",
+            expected_qty=100,
+            expected_trigger_price=3000.0,
+            expected_close_positions=[{"HoldID": "HOLD-1", "Qty": 100}],
+            side="1",
+            exchange=1,
+            margin_trade_type=3,
+        )
+
+        self.assertFalse(confirmed)
+        self.assertEqual(reason, "stop_order_symbol_mismatch")
+        self.assertEqual(evidence["response_shape_version"], 2)
+        self.assertEqual(evidence["order_id"], "STOP-1")
+        self.assertIsNone(evidence["symbol"])
+
 
     def test_execute_market_order_writes_order_journal(self):
         journal_events = []
@@ -3037,6 +3111,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-1",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -3111,6 +3186,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-MULTI",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -3197,6 +3273,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-FALLBACK",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -3258,6 +3335,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-FALLBACK",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -3315,7 +3393,7 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["json"]["ClosePositions"], [{"HoldID": "HOLD-1", "Qty": 100}])
         summary = journal_events[-1]["confirmation_details"]
         self.assertIsInstance(summary, dict)
-        self.assertEqual(summary["response_shape_version"], 1)
+        self.assertEqual(summary["response_shape_version"], 2)
         self.assertEqual(summary["mismatch_reason"], "stop_order_close_positions_mismatch")
         self.assertEqual(summary["expected_close_positions"], [{"HoldID": "HOLD-1", "Qty": 100}])
         self.assertEqual(summary["close_positions"], [{"HoldID": "HOLD-1", "Qty": 50}])
@@ -3351,6 +3429,7 @@ class TestKabucomBroker(unittest.TestCase):
         stop_details = [
             {
                 "OrderId": "STOP-2",
+                "Symbol": "1234",
                 "State": 3,
                 "OrderQty": 100,
                 "CumQty": 0,
@@ -3410,6 +3489,73 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(journal_events[0]["route_resolution_stage"], "pre_resolution")
         self.assertEqual(journal_events[0]["route_resolution_reason"], "missing_close_route")
         self.assertIsNone(journal_events[0]["close_positions"])
+
+    def test_execute_chase_order_rejects_new_entry_without_price_ceiling(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._submit_market_order = lambda *args, **kwargs: self.fail(
+            "entry without a risk ceiling must not reach order submission"
+        )
+        journal_events = []
+
+        with patch(
+            "core.kabucom_broker.append_order_journal",
+            side_effect=lambda event, path=None: journal_events.append(event),
+        ):
+            result = broker.execute_chase_order(
+                "1234",
+                100,
+                action=StockOrderAction.MARGIN_NEW_LONG,
+                atr=10.0,
+            )
+
+        self.assertEqual(
+            result["rejection_reason"],
+            "invalid_entry_price_ceiling",
+        )
+        self.assertEqual(
+            result["process_state"],
+            OrderProcessState.TERMINAL.value,
+        )
+        self.assertFalse(result["unresolved"])
+        self.assertEqual(journal_events[0]["event"], "REJECTED")
+
+    def test_execute_chase_order_blocks_quote_above_entry_price_ceiling(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.get_board_data = lambda symbols: {
+            "1234": {
+                "price": 100.0,
+                "current_price": 100.0,
+                "best_sell_price": 101.0,
+                "best_buy_price": 99.0,
+                "upper_limit": 200.0,
+                "lower_limit": 50.0,
+            }
+        }
+        broker._submit_market_order = lambda *args, **kwargs: self.fail(
+            "quote above the risk ceiling must not reach order submission"
+        )
+        journal_events = []
+
+        with patch("core.kabucom_broker.time.sleep", return_value=None), patch(
+            "core.kabucom_broker.append_order_journal",
+            side_effect=lambda event, path=None: journal_events.append(event),
+        ):
+            result = broker.execute_chase_order(
+                "1234",
+                100,
+                action=StockOrderAction.MARGIN_NEW_LONG,
+                atr=10.0,
+                max_entry_price=100.0,
+            )
+
+        self.assertEqual(
+            result["rejection_reason"],
+            "entry_price_ceiling_exceeded",
+        )
+        self.assertEqual(result["remaining_qty"], 100)
+        self.assertFalse(result["unresolved"])
+        self.assertEqual(journal_events[0]["price"], 101.0)
+
 
     def test_execute_chase_order_stops_after_unknown_submission_without_forcing_second_order(self):
         call_args = []
@@ -3523,8 +3669,8 @@ class TestKabucomBroker(unittest.TestCase):
             "OrderQty": 100,
             "CumQty": 100,
             "Details": [
-                {"RecType": 8, "State": 5, "Qty": 60, "Price": 1000.0, "ExecutionID": "EX-1"},
-                {"RecType": 8, "State": 5, "Qty": 40, "Price": 1001.0, "ExecutionID": "EX-2"},
+                {"RecType": 8, "State": 5, "Qty": 60, "Price": 1000.0, "ExecutionID": "EX-1", "Commission": 10.0, "CommissionTax": 1.0},
+                {"RecType": 8, "State": 5, "Qty": 40, "Price": 1001.0, "ExecutionID": "EX-2", "Commission": 20.0, "CommissionTax": 2.0},
             ],
         }
 
@@ -3542,9 +3688,22 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertFalse(result["unresolved"])
         self.assertEqual(result["execution_status"], "completed")
         self.assertEqual(result["exit_execution_status"], "completed")
+        self.assertTrue(result["execution_costs_complete"])
+        self.assertEqual(result["commission"], 30.0)
+        self.assertEqual(result["commission_tax"], 3.0)
         filled_event = next(event for event in journal_events if event.get("event") == "FILLED")
         self.assertEqual(filled_event["execution_ids"], ("EX-1", "EX-2"))
         self.assertEqual(filled_event["execution_id"], "EX-1")
+        self.assertEqual(filled_event["order_ids"], ("ORDER-1",))
+        self.assertEqual(filled_event["execution_evidence_schema_version"], 1)
+        self.assertTrue(filled_event["aggregate_execution"])
+        self.assertEqual(filled_event["requested_qty"], 100)
+        self.assertEqual(filled_event["filled_qty"], 100)
+        self.assertEqual(filled_event["remaining_qty"], 0)
+        self.assertAlmostEqual(filled_event["average_fill_price"], 1000.4)
+        self.assertTrue(filled_event["execution_costs_complete"])
+        self.assertEqual(filled_event["commission"], 30.0)
+        self.assertEqual(filled_event["commission_tax"], 3.0)
 
     def test_wait_for_execution_returns_unresolved_partial_fill_after_timeout(self):
         details_iter = iter([
@@ -3584,6 +3743,40 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertAlmostEqual(legacy["Price"], (25 * 1000.0 + 15 * 1010.0) / 40)
         self.assertEqual(legacy["execution_status"], "partial_unresolved")
         self.assertEqual(legacy["entry_execution_status"], "partial_unresolved")
+
+    def test_execution_wait_result_preserves_actual_commission_tax_and_time(self):
+        broker = _make_broker(_FakeSession([]))
+        details = {
+            "OrderId": "ORDER-COST",
+            "State": 5,
+            "OrderQty": 100,
+            "CumQty": 100,
+            "Details": [
+                {
+                    "RecType": 8, "State": 5, "Qty": 60, "Price": 1000.0,
+                    "ExecutionID": "EX-C1", "TransactTime": "2026-07-14T09:01:02+09:00",
+                    "Commission": 10.0, "CommissionTax": 1.0,
+                },
+                {
+                    "RecType": 8, "State": 5, "Qty": 40, "Price": 1001.0,
+                    "ExecutionID": "EX-C2", "TransactTime": "2026-07-14T09:01:03+09:00",
+                    "Commission": 20.0, "CommissionTax": 2.0,
+                },
+            ],
+        }
+
+        result = broker._build_wait_result(details, order_id="ORDER-COST")
+
+        self.assertTrue(result.execution_costs_complete)
+        self.assertEqual(result.commission, 30.0)
+        self.assertEqual(result.commission_tax, 3.0)
+        self.assertEqual(result.fills[0].executed_at.isoformat(), "2026-07-14T09:01:02+09:00")
+        legacy = result.to_legacy_dict(symbol="1234", side="2")
+        self.assertTrue(legacy["execution_costs_complete"])
+        self.assertEqual(legacy["commission"], 30.0)
+        self.assertEqual(legacy["commission_tax"], 3.0)
+        self.assertEqual(legacy["Details"][1]["CommissionTax"], 2.0)
+
 
     def test_wait_for_execution_marks_unknown_state_as_unresolved(self):
         details_iter = iter([
@@ -3706,6 +3899,9 @@ class TestKabucomBroker(unittest.TestCase):
                 "ExecutionID": "EX-1",
                 "Exchange": 1,
                 "MarginTradeType": 3,
+                "Expenses": 4.0,
+                "Commission": 12.0,
+                "CommissionTax": 1.2,
             }
         ])
 
@@ -3738,6 +3934,9 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(positions[0]["decision_snapshot_id"], "snapshot-1")
         self.assertEqual(positions[0]["protective_stop_order_id"], "STOP-1")
         self.assertEqual(positions[0]["protective_stop_status"], "armed")
+        self.assertEqual(positions[0]["broker_position_expenses"], 4.0)
+        self.assertEqual(positions[0]["broker_position_commission"], 12.0)
+        self.assertEqual(positions[0]["broker_position_commission_tax"], 1.2)
 
     def test_get_positions_live_marks_managed_by_bot_using_any_execution_id_in_execution_ids(self):
         broker = _make_broker(_FakeSession([]))
@@ -4012,6 +4211,41 @@ class TestKabucomBroker(unittest.TestCase):
             patch("core.kabu_launcher.time.monotonic", side_effect=[0.0, 0.01, 3.0, 3.01, 5.5]):
             self.assertFalse(check_api_health())
 
+    def test_api_readiness_failure_distinguishes_disabled_port_from_password_failure(self):
+        self.assertEqual(
+            _describe_api_readiness_failure(port_reachable=False, api_password_ready=True),
+            "api_port_not_listening",
+        )
+        self.assertEqual(
+            _describe_api_readiness_failure(port_reachable=True, api_password_ready=False),
+            "api_password_missing",
+        )
+        self.assertEqual(
+            _describe_api_readiness_failure(port_reachable=True, api_password_ready=True),
+            "api_token_authentication_failed",
+        )
+
+    def test_manual_api_wait_reports_api_system_setting_when_port_is_not_listening(self):
+        output = io.StringIO()
+        with patch("core.kabu_launcher.is_api_port_reachable", return_value=False), \
+            patch("core.kabu_launcher.KABUCOM_API_PASSWORD", "configured-secret"), \
+            patch("sys.stdout", output):
+            self.assertFalse(_wait_for_manual_login_and_api(timeout_mins=0))
+
+        message = output.getvalue()
+        self.assertIn("APIポートが起動しませんでした", message)
+        self.assertIn("APIシステム設定", message)
+        self.assertIn("APIを利用する", message)
+
+    def test_manual_api_wait_reports_token_authentication_failure_when_port_is_ready(self):
+        output = io.StringIO()
+        with patch("core.kabu_launcher.is_api_port_reachable", return_value=True), \
+            patch("core.kabu_launcher.KABUCOM_API_PASSWORD", "configured-secret"), \
+            patch("sys.stdout", output):
+            self.assertFalse(_wait_for_manual_login_and_api(timeout_mins=0))
+
+        self.assertIn("token認証に失敗しました", output.getvalue())
+
     def test_get_server_time_uses_wallet_date_header_instead_of_symbol_endpoint(self):
         broker = _make_broker(_FakeSession([]))
 
@@ -4025,6 +4259,30 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(getattr(current_time.tzinfo, "key", None), "Asia/Tokyo")
         self.assertEqual(current_time.hour, 9)
         self.assertEqual(current_time.day, 21)
+        self.assertTrue(broker.last_server_time_evidence["verified"])
+        self.assertEqual(broker.last_server_time_evidence["source"], "wallet_cash_date_header")
+        self.assertEqual(broker.last_server_time_evidence["reason"], "verified")
+
+    def test_get_server_time_marks_local_fallback_unverified_when_date_header_is_missing(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {"StockAccountWallet": 0.0})
+
+        current_time = broker.get_server_time()
+
+        self.assertEqual(getattr(current_time.tzinfo, "key", None), "Asia/Tokyo")
+        self.assertFalse(broker.last_server_time_evidence["verified"])
+        self.assertEqual(broker.last_server_time_evidence["source"], "local_clock_fallback")
+        self.assertEqual(broker.last_server_time_evidence["reason"], "wallet_cash_date_header_missing")
+
+    def test_get_server_time_marks_local_fallback_unverified_without_token(self):
+        broker = _make_broker(_FakeSession([]))
+        broker.token = None
+
+        current_time = broker.get_server_time()
+
+        self.assertEqual(getattr(current_time.tzinfo, "key", None), "Asia/Tokyo")
+        self.assertFalse(broker.last_server_time_evidence["verified"])
+        self.assertEqual(broker.last_server_time_evidence["reason"], "token_unavailable")
 
     def test_log_trade_appends_rows_instead_of_overwriting_history(self):
         broker = _make_broker(_FakeSession([]))
@@ -4081,7 +4339,59 @@ class TestKabucomBroker(unittest.TestCase):
         self.assertEqual(captured["metadata"]["broker_product"], "simulation")
 
 
-if __name__ == "__main__":
+class TestKabucomBoardBatch(unittest.TestCase):
+    def test_register_symbols_requires_complete_registry_confirmation(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"RegistList": [{"Symbol": "1000"}, {"Symbol": "2000"}]},
+        )
+
+        self.assertTrue(broker.register_symbols(["2000.T", "1000", "1000.T"]))
+
+    def test_register_symbols_fails_closed_on_partial_registry_confirmation(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"RegistList": [{"Symbol": "1000"}]},
+        )
+
+        self.assertFalse(broker.register_symbols(["1000", "2000"]))
+
+    def test_register_symbols_rejects_more_than_total_registry_capacity(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("over-capacity request must not reach API")
+        )
+
+        symbols = [str(1000 + index) for index in range(51)]
+        self.assertFalse(broker.register_symbols(symbols))
+
+    def test_unregister_symbols_requires_requested_codes_to_be_absent(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"RegistList": [{"Symbol": "1321"}]},
+        )
+
+        self.assertTrue(broker.unregister_symbols(["1000.T", "2000"]))
+
+    def test_unregister_symbols_fails_closed_when_code_remains_registered(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(
+            200,
+            {"RegistList": [{"Symbol": "1321"}, {"Symbol": "2000"}]},
+        )
+
+        self.assertFalse(broker.unregister_symbols(["1000", "2000"]))
+
+    def test_registry_mutation_rejects_malformed_success_response(self):
+        broker = _make_broker(_FakeSession([]))
+        broker._api_request = lambda *args, **kwargs: _FakeResponse(200, {})
+
+        self.assertFalse(broker.register_symbols(["1000"]))
+        self.assertFalse(broker.unregister_symbols(["1000"]))
+
     def test_get_board_snapshot_batch_returns_all_successes_and_preserves_pacing(self):
         broker = _make_broker(_FakeSession([]))
         calls = []
@@ -4195,4 +4505,5 @@ if __name__ == "__main__":
         self.assertEqual(legacy["1000"]["open"], 995.0)
 
 
+if __name__ == "__main__":
     unittest.main()

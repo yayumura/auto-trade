@@ -54,6 +54,7 @@ class BoardQuote:
     bid_timestamp: datetime | None
     ask_timestamp: datetime | None
     opening_price_timestamp: datetime | None
+    previous_close_timestamp: datetime | None
     received_at: datetime | None
     bid_sign_raw: str | None
     ask_sign_raw: str | None
@@ -75,6 +76,8 @@ class BoardQuote:
             payload["ask_timestamp"] = payload["ask_timestamp"].isoformat()
         if payload.get("opening_price_timestamp") is not None:
             payload["opening_price_timestamp"] = payload["opening_price_timestamp"].isoformat()
+        if payload.get("previous_close_timestamp") is not None:
+            payload["previous_close_timestamp"] = payload["previous_close_timestamp"].isoformat()
         if payload.get("received_at") is not None:
             payload["received_at"] = payload["received_at"].isoformat()
         return payload
@@ -95,6 +98,7 @@ def parse_board_quote(symbol: str, raw: Mapping[str, Any]) -> BoardQuote:
     bid_timestamp = _parse_time_like(raw.get("BidTime"))
     ask_timestamp = _parse_time_like(raw.get("AskTime"))
     opening_price_timestamp = _parse_time_like(raw.get("OpeningPriceTime"))
+    previous_close_timestamp = _parse_time_like(raw.get("PreviousCloseTime"))
     bid_sign_raw = raw.get("BidSign")
     ask_sign_raw = raw.get("AskSign")
 
@@ -122,6 +126,7 @@ def parse_board_quote(symbol: str, raw: Mapping[str, Any]) -> BoardQuote:
         bid_timestamp=bid_timestamp,
         ask_timestamp=ask_timestamp,
         opening_price_timestamp=opening_price_timestamp,
+        previous_close_timestamp=previous_close_timestamp,
         received_at=received_at,
         bid_sign_raw=str(bid_sign_raw) if bid_sign_raw is not None else None,
         ask_sign_raw=str(ask_sign_raw) if ask_sign_raw is not None else None,

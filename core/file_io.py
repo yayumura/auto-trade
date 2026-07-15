@@ -79,7 +79,34 @@ def append_csv_rows(path, rows):
     os.makedirs(dir_name, exist_ok=True)
     df = pd.DataFrame(rows)
     write_header = (not os.path.exists(path)) or os.path.getsize(path) == 0
-    df.to_csv(path, mode='a', index=False, header=write_header, encoding='utf-8-sig')
+    if write_header:
+        df.to_csv(path, mode='a', index=False, header=True, encoding='utf-8-sig')
+        return
+
+    existing_columns = list(pd.read_csv(path, nrows=0, encoding='utf-8-sig').columns)
+    incoming_columns = list(df.columns)
+    merged_columns = existing_columns + [
+        column for column in incoming_columns if column not in existing_columns
+    ]
+    if merged_columns == existing_columns:
+        df.reindex(columns=existing_columns).to_csv(
+            path,
+            mode='a',
+            index=False,
+            header=False,
+            encoding='utf-8-sig',
+        )
+        return
+
+    existing_df = pd.read_csv(path, encoding='utf-8-sig')
+    migrated = pd.concat(
+        [
+            existing_df.reindex(columns=merged_columns),
+            df.reindex(columns=merged_columns),
+        ],
+        ignore_index=True,
+    )
+    atomic_write_csv(path, migrated)
 
 @retry_io()
 def append_jsonl(path, record):

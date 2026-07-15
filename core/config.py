@@ -149,6 +149,8 @@ def build_runtime_live_order_config_snapshot() -> dict:
     """ライブ新規注文の承認対象になる実行設定のスナップショットを作る。"""
     return {
         "TRADE_MODE": TRADE_MODE,
+        "GEMINI_MODEL": GEMINI_MODEL,
+        "GROQ_MODEL": GROQ_MODEL,
         "DEBUG_MODE": DEBUG_MODE,
         "USE_COMPOUNDING": USE_COMPOUNDING,
         "INITIAL_CASH": INITIAL_CASH,

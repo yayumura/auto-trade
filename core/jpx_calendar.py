@@ -5,7 +5,9 @@ from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import jpholiday
 
@@ -14,6 +16,9 @@ from core.config import JST
 
 JPX_TRADING_CALENDAR_PATH = Path(__file__).resolve().parents[1] / "contracts" / "jpx_trading_calendar.json"
 JPX_CALENDAR_MAX_AGE_DAYS = 370
+JPX_CALENDAR_SOURCE_URL = "https://www.jpx.co.jp/corporate/about-jpx/calendar/index.html"
+_JPX_SOURCE_HASH_PATTERN = re.compile(r"sha256:[0-9a-fA-F]{64}")
+_JPX_SOURCE_PATH = "/corporate/about-jpx/calendar/index.html"
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,27 @@ def _fallback_business_day(trading_date: date) -> bool:
 def _normalize_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _is_authoritative_jpx_source_url(value: Any) -> bool:
+    source_url = _normalize_text(value)
+    if source_url is None:
+        return False
+    try:
+        parsed = urlparse(source_url)
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() in {"jpx.co.jp", "www.jpx.co.jp"}
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path.rstrip("/") == _JPX_SOURCE_PATH.rstrip("/")
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def _parse_calendar_date(value: Any) -> date | None:
@@ -336,7 +362,11 @@ def get_jpx_trading_day_status(
             used_fallback=True,
         )
 
-    if require_source and not payload.source_url_explicit:
+    if require_source and (
+        not payload.source_url_explicit
+        or not _is_authoritative_jpx_source_url(payload.calendar.get("source_url"))
+        or _JPX_SOURCE_HASH_PATTERN.fullmatch(str(payload.calendar.get("source_hash") or "")) is None
+    ):
         return JPXTradingDayStatus(
             trading_day=False,
             source_ready=False,

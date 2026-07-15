@@ -13,13 +13,22 @@ import auto_trade
 from auto_trade import (
     build_daytrade_position_record,
     build_daytrade_production_observation_universe,
+    build_daytrade_rotating_discovery_universe,
     build_daytrade_watch_plan,
     close_daytrade_positions_by_signal,
     compute_daytrade_snapshot,
     compute_observed_daytrade_production_snapshot,
+    compute_rotating_daytrade_production_snapshot,
+    ensure_daytrade_month_state,
     is_inverse_only_candidate_set,
+    resolve_runtime_server_clock,
     should_capture_daytrade_production_snapshot,
     sync_daytrade_registry,
+)
+from core.daytrade_opening_discovery import (
+    DaytradeDiscoveryBatchEvidence,
+    DaytradeOpeningDiscoveryResult,
+    DaytradeProtectedBoardEvidence,
 )
 from core.logic import (
     RealtimeBuffer,
@@ -28,6 +37,7 @@ from core.logic import (
 )
 from core.kabucom_order_state import CancelResult, CancelStatus, CancelTerminalStatus
 from core.kabucom_order_state import StockOrderAction
+from core.order_journal import append_order_journal
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +50,23 @@ def isolate_runtime_logs(tmp_path, monkeypatch):
         "DAYTRADE_PRODUCTION_SNAPSHOT_FILE",
         str(tmp_path / "daytrade_production_snapshots.jsonl"),
     )
+
+
+def _server_clock_evidence(timestamp):
+    value = pd.Timestamp(timestamp)
+    return {
+        "schema_version": 1,
+        "verified": True,
+        "source": "wallet_cash_date_header",
+        "reason": "verified",
+        "server_time": value.isoformat(),
+        "received_at": value.isoformat(),
+        "fallback_time": value.isoformat(),
+        "drift_seconds": 0.0,
+        "max_abs_drift_seconds": 30.0,
+    }
+
+
 def _side_from_action(action):
     if action == StockOrderAction.MARGIN_CLOSE_LONG:
         return "1"
@@ -100,6 +127,136 @@ def test_compute_daytrade_snapshot_calculates_breadth_without_name_error():
     assert snapshot["latest_close_map"]["1000"] > 0
 
 
+def test_runtime_server_clock_requires_exact_fresh_broker_evidence_for_live_entry():
+    observed = pd.Timestamp("2026-07-15T09:30:00+09:00").to_pydatetime()
+    broker = SimpleNamespace(
+        get_server_time=lambda: observed,
+        last_server_time_evidence={
+            "schema_version": 1,
+            "verified": True,
+            "source": "wallet_cash_date_header",
+            "reason": "verified",
+            "server_time": observed.isoformat(),
+            "received_at": observed.isoformat(),
+            "fallback_time": observed.isoformat(),
+            "drift_seconds": 0.0,
+        },
+    )
+
+    resolved, verified, evidence = resolve_runtime_server_clock(broker, is_sim=False)
+
+    assert resolved == observed
+    assert verified is True
+    assert evidence["source"] == "wallet_cash_date_header"
+    assert evidence["max_abs_drift_seconds"] == 30.0
+
+
+def test_runtime_server_clock_rejects_local_fallback_and_mismatched_evidence():
+    observed = pd.Timestamp("2026-07-15T09:30:00+09:00").to_pydatetime()
+    fallback_broker = SimpleNamespace(
+        get_server_time=lambda: observed,
+        last_server_time_evidence={
+            "schema_version": 1,
+            "verified": False,
+            "source": "local_clock_fallback",
+            "reason": "wallet_cash_date_header_missing",
+            "server_time": None,
+            "received_at": observed.isoformat(),
+            "fallback_time": observed.isoformat(),
+            "drift_seconds": None,
+        },
+    )
+    mismatch_broker = SimpleNamespace(
+        get_server_time=lambda: observed,
+        last_server_time_evidence={
+            "schema_version": 1,
+            "verified": True,
+            "source": "wallet_cash_date_header",
+            "reason": "verified",
+            "server_time": (observed + pd.Timedelta(minutes=1)).isoformat(),
+            "received_at": observed.isoformat(),
+            "drift_seconds": 60.0,
+        },
+    )
+
+    _, fallback_verified, fallback_evidence = resolve_runtime_server_clock(
+        fallback_broker,
+        is_sim=False,
+    )
+    _, mismatch_verified, mismatch_evidence = resolve_runtime_server_clock(
+        mismatch_broker,
+        is_sim=False,
+    )
+
+    assert fallback_verified is False
+    assert fallback_evidence["reason"] == "wallet_cash_date_header_missing"
+    assert mismatch_verified is False
+    assert mismatch_evidence["verified"] is False
+
+
+def test_runtime_server_clock_rejects_stale_server_date_even_when_evidence_claims_verified():
+    observed = pd.Timestamp("2026-07-15T09:30:00+09:00").to_pydatetime()
+    received_at = observed + pd.Timedelta(seconds=31)
+    broker = SimpleNamespace(
+        get_server_time=lambda: observed,
+        last_server_time_evidence={
+            "schema_version": 1,
+            "verified": True,
+            "source": "wallet_cash_date_header",
+            "reason": "verified",
+            "server_time": observed.isoformat(),
+            "received_at": received_at.isoformat(),
+            "drift_seconds": -31.0,
+        },
+    )
+
+    _, verified, evidence = resolve_runtime_server_clock(broker, is_sim=False)
+
+    assert verified is False
+    assert evidence["verified"] is False
+
+
+def test_daytrade_month_state_initializes_and_does_not_reset_within_same_month():
+    first = ensure_daytrade_month_state(
+        {},
+        1_000_000.0,
+        pd.Timestamp("2026-07-01T09:30:00+09:00"),
+    )
+    same_month = ensure_daytrade_month_state(
+        first,
+        1_250_000.0,
+        pd.Timestamp("2026-07-31T14:00:00+09:00"),
+    )
+
+    assert first["current_month"] == "2026-07"
+    assert first["month_start_equity"] == 1_000_000.0
+    assert same_month["current_month"] == "2026-07"
+    assert same_month["month_start_equity"] == 1_000_000.0
+
+
+def test_daytrade_month_state_rolls_on_verified_server_month_boundary():
+    state = ensure_daytrade_month_state(
+        {"current_month": "2026-07", "month_start_equity": 1_000_000.0},
+        1_180_000.0,
+        pd.Timestamp("2026-08-03T09:30:00+09:00"),
+    )
+
+    assert state["current_month"] == "2026-08"
+    assert state["month_start_equity"] == 1_180_000.0
+
+
+def test_daytrade_month_state_preserves_anchor_for_invalid_equity():
+    original = {"current_month": "2026-07", "month_start_equity": 1_000_000.0}
+
+    state = ensure_daytrade_month_state(
+        original,
+        float("nan"),
+        pd.Timestamp("2026-08-03T09:30:00+09:00"),
+    )
+
+    assert state == original
+
+
 def test_production_observation_universe_uses_prior_liquidity_and_keeps_market_separate():
     data_df = _build_production_snapshot_df()
 
@@ -119,6 +276,118 @@ def test_production_observation_universe_uses_prior_liquidity_and_keeps_market_s
     assert first == second
     assert first == ["1000"]
     assert "1321" not in first
+
+
+def test_live_rotating_discovery_adapter_uses_shared_one_day_selector():
+    data_df = _build_production_snapshot_df()
+    trade_date = data_df.index[-1] + pd.offsets.BDay(1)
+
+    with patch(
+        "auto_trade.select_daytrade_rotating_discovery_codes",
+        return_value=["1000"],
+    ) as shared_selector, patch(
+        "auto_trade.get_prime_tickers",
+        return_value=["1000.T", "1321.T"],
+    ):
+        selected = build_daytrade_rotating_discovery_universe(
+            data_df,
+            trade_date=trade_date,
+            excluded_codes=("9999",),
+        )
+
+    assert selected == ["1000"]
+    kwargs = shared_selector.call_args.kwargs
+    assert kwargs["tickers"] == ["1000.T", "1321.T"]
+    assert kwargs["feature_asof"] == pd.Timestamp(data_df.index[-1]).normalize()
+    assert kwargs["trade_date"] == pd.Timestamp(trade_date).normalize()
+    assert kwargs["excluded_codes"] == ("9999",)
+    assert len(kwargs["close_prev"]) == 2
+    assert len(kwargs["close_prev2"]) == 2
+
+
+def test_live_rotating_discovery_adapter_rejects_non_future_trade_date():
+    data_df = _build_production_snapshot_df()
+    with patch("auto_trade.select_daytrade_rotating_discovery_codes") as shared_selector:
+        selected = build_daytrade_rotating_discovery_universe(
+            data_df,
+            trade_date=data_df.index[-1],
+        )
+
+    assert selected == []
+    shared_selector.assert_not_called()
+
+
+
+def test_rotating_discovery_snapshot_adapter_forwards_one_complete_evidence_contract():
+    codes = tuple(str(2000 + index) for index in range(196))
+    started_at = pd.Timestamp("2026-07-13 09:29:35", tz="Asia/Tokyo")
+    protected_started = pd.Timestamp("2026-07-13 09:29:36", tz="Asia/Tokyo")
+    protected_completed = pd.Timestamp("2026-07-13 09:29:37", tz="Asia/Tokyo")
+    batches = []
+    for batch_index in range(4):
+        requested = codes[batch_index * 49:(batch_index + 1) * 49]
+        batch_started = pd.Timestamp(
+            f"2026-07-13 09:29:{38 + batch_index * 2:02d}",
+            tz="Asia/Tokyo",
+        )
+        batch_completed = batch_started + pd.Timedelta(seconds=1)
+        batches.append(DaytradeDiscoveryBatchEvidence(
+            batch_index=batch_index,
+            requested=requested,
+            register_ok=True,
+            board_requested=requested,
+            observed=requested,
+            failures=(),
+            unregister_ok=True,
+            started_at=batch_started,
+            completed_at=batch_completed,
+        ))
+    completed_at = pd.Timestamp("2026-07-13 09:29:50", tz="Asia/Tokyo")
+    result = DaytradeOpeningDiscoveryResult(
+        requested=codes,
+        observations={code: {"open": 100.0} for code in (*codes, "1321")},
+        failures={},
+        protected_board=DaytradeProtectedBoardEvidence(
+            requested=("1321",),
+            board_requested=("1321",),
+            observed=("1321",),
+            failures=(),
+            started_at=protected_started,
+            completed_at=protected_completed,
+        ),
+        batches=tuple(batches),
+        started_at=started_at,
+        completed_at=completed_at,
+        registry_clean=True,
+        final_registered_codes=("1321",),
+        rejection_reasons=(),
+    )
+
+    with patch(
+        "auto_trade.compute_observed_daytrade_production_snapshot",
+        return_value={"decision_allowed": True},
+    ) as observed_snapshot:
+        output = compute_rotating_daytrade_production_snapshot(
+            data_df="data",
+            symbols_df="symbols",
+            discovery_result=result,
+            current_equity=1_000_000.0,
+            week_start_equity=1_000_000.0,
+            account_cash=1_000_000.0,
+            server_clock_evidence=_server_clock_evidence(completed_at),
+            trade_mode="KABUCOM_TEST",
+        )
+
+    assert output == {"decision_allowed": True}
+    kwargs = observed_snapshot.call_args.kwargs
+    assert len(kwargs["requested_codes"]) == 197
+    assert kwargs["requested_codes"][-1] == "1321"
+    assert kwargs["boards"] is result.observations
+    assert kwargs["event_time"] == completed_at
+    assert kwargs["board_batch_started_at"] == started_at
+    assert kwargs["board_batch_completed_at"] == completed_at
+    assert kwargs["observation_policy"] == "rotating_discovery_196_v1"
+    assert len(kwargs["opening_discovery_evidence"]["batches"]) == 4
 
 
 def test_production_snapshot_collection_continues_while_entry_gate_is_closed():
@@ -149,6 +418,8 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
     )
     opening_time = pd.Timestamp("2026-07-13 09:00:00", tz="Asia/Tokyo")
     quote_time = pd.Timestamp("2026-07-13 09:30:00", tz="Asia/Tokyo")
+    batch_started_at = pd.Timestamp("2026-07-13 09:29:50", tz="Asia/Tokyo")
+    previous_close_time = pd.Timestamp("2026-07-10 00:00:00", tz="Asia/Tokyo")
     prior_1000 = float(data_df[("1000.T", "Close")].iloc[-1])
     prior_1321 = float(data_df[("1321.T", "Close")].iloc[-1])
     boards = {
@@ -157,6 +428,7 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
             "price": 114.0,
             "current_price": 114.0,
             "opening_price_timestamp": opening_time,
+            "previous_close_timestamp": previous_close_time,
             "quote_timestamp": quote_time,
             "current_price_timestamp": quote_time,
             "received_at": quote_time,
@@ -169,6 +441,7 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
             "price": 214.0,
             "current_price": 214.0,
             "opening_price_timestamp": opening_time,
+            "previous_close_timestamp": previous_close_time,
             "quote_timestamp": quote_time,
             "current_price_timestamp": quote_time,
             "received_at": quote_time,
@@ -185,10 +458,13 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
             requested_codes={"1321", "1000"},
             boards=boards,
             board_failures={},
+            board_batch_started_at=batch_started_at,
+            board_batch_completed_at=quote_time,
             event_time=quote_time,
             current_equity=1_000_000.0,
             week_start_equity=1_000_000.0,
             account_cash=1_000_000.0,
+            server_clock_evidence=_server_clock_evidence(quote_time),
             trade_mode="KABUCOM_TEST",
             is_simulation=False,
         )
@@ -205,6 +481,7 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
     assert replay.replayable is True
     assert symbol_by_code["1000"]["open_today"] == 113.0
     assert "session_high" not in symbol_by_code["1000"]
+    assert symbol_by_code["1000"]["previous_close_timestamp"].startswith("2026-07-10")
     assert snapshot["inputs"]["execution_quotes"][0]["current_price"] in {114.0, 214.0}
 
     mismatched_boards = {code: dict(value) for code, value in boards.items()}
@@ -217,9 +494,12 @@ def test_observed_production_snapshot_uses_board_open_and_replays_exactly():
             boards=mismatched_boards,
             board_failures={},
             event_time=quote_time,
+            board_batch_started_at=batch_started_at,
+            board_batch_completed_at=quote_time,
             current_equity=1_000_000.0,
             week_start_equity=1_000_000.0,
             account_cash=1_000_000.0,
+            server_clock_evidence=_server_clock_evidence(quote_time),
             trade_mode="KABUCOM_TEST",
             is_simulation=False,
         )
@@ -286,6 +566,138 @@ def test_daytrade_decision_log_records_shared_candidate_context():
     append_rows.assert_called_once_with(auto_trade.DAYTRADE_DECISION_LOG_FILE, recorded)
     rotate.assert_called_once_with(auto_trade.DAYTRADE_DECISION_LOG_FILE, max_size_mb=20)
 
+
+
+def test_daytrade_decision_log_records_operational_evidence():
+    candidate = {
+        "code": "1000",
+        "name": "Foo",
+        "decision_snapshot_id": "snapshot-1",
+    }
+    evidence = {
+        "operational_evidence_schema_version": 1,
+        "news_fetch_status": "ok",
+        "news_query_url": "https://example.test/news",
+        "news_text": "material news",
+        "news_sha256": "sha256:news",
+        "news_error": "",
+        "ai_outcome": "approved",
+        "ai_provider": "gemini",
+        "ai_model": "test-model",
+        "ai_prompt": "prompt",
+        "ai_prompt_sha256": "sha256:prompt",
+        "ai_raw_response": "NO\n問題なし",
+        "ai_raw_response_sha256": "sha256:response",
+        "ai_error": "",
+        "unexpected": "must not leak",
+    }
+
+    rows = auto_trade.build_daytrade_decision_log_rows(
+        [candidate],
+        decision="operational_review_passed",
+        event_time="2026-07-14 09:31:00",
+        reason="ai_filter:approved",
+        is_simulation=False,
+        trade_mode="KABUCOM_TEST",
+        operational_evidence=evidence,
+    )
+
+    assert rows[0]["decision_snapshot_id"] == "snapshot-1"
+    assert rows[0]["news_text"] == "material news"
+    assert rows[0]["ai_model"] == "test-model"
+    assert rows[0]["ai_raw_response"] == "NO\n問題なし"
+    assert "unexpected" not in rows[0]
+
+
+def test_daytrade_decision_log_records_entry_quote_evidence():
+    evidence = {
+        "entry_quote_evidence_schema_version": 1,
+        "entry_quote_status": "fresh",
+        "entry_quote_code": "1000",
+        "entry_quote_batch_completed_at": "2026-07-14T09:30:01+09:00",
+        "entry_quote_age_seconds": 6.0,
+        "entry_quote_best_sell_price": 101.0,
+        "entry_quote_reason": "",
+        "unexpected": "must not leak",
+    }
+
+    rows = auto_trade.build_daytrade_decision_log_rows(
+        [{"code": "1000", "decision_snapshot_id": "snapshot-1"}],
+        decision="entry_quote_refresh_passed",
+        event_time="2026-07-14 09:30:01",
+        entry_price=101.0,
+        is_simulation=False,
+        entry_quote_evidence=evidence,
+    )
+
+    assert rows[0]["entry_quote_status"] == "fresh"
+    assert rows[0]["entry_quote_best_sell_price"] == 101.0
+    assert rows[0]["entry_quote_age_seconds"] == 6.0
+    assert "unexpected" not in rows[0]
+
+
+def test_entry_risk_evidence_caps_wallet_power_and_records_price_ceiling():
+    item = {
+        "code": "1000",
+        "turnover": 1_000_000_000,
+        "notional_pct": 0.15,
+        "risk_budget_pct": 0.10,
+    }
+
+    envelope, evidence = auto_trade.build_daytrade_entry_risk_evidence(
+        item,
+        day_equity=1_000_000,
+        theoretical_buying_power=5_000_000,
+        wallet_margin_buying_power=5_000_000,
+        candidate_buying_power=5_000_000,
+        candidate_dynamic_leverage=1.0,
+        quote_price=1_000.0,
+        buy_price=1_000.0,
+        stop_price=890.0,
+    )
+
+    assert envelope["status"] == "approved"
+    assert envelope["shares"] == 700
+    assert envelope["max_entry_price"] == 1_032.0
+    assert evidence["entry_risk_status"] == "approved"
+    assert evidence["entry_risk_code"] == "1000"
+    assert evidence["entry_risk_shares"] == 700
+    assert evidence["entry_risk_max_entry_price"] == 1_032.0
+
+    rows = auto_trade.build_daytrade_decision_log_rows(
+        [{"code": "1000", "decision_snapshot_id": "snapshot-1"}],
+        decision="entry_risk_resolved",
+        event_time="2026-07-15 09:30:02",
+        is_simulation=False,
+        entry_risk_evidence={**evidence, "unexpected": "must not leak"},
+    )
+    assert rows[0]["entry_risk_buying_power"] == 5_000_000
+    assert rows[0]["entry_risk_max_entry_price"] == 1_032.0
+    assert "unexpected" not in rows[0]
+
+
+def test_entry_risk_evidence_blocks_zero_wallet_buying_power():
+    envelope, evidence = auto_trade.build_daytrade_entry_risk_evidence(
+        {
+            "code": "1000",
+            "turnover": 1_000_000_000,
+            "notional_pct": 0.15,
+        },
+        day_equity=1_000_000,
+        theoretical_buying_power=5_000_000,
+        wallet_margin_buying_power=0.0,
+        candidate_buying_power=0.0,
+        candidate_dynamic_leverage=1.0,
+        quote_price=1_000.0,
+        buy_price=1_000.0,
+        stop_price=900.0,
+    )
+
+    assert envelope["status"] == "blocked"
+    assert envelope["reason"] == "nonpositive_required_input"
+    assert evidence["entry_risk_wallet_margin_buying_power"] == 0.0
+    assert evidence["entry_risk_buying_power"] == 0.0
+    assert evidence["entry_risk_shares"] == 0
 
 
 def test_resolve_daytrade_entry_shares_forwards_risk_budget_pct():
@@ -363,6 +775,93 @@ def test_build_daytrade_position_record_preserves_setup_and_risk_context():
     assert record["buy_rsi2"] == 63.0
     assert record["protective_stop_order_id"] is None
     assert record["decision_snapshot_id"] == "snapshot-1"
+
+def test_daytrade_exit_log_requires_complete_actual_cost_evidence_for_net_pnl():
+    position = build_daytrade_position_record(
+        {"code": "1000", "name": "Foo", "setup_type": "primary", "atr": 2.0},
+        executed_price=100.0,
+        shares=100,
+        buy_time="2026-07-14 09:01:00",
+        execution_id="ENTRY-1",
+        entry_commission=10.0,
+        entry_commission_tax=1.0,
+        entry_execution_costs_complete=True,
+    )
+    position.update({
+        "broker_position_expenses": 3.0,
+        "broker_position_commission": 10.0,
+        "broker_position_commission_tax": 1.0,
+    })
+
+    row = auto_trade.build_daytrade_exit_log_row(
+        position,
+        exit_reason="target",
+        observed_price=110.0,
+        modeled_exit_price=110.0,
+        exit_time="2026-07-14 10:00:00",
+        filled_shares=100,
+        remaining_shares=0,
+        is_simulation=False,
+        exit_order_id="EXIT-1",
+        exit_execution_ids=("EXIT-EXEC-1",),
+        exit_commission=5.0,
+        exit_commission_tax=0.5,
+        exit_execution_costs_complete=True,
+    )
+
+    assert row["observed_gross_pnl"] == 1000.0
+    assert row["actual_total_cost"] == 19.5
+    assert row["observed_execution_net_pnl"] == 980.5
+    assert row["observed_net_pnl"] is None
+    assert row["actual_cost_evidence_complete"] is True
+    assert row["actual_net_pnl_evidence_complete"] is False
+    assert row["actual_cost_evidence_reason"] == ""
+    assert row["entry_cost_source"] == "positions_api"
+    assert row["entry_execution_ids"] == ("ENTRY-1",)
+
+    taxed_row = auto_trade.build_daytrade_exit_log_row(
+        position,
+        exit_reason="target",
+        observed_price=110.0,
+        modeled_exit_price=110.0,
+        exit_time="2026-07-14 10:00:00",
+        filled_shares=100,
+        remaining_shares=0,
+        is_simulation=False,
+        exit_commission=5.0,
+        exit_commission_tax=0.5,
+        exit_execution_costs_complete=True,
+        capital_gains_tax=100.0,
+        capital_gains_tax_evidence_complete=True,
+    )
+
+    assert taxed_row["observed_execution_net_pnl"] == 980.5
+    assert taxed_row["observed_net_pnl"] == 880.5
+    assert taxed_row["actual_net_pnl_evidence_complete"] is True
+
+
+def test_daytrade_exit_log_does_not_invent_net_pnl_for_partial_exit():
+    position = build_daytrade_position_record(
+        {"code": "1000", "name": "Foo", "setup_type": "primary", "atr": 2.0},
+        executed_price=100.0, shares=100, buy_time="2026-07-14 09:01:00",
+        entry_commission=0.0, entry_commission_tax=0.0, entry_execution_costs_complete=True,
+    )
+    position.update({
+        "broker_position_expenses": 0.0,
+        "broker_position_commission": 0.0,
+        "broker_position_commission_tax": 0.0,
+    })
+
+    row = auto_trade.build_daytrade_exit_log_row(
+        position, exit_reason="partial", observed_price=101.0, modeled_exit_price=101.0,
+        exit_time="2026-07-14 10:00:00", filled_shares=50, remaining_shares=50,
+        is_simulation=False, is_partial_fill=True, exit_commission=0.0,
+        exit_commission_tax=0.0, exit_execution_costs_complete=True,
+    )
+
+    assert row["actual_cost_evidence_complete"] is False
+    assert row["observed_net_pnl"] is None
+    assert "partial_exit_cost_allocation_unverified" in row["actual_cost_evidence_reason"]
 
 @pytest.mark.parametrize(
     ("setup_type", "expected_day_buying_power", "expected_inverse_buying_power"),
@@ -559,7 +1058,7 @@ def test_sync_daytrade_registry_unregisters_before_registering_new_universe():
     ]
 
 
-def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id():
+def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id(tmp_path):
     record = build_daytrade_position_record(
         {
             "code": "1000",
@@ -568,6 +1067,7 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
             "atr": 2.0,
             "stop_mult": 1.0,
             "target_mult": 1.5,
+            "decision_snapshot_id": "snapshot-1",
         },
         executed_price=105.0,
         shares=300,
@@ -594,6 +1094,10 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
             ]
 
         def execute_stop_order(self, code, shares, action, trigger_price, hold_id=None, close_positions=None, exchange=None, margin_trade_type=None):
+            captured["journal_event"] = append_order_journal(
+                {"event": "PLANNED", "kind": "stop", "symbol": code},
+                path=str(tmp_path / "order_journal.jsonl"),
+            )
             captured.update({
                 "code": code,
                 "shares": shares,
@@ -618,6 +1122,9 @@ def test_arm_daytrade_protective_stop_matches_live_position_and_records_order_id
     assert record["protective_stop_order_id"] == "STOP-1"
     assert record["protective_stop_trigger_price"] == 99.0
     assert record["protective_stop_status"] == "armed"
+    journal_event = captured.pop("journal_event")
+    assert journal_event["decision_snapshot_id"] == "snapshot-1"
+    assert journal_event["lifecycle_stage"] == "protective_stop"
     assert captured == {
         "code": "1000",
         "shares": 300,
@@ -1089,7 +1596,9 @@ def test_close_daytrade_positions_by_signal_cancels_protective_stop_before_exit_
     assert remaining_portfolio[0]["shares"] == 150
     assert remaining_portfolio[0]["protective_stop_order_id"] == "STOP-2"
     assert remaining_portfolio[0]["protective_stop_status"] == "armed"
-    assert updated_account["realized_pnl_today"] > 0
+    assert updated_account["realized_pnl_today"] == 0.0
+    assert updated_account["realized_pnl_evidence_complete"] is False
+    assert updated_account["realized_pnl_unresolved_exit_count"] == 1
 
 
 def test_close_daytrade_positions_by_signal_marks_partial_remainder_unresolved_when_rearm_fails():
@@ -1192,7 +1701,9 @@ def test_close_daytrade_positions_by_signal_marks_partial_remainder_unresolved_w
     assert remaining_portfolio[0]["exit_order_unresolved_reason"] == "protective_stop_rearm_failed"
     assert remaining_portfolio[0]["exit_order_remaining_qty"] == 150
     assert any(action.startswith("STOP 1000 - protective stop rearm failed") for action in exit_actions)
-    assert updated_account["realized_pnl_today"] > 0
+    assert updated_account["realized_pnl_today"] == 0.0
+    assert updated_account["realized_pnl_evidence_complete"] is False
+    assert updated_account["realized_pnl_unresolved_exit_count"] == 1
 
 
 def test_close_daytrade_positions_by_signal_skips_exit_when_protective_stop_cancel_is_unconfirmed():
@@ -1977,6 +2488,20 @@ def test_perform_safe_shutdown_blocks_flatten_when_protective_stop_is_pending():
     assert any(entry.startswith("protective_stop_pending:1") for entry in result.errors)
 
 
+def test_main_exec_initializes_unicode_safe_logging_before_kabu_launcher():
+    events = []
+
+    with patch.object(auto_trade, "TRADE_MODE", "KABUCOM_TEST"), patch(
+        "auto_trade.setup_logging",
+        side_effect=lambda: events.append("logging"),
+    ), patch(
+        "core.kabu_launcher.ensure_kabu_station_running",
+        side_effect=lambda: events.append("launcher") or False,
+    ):
+        auto_trade._main_exec()
+
+    assert events == ["logging", "launcher"]
+
 def test_main_attempts_safe_shutdown_when_main_exec_raises():
     class _Broker:
         pass
@@ -2153,6 +2678,113 @@ def test_describe_board_quote_snapshot_freshness_returns_evidence():
     assert "board_snapshot_fresh=true" in evidence
 
 
+
+def _entry_quote_batch(
+    *,
+    requested=("1000",),
+    observations=None,
+    failures=None,
+    started_at=None,
+    completed_at=None,
+):
+    started_at = started_at or pd.Timestamp(
+        "2026-07-14 09:30:00", tz="Asia/Tokyo"
+    )
+    completed_at = completed_at or pd.Timestamp(
+        "2026-07-14 09:30:01", tz="Asia/Tokyo"
+    )
+    return SimpleNamespace(
+        requested=tuple(requested),
+        observations=dict(observations or {}),
+        failures=dict(failures or {}),
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+
+def _fresh_entry_board(code="1000", *, bid_time="2026-07-14 09:29:55"):
+    return {
+        "symbol": code,
+        "current_price": 100.0,
+        "best_sell_price": 101.0,
+        "best_sell_qty": 300,
+        "bid_timestamp": pd.Timestamp(bid_time, tz="Asia/Tokyo"),
+        "received_at": pd.Timestamp(
+            "2026-07-14 09:30:00.800", tz="Asia/Tokyo"
+        ),
+    }
+
+
+def test_refresh_daytrade_entry_execution_quotes_uses_fresh_best_sell_for_sizing():
+    batch = _entry_quote_batch(
+        observations={"1000": _fresh_entry_board()},
+    )
+    broker = SimpleNamespace(
+        get_board_snapshot_batch=lambda codes: batch,
+    )
+
+    refreshed, evidence, reasons = (
+        auto_trade.refresh_daytrade_entry_execution_quotes(
+            broker,
+            [{"code": "1000", "price": 99.0}],
+        )
+    )
+
+    assert reasons == ()
+    assert refreshed[0]["price"] == 101.0
+    assert evidence["1000"]["entry_quote_status"] == "fresh"
+    assert evidence["1000"]["entry_quote_age_seconds"] == 6.0
+    assert evidence["1000"]["entry_quote_price_timestamp_source"] == "bid_timestamp"
+
+
+def test_refresh_daytrade_entry_execution_quotes_rejects_stale_price_timestamp():
+    batch = _entry_quote_batch(
+        observations={
+            "1000": _fresh_entry_board(
+                bid_time="2026-07-14 09:29:00",
+            )
+        },
+    )
+    broker = SimpleNamespace(
+        get_board_snapshot_batch=lambda codes: batch,
+    )
+
+    refreshed, evidence, reasons = (
+        auto_trade.refresh_daytrade_entry_execution_quotes(
+            broker,
+            [{"code": "1000"}],
+        )
+    )
+
+    assert refreshed == []
+    assert evidence["1000"]["entry_quote_status"] == "rejected"
+    assert "price_timestamp_stale" in evidence["1000"]["entry_quote_reason"]
+    assert "1000:price_timestamp_stale" in reasons
+
+
+def test_refresh_daytrade_entry_execution_quotes_blocks_all_on_partial_failure():
+    second_board = _fresh_entry_board("2000")
+    batch = _entry_quote_batch(
+        requested=("1000", "2000"),
+        observations={"2000": second_board},
+        failures={"1000": SimpleNamespace(reason="transport")},
+    )
+    broker = SimpleNamespace(
+        get_board_snapshot_batch=lambda codes: batch,
+    )
+
+    refreshed, evidence, reasons = (
+        auto_trade.refresh_daytrade_entry_execution_quotes(
+            broker,
+            [{"code": "1000"}, {"code": "2000"}],
+        )
+    )
+
+    assert refreshed == []
+    assert evidence["1000"]["entry_quote_status"] == "rejected"
+    assert evidence["2000"]["entry_quote_status"] == "fresh"
+    assert "1000:board_failure:transport" in reasons
+
 def test_get_market_phase_treats_half_day_as_morning_only_until_midday_close():
     assert auto_trade.get_market_phase(auto_trade.datetime.time(10, 0), half_day=True) == auto_trade.MarketPhase.MORNING
     assert auto_trade.get_market_phase(auto_trade.datetime.time(11, 30), half_day=True) == auto_trade.MarketPhase.CLOSING_TIME
@@ -2229,6 +2861,10 @@ def test_merge_account_state_preserves_live_strategy_state_when_wallet_snapshot_
         "cash": 123456.0,
         "configured_risk_capital": 1_000_000.0,
         "realized_pnl_today": 12_345.0,
+        "risk_capital_pnl_today": 9_000.0,
+        "risk_capital_evidence_complete": False,
+        "risk_capital_evidence_reasons": ["cost_reconciliation_pending"],
+        "realized_pnl_trade_date": "2026-07-14",
         "daytrade_week_start_equity": 1_010_000.0,
         "month_start_equity": 1_100_000.0,
         "stock_buying_power": 111.0,
@@ -2248,6 +2884,10 @@ def test_merge_account_state_preserves_live_strategy_state_when_wallet_snapshot_
     assert merged["cash"] == 123456.0
     assert merged["configured_risk_capital"] == 1_000_000.0
     assert merged["realized_pnl_today"] == 12_345.0
+    assert merged["risk_capital_pnl_today"] == 9_000.0
+    assert merged["risk_capital_evidence_complete"] is False
+    assert merged["risk_capital_evidence_reasons"] == ["cost_reconciliation_pending"]
+    assert merged["realized_pnl_trade_date"] == "2026-07-14"
     assert merged["daytrade_week_start_equity"] == 1_010_000.0
     assert merged["month_start_equity"] == 1_100_000.0
     assert merged["stock_buying_power"] == 333.0
@@ -2255,3 +2895,335 @@ def test_merge_account_state_preserves_live_strategy_state_when_wallet_snapshot_
     assert merged["wallet_snapshot_incomplete"] is True
     assert merged["wallet_cash_ok"] is True
     assert merged["wallet_margin_ok"] is False
+
+
+def test_ensure_live_realized_pnl_state_resets_only_on_new_jst_trade_date():
+    prior = {
+        "configured_risk_capital": 1_000_000.0,
+        "realized_pnl_trade_date": "2026-07-13",
+        "realized_pnl_today": 1_000.0,
+        "risk_capital_pnl_today": 800.0,
+        "realized_pnl_evidence_complete": True,
+        "risk_capital_evidence_complete": True,
+    }
+
+    rolled = auto_trade.ensure_live_realized_pnl_state(
+        prior,
+        pd.Timestamp("2026-07-14 08:00:00", tz="Asia/Tokyo"),
+    )
+
+    assert rolled["realized_pnl_trade_date"] == "2026-07-14"
+    assert rolled["configured_risk_capital"] == 1_000_800.0
+    assert rolled["risk_capital_asof_date"] == "2026-07-13"
+    assert rolled["realized_pnl_today"] == 0.0
+    assert rolled["risk_capital_pnl_today"] == 0.0
+    assert rolled["realized_pnl_evidence_complete"] is True
+    assert rolled["risk_capital_evidence_complete"] is True
+    assert rolled["realized_pnl_evidence_reasons"] == []
+    assert rolled["realized_pnl_unresolved_exit_count"] == 0
+
+    rolled["realized_pnl_today"] = 500.0
+    rolled["risk_capital_pnl_today"] = 400.0
+    same_day = auto_trade.ensure_live_realized_pnl_state(
+        rolled,
+        pd.Timestamp("2026-07-14 15:00:00", tz="Asia/Tokyo"),
+    )
+    assert same_day["realized_pnl_today"] == 500.0
+    assert same_day["risk_capital_pnl_today"] == 400.0
+    assert same_day["configured_risk_capital"] == 1_000_800.0
+
+
+def test_ensure_live_realized_pnl_state_fails_closed_for_undated_legacy_pnl():
+    state = auto_trade.ensure_live_realized_pnl_state(
+        {"realized_pnl_today": -500.0},
+        pd.Timestamp("2026-07-14 10:00:00", tz="Asia/Tokyo"),
+    )
+
+    assert state["realized_pnl_trade_date"] == "2026-07-14"
+    assert state["realized_pnl_today"] == 0.0
+    assert state["realized_pnl_evidence_complete"] is False
+    assert state["realized_pnl_evidence_reasons"] == [
+        "legacy_realized_pnl_trade_date_missing"
+    ]
+    assert state["realized_pnl_unresolved_exit_count"] == 1
+    assert state["risk_capital_evidence_complete"] is False
+    assert state["risk_capital_evidence_reasons"] == [
+        "legacy_realized_pnl_trade_date_missing"
+    ]
+
+
+def test_live_realized_pnl_rollover_keeps_incomplete_prior_day_blocked():
+    state = auto_trade.ensure_live_realized_pnl_state(
+        {
+            "configured_risk_capital": 1_000_000.0,
+            "realized_pnl_trade_date": "2026-07-13",
+            "realized_pnl_today": -500.0,
+            "risk_capital_pnl_today": 0.0,
+            "realized_pnl_evidence_complete": False,
+            "risk_capital_evidence_complete": False,
+        },
+        pd.Timestamp("2026-07-14 08:00:00", tz="Asia/Tokyo"),
+    )
+
+    assert state["configured_risk_capital"] == 1_000_000.0
+    assert state["realized_pnl_today"] == 0.0
+    assert state["realized_pnl_evidence_complete"] is True
+    assert state["risk_capital_evidence_complete"] is False
+    assert "prior_day_risk_capital_unsettled:2026-07-13" in state[
+        "risk_capital_evidence_reasons"
+    ]
+    assert (
+        auto_trade._realized_pnl_evidence_allows_entry(state, is_sim=False)
+        is False
+    )
+
+
+def test_live_account_equity_reserves_tax_on_profit_and_keeps_full_loss():
+    account = {
+        "configured_risk_capital": 1_000_000.0,
+        "risk_capital_pnl_today": 100.0,
+    }
+    profit_position = {
+        "buy_price": 100.0,
+        "current_price": 110.0,
+        "shares": 100,
+    }
+    expected_profit_equity = (
+        1_000_100.0
+        + auto_trade._conservative_risk_capital_delta(1_000.0)
+    )
+    assert auto_trade._resolve_account_equity(
+        account,
+        [profit_position],
+        is_sim=False,
+    ) == pytest.approx(expected_profit_equity)
+
+    loss_position = dict(profit_position, current_price=90.0)
+    assert auto_trade._resolve_account_equity(
+        account,
+        [loss_position],
+        is_sim=False,
+    ) == 999_100.0
+    assert auto_trade._resolve_account_equity(
+        {"configured_risk_capital": 0.0, "risk_capital_pnl_today": 0.0},
+        [],
+        is_sim=False,
+    ) == 0.0
+
+
+def test_apply_live_realized_pnl_uses_execution_net_and_fails_closed_without_costs():
+    account = {"realized_pnl_today": 100.0}
+    complete = {
+        "trade_id": "1000|entry",
+        "filled_shares": 100,
+        "actual_cost_evidence_complete": True,
+        "observed_execution_net_pnl": 980.5,
+    }
+    auto_trade._apply_live_realized_pnl(account, complete)
+    assert account["realized_pnl_today"] == 1080.5
+    assert account["realized_pnl_evidence_complete"] is True
+    assert account["risk_capital_pnl_today"] == round(
+        980.5 * (1.0 - auto_trade.TAX_RATE),
+        4,
+    )
+    assert account["risk_capital_evidence_complete"] is True
+
+    incomplete = {
+        "trade_id": "2000|entry",
+        "filled_shares": 100,
+        "actual_cost_evidence_complete": False,
+        "actual_cost_evidence_reason": "position_expenses_missing",
+        "observed_execution_net_pnl": None,
+    }
+    auto_trade._apply_live_realized_pnl(account, incomplete)
+    assert account["realized_pnl_today"] == 1080.5
+    assert account["realized_pnl_evidence_complete"] is False
+    assert account["realized_pnl_unresolved_exit_count"] == 1
+    assert account["realized_pnl_evidence_reasons"] == ["2000|entry:position_expenses_missing"]
+    assert account["risk_capital_evidence_complete"] is False
+    assert account["risk_capital_evidence_reasons"] == [
+        "2000|entry:position_expenses_missing"
+    ]
+    assert auto_trade._realized_pnl_evidence_allows_entry(account, is_sim=False) is False
+    account["realized_pnl_evidence_complete"] = True
+    account["risk_capital_evidence_complete"] = True
+    assert auto_trade._realized_pnl_evidence_allows_entry(account, is_sim=False) is True
+    account["realized_pnl_evidence_complete"] = False
+    assert auto_trade._realized_pnl_evidence_allows_entry(account, is_sim=True) is True
+
+
+def _managed_position_for_stop_reconcile():
+    return {
+        "code": "1000",
+        "name": "Foo",
+        "ownership": "MANAGED_BY_BOT",
+        "shares": 100,
+        "buy_price": 100.0,
+        "buy_time": "2026-07-13 09:35:00",
+        "buy_atr": 2.0,
+        "entry_stop_price": 95.0,
+        "entry_target_price": 110.0,
+        "post_entry_high": 103.0,
+        "post_entry_low": 94.0,
+        "execution_id": "ENTRY-EX-1",
+        "execution_ids": ("ENTRY-EX-1",),
+        "entry_order_filled_qty": 100,
+        "entry_commission": 10.0,
+        "entry_commission_tax": 1.0,
+        "entry_execution_costs_complete": True,
+        "broker_position_expenses": 3.0,
+        "broker_position_commission": 10.0,
+        "broker_position_commission_tax": 1.0,
+        "decision_snapshot_id": "snapshot-1",
+        "protective_stop_order_id": "STOP-1",
+        "protective_stop_status": "armed",
+    }
+
+
+def _filled_stop_order_details(*, execution_id="STOP-EX-1", qty=100):
+    detail = {
+        "SeqNum": 1,
+        "RecType": 8,
+        "State": 5,
+        "Qty": qty,
+        "Price": 94.0,
+        "Commission": 5.0,
+        "CommissionTax": 0.5,
+    }
+    if execution_id is not None:
+        detail["ExecutionID"] = execution_id
+    return {
+        "ID": "STOP-1",
+        "State": 5,
+        "OrderQty": 100,
+        "CumQty": qty,
+        "Details": [detail],
+    }
+
+
+def test_reconcile_disappeared_protective_stop_records_actual_fill_and_flattens():
+    position = _managed_position_for_stop_reconcile()
+    captured = {}
+
+    class _Broker:
+        def get_order_details(self, order_id):
+            assert order_id == "STOP-1"
+            return _filled_stop_order_details()
+
+        def log_trade(self, row):
+            captured["trade"] = row
+
+    with patch("auto_trade.safe_read_csv", return_value=pd.DataFrame()), patch(
+        "auto_trade.append_order_journal"
+    ) as append_journal, patch(
+        "auto_trade.append_daytrade_exit_log"
+    ) as append_exit:
+        portfolio, account, evidence = (
+            auto_trade.reconcile_disappeared_protective_stop_positions(
+                previous_portfolio=[position],
+                broker_portfolio=[],
+                broker=_Broker(),
+                account={"realized_pnl_today": 0.0},
+                event_time=pd.Timestamp("2026-07-13 10:00:00", tz="Asia/Tokyo"),
+            )
+        )
+
+    assert portfolio == []
+    assert account["realized_pnl_today"] == -619.5
+    assert account["realized_pnl_evidence_complete"] is True
+    assert evidence == [{
+        "status": "reconciled",
+        "decision_snapshot_id": "snapshot-1",
+        "stop_order_id": "STOP-1",
+        "execution_ids": ("STOP-EX-1",),
+        "code": "1000",
+        "filled_shares": 100,
+        "fill_price": 94.0,
+        "remaining_shares": 0,
+    }]
+    journal_row = append_journal.call_args.args[0]
+    assert journal_row["event"] == "FILLED"
+    assert journal_row["order_id"] == "STOP-1"
+    assert journal_row["execution_ids"] == ("STOP-EX-1",)
+    exit_row = append_exit.call_args.args[0]
+    assert journal_row["order_ids"] == ("STOP-1",)
+    assert journal_row["side"] == "1"
+    assert journal_row["qty"] == 100
+    assert journal_row["execution_evidence_schema_version"] == 1
+    assert journal_row["aggregate_execution"] is True
+    assert journal_row["requested_qty"] == 100
+    assert journal_row["average_fill_price"] == 94.0
+    assert journal_row["remaining_qty"] == 0
+    assert exit_row["decision_snapshot_id"] == "snapshot-1"
+    assert exit_row["exit_reason"] == "protective_stop_fill"
+    assert exit_row["exit_order_id"] == "STOP-1"
+    assert exit_row["exit_execution_ids"] == ("STOP-EX-1",)
+    assert exit_row["remaining_shares"] == 0
+    assert captured["trade"]["decision_snapshot_id"] == "snapshot-1"
+
+
+def test_reconcile_disappeared_protective_stop_keeps_unresolved_ghost_on_missing_execution_id():
+    position = _managed_position_for_stop_reconcile()
+
+    class _Broker:
+        def get_order_details(self, order_id):
+            return _filled_stop_order_details(execution_id=None)
+
+    with patch("auto_trade.safe_read_csv", return_value=pd.DataFrame()), patch(
+        "auto_trade.append_order_journal"
+    ) as append_journal, patch(
+        "auto_trade.append_daytrade_exit_log"
+    ) as append_exit:
+        portfolio, account, evidence = (
+            auto_trade.reconcile_disappeared_protective_stop_positions(
+                previous_portfolio=[position],
+                broker_portfolio=[],
+                broker=_Broker(),
+                account={"realized_pnl_today": 0.0},
+            )
+        )
+
+    assert len(portfolio) == 1
+    assert portfolio[0]["exit_order_unresolved"] is True
+    assert portfolio[0]["protective_stop_reconcile_unresolved"] is True
+    assert portfolio[0]["exit_order_unresolved_reason"] == "stop_execution_id_missing"
+    assert account["realized_pnl_today"] == 0.0
+    assert evidence[0]["status"] == "unresolved"
+    assert evidence[0]["reason"] == "stop_execution_id_missing"
+    append_journal.assert_not_called()
+    append_exit.assert_not_called()
+
+
+def test_reconcile_disappeared_protective_stop_is_idempotent_when_exit_already_exists():
+    position = _managed_position_for_stop_reconcile()
+    existing = pd.DataFrame([
+        {
+            "decision_snapshot_id": "snapshot-1",
+            "exit_order_id": "STOP-1",
+            "remaining_shares": 0,
+        }
+    ])
+
+    class _Broker:
+        def get_order_details(self, order_id):
+            raise AssertionError("already reconciled stop must not query order details")
+
+    with patch("auto_trade.safe_read_csv", return_value=existing), patch(
+        "auto_trade.append_order_journal"
+    ) as append_journal, patch(
+        "auto_trade.append_daytrade_exit_log"
+    ) as append_exit:
+        portfolio, account, evidence = (
+            auto_trade.reconcile_disappeared_protective_stop_positions(
+                previous_portfolio=[position],
+                broker_portfolio=[],
+                broker=_Broker(),
+                account={"realized_pnl_today": -600.0},
+            )
+        )
+
+    assert portfolio == []
+    assert account["realized_pnl_today"] == -600.0
+    assert evidence[0]["status"] == "already_reconciled"
+    append_journal.assert_not_called()
+    append_exit.assert_not_called()

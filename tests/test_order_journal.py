@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from core.order_journal import append_order_journal, build_order_journal_replay_summary
+from core.order_journal import append_order_journal, build_order_journal_replay_summary, order_journal_context
 from core.startup_recovery import build_startup_recovery_report
 
 
@@ -29,6 +29,34 @@ def test_append_order_journal_adds_schema_event_id_sequence_and_pid(tmp_path: Pa
     assert payloads[0]["event"] == "PLANNED"
     assert payloads[1]["event"] == "ACCEPTED"
 
+
+def test_order_journal_context_scopes_snapshot_evidence_and_preserves_explicit_values(tmp_path: Path):
+    journal_path = tmp_path / "order_journal.jsonl"
+
+    with order_journal_context(
+        decision_snapshot_id="snapshot-1",
+        lifecycle_stage="entry",
+    ):
+        inherited = append_order_journal({"event": "PLANNED"}, path=str(journal_path))
+        explicit = append_order_journal(
+            {
+                "event": "ACCEPTED",
+                "decision_snapshot_id": "snapshot-explicit",
+            },
+            path=str(journal_path),
+        )
+        with order_journal_context(lifecycle_stage="protective_stop"):
+            nested = append_order_journal({"event": "PLANNED"}, path=str(journal_path))
+
+    outside = append_order_journal({"event": "PLANNED"}, path=str(journal_path))
+
+    assert inherited["decision_snapshot_id"] == "snapshot-1"
+    assert inherited["lifecycle_stage"] == "entry"
+    assert explicit["decision_snapshot_id"] == "snapshot-explicit"
+    assert nested["decision_snapshot_id"] == "snapshot-1"
+    assert nested["lifecycle_stage"] == "protective_stop"
+    assert "decision_snapshot_id" not in outside
+    assert "lifecycle_stage" not in outside
 
 def test_build_order_journal_replay_summary_marks_planned_and_accepted_as_unresolved(tmp_path: Path):
     journal_path = tmp_path / "order_journal.jsonl"

@@ -2,16 +2,22 @@ import itertools
 import json
 import os
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from core.config import JST, ORDER_JOURNAL_FILE
 from core.file_io import ensure_absolute_path
 
 ORDER_JOURNAL_SCHEMA_VERSION = 1
 _ORDER_JOURNAL_SEQUENCE = itertools.count(1)
+_ORDER_JOURNAL_CONTEXT: ContextVar[dict[str, Any]] = ContextVar(
+    "order_journal_context",
+    default={},
+)
 
 _TERMINAL_EVENTS = {"REJECTED", "CANCELLED", "FILLED", "FILLED_BEFORE_CANCEL", "EXPIRED"}
 _UNRESOLVED_EVENTS = {"PLANNED", "ACCEPTED", "CANCEL_REQUESTED", "UNKNOWN"}
@@ -58,9 +64,28 @@ class OrderJournalReplaySummary:
         return self.unresolved_count > 0
 
 
+@contextmanager
+def order_journal_context(**values: Any) -> Iterator[None]:
+    """Attach scoped production evidence to every journal event in an order flow."""
+    normalized = {
+        str(key): value
+        for key, value in values.items()
+        if value is not None and (not isinstance(value, str) or value.strip())
+    }
+    merged = dict(_ORDER_JOURNAL_CONTEXT.get())
+    merged.update(normalized)
+    token = _ORDER_JOURNAL_CONTEXT.set(merged)
+    try:
+        yield
+    finally:
+        _ORDER_JOURNAL_CONTEXT.reset(token)
+
+
 def append_order_journal(event: dict, path: str = ORDER_JOURNAL_FILE) -> dict:
     """Append a single order event as JSONL."""
     payload = dict(event or {})
+    for key, value in _ORDER_JOURNAL_CONTEXT.get().items():
+        payload.setdefault(key, value)
     payload.setdefault("schema_version", ORDER_JOURNAL_SCHEMA_VERSION)
     payload.setdefault("event_id", uuid.uuid4().hex)
     payload.setdefault("sequence", next(_ORDER_JOURNAL_SEQUENCE))

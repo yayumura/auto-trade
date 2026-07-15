@@ -3,9 +3,11 @@ import pandas as pd
 import numpy as np
 from core.logic import (
     RealtimeBuffer,
+    apply_daytrade_base_exposure_cap,
     cap_daytrade_position_size,
     calculate_all_technicals_v12,
     calculate_lot_size,
+    resolve_daytrade_entry_risk_envelope,
     build_daytrade_open_market_context,
     compute_daytrade_rebound_trigger,
     evaluate_daytrade_setup,
@@ -125,7 +127,6 @@ from core.logic import (
     DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
     DAYTRADE_FALLBACK_EQUITY_NOTIONAL_PCT,
     DAYTRADE_FALLBACK_HIGH_BREADTH_EXTENDED_EQUITY_NOTIONAL_PCT,
-    DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_NOTIONAL_PCT,
     DAYTRADE_FALLBACK_LOW_BREADTH_CONTINUATION_EQUITY_NOTIONAL_PCT,
     DAYTRADE_FALLBACK_TUESDAY_FRIDAY_WEAK_MARKET_EQUITY_NOTIONAL_PCT,
     DAYTRADE_INVERSE_BUYING_POWER_LEVERAGE,
@@ -141,6 +142,49 @@ from core.logic import (
     DAYTRADE_SELECTED_WEDNESDAY_NONPOSITIVE_GAP_NO_TRADE_MAX_LEVERAGE,
 )
 class TestLogic(unittest.TestCase):
+    def test_base_exposure_cap_removes_sizeups_and_preserves_derisking(self):
+        primary = {
+            "setup_type": "primary",
+            "score": 4.0,
+            "notional_pct": 0.25,
+            "equity_notional_pct": 10.5,
+            "risk_budget_pct": 0.375,
+            "size_multiplier": 1.5,
+        }
+
+        result = apply_daytrade_base_exposure_cap(primary)
+
+        self.assertIs(result, primary)
+        self.assertAlmostEqual(result["notional_pct"], 0.075)
+        self.assertAlmostEqual(result["equity_notional_pct"], 1.25)
+        self.assertAlmostEqual(result["risk_budget_pct"], 0.05)
+        self.assertAlmostEqual(result["size_multiplier"], 1.0)
+
+        derisked = {
+            "setup_type": "primary",
+            "score": 8.0,
+            "notional_pct": 0.05,
+            "equity_notional_pct": 0.75,
+            "risk_budget_pct": 0.05,
+            "size_multiplier": 0.5,
+        }
+        self.assertEqual(apply_daytrade_base_exposure_cap(derisked), derisked)
+
+        catchup = {
+            "setup_type": "catchup_rs",
+            "score": 12.0,
+            "notional_pct": 1.0,
+            "equity_notional_pct": 5.0,
+            "risk_budget_pct": 0.3,
+            "size_multiplier": 2.5,
+        }
+        capped_catchup = apply_daytrade_base_exposure_cap(catchup)
+        self.assertAlmostEqual(capped_catchup["notional_pct"], 0.10)
+        self.assertAlmostEqual(capped_catchup["equity_notional_pct"], 2.0)
+        self.assertAlmostEqual(capped_catchup["risk_budget_pct"], 0.10)
+        self.assertAlmostEqual(capped_catchup["size_multiplier"], 1.0)
+
+
     def test_daytrade_open_market_context_enforces_point_in_time_boundaries(self):
         context = build_daytrade_open_market_context(
             trade_date="2026-07-13",
@@ -289,7 +333,7 @@ class TestLogic(unittest.TestCase):
                 prev_market_close=100.0,
             )
         )
-    def test_daytrade_catchup_rs_tuesday_low_breadth_high_rs_size_multiplier(self):
+    def test_daytrade_catchup_size_multiplier_does_not_amplify(self):
         self.assertEqual(
             resolve_daytrade_catchup_size_multiplier(
                 setup_type="catchup_rs",
@@ -301,7 +345,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_sma_atr=1.051775,
                 trade_date=pd.Timestamp("2022-12-13"),
             ),
-            2.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_catchup_size_multiplier(
@@ -314,7 +358,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_sma_atr=0.854260,
                 trade_date=pd.Timestamp("2024-10-01"),
             ),
-            2.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_catchup_size_multiplier(
@@ -2693,7 +2737,7 @@ class TestLogic(unittest.TestCase):
                 score=5.809731,
                 trade_weekday=0,
             ),
-            DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_NOTIONAL_PCT,
+            DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
         )
         self.assertAlmostEqual(
             resolve_daytrade_fallback_notional_pct(
@@ -2724,7 +2768,7 @@ class TestLogic(unittest.TestCase):
                 score=4.963572716619428,
                 trade_weekday=0,
             ),
-            DAYTRADE_FALLBACK_MONDAY_MID_BREADTH_NEUTRAL_MARKET_SIZEUP_NOTIONAL_PCT,
+            DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
         )
         self.assertAlmostEqual(
             resolve_daytrade_fallback_equity_notional_pct(
@@ -2759,7 +2803,7 @@ class TestLogic(unittest.TestCase):
                 trade_weekday=2,
                 open_vs_sma_atr=3.786542,
             ),
-            0.25,
+            DAYTRADE_FALLBACK_MAX_NOTIONAL_PCT,
         )
         self.assertAlmostEqual(
             resolve_daytrade_fallback_equity_notional_pct(
@@ -3201,7 +3245,7 @@ class TestLogic(unittest.TestCase):
             ),
             3_000,
         )
-    def test_daytrade_primary_train_replay_size_multiplier_matches_shared_families(self):
+    def test_daytrade_primary_size_multiplier_does_not_amplify(self):
         self.assertEqual(
             resolve_daytrade_primary_size_multiplier(
                 breadth_val=0.666248,
@@ -3213,7 +3257,7 @@ class TestLogic(unittest.TestCase):
                 prev_return=0.047048,
                 prev_rsi2=76.691729,
             ),
-            1.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_primary_size_multiplier(
@@ -3226,7 +3270,7 @@ class TestLogic(unittest.TestCase):
                 prev_return=0.017913,
                 prev_rsi2=76.756757,
             ),
-            1.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_primary_size_multiplier(
@@ -3242,7 +3286,7 @@ class TestLogic(unittest.TestCase):
             1.0,
         )
 
-    def test_daytrade_strong_oversold_train_replay_size_multiplier_splits_pockets(self):
+    def test_daytrade_strong_oversold_size_multiplier_does_not_amplify(self):
         self.assertEqual(
             resolve_daytrade_strong_oversold_size_multiplier(
                 breadth_val=0.551226,
@@ -3252,7 +3296,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_trend_atr=2.070657,
                 trade_date=pd.Timestamp("2025-06-16"),
             ),
-            2.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_size_multiplier(
@@ -3263,7 +3307,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_trend_atr=4.646289,
                 trade_date=pd.Timestamp("2025-10-15"),
             ),
-            1.3,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_size_multiplier(
@@ -3274,7 +3318,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_trend_atr=6.261748,
                 trade_date=pd.Timestamp("2023-04-05"),
             ),
-            2.0,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_size_multiplier(
@@ -3285,7 +3329,7 @@ class TestLogic(unittest.TestCase):
                 open_vs_trend_atr=1.439776357827475,
                 trade_date=pd.Timestamp("2023-02-22"),
             ),
-            2.5,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_size_multiplier(
@@ -4277,9 +4321,77 @@ class TestLogic(unittest.TestCase):
             session_high=102.6,
             allow_close_exit=False,
         )
+        net_breakeven_fade_exit = resolve_daytrade_live_exit_decision(
+            setup_type="primary",
+            buy_price=100.0,
+            open_price=100.4,
+            high_price=102.6,
+            low_price=99.4,
+            current_price=100.1,
+            stop_price=98.0,
+            target_price=120.0,
+            session_high=102.6,
+            exit_slippage_rate=0.002,
+            allow_close_exit=False,
+        )
+
         self.assertEqual(stop_exit, (98.0, "intraday_stop"))
         self.assertEqual(target_exit, (120.0, "intraday_target"))
         self.assertEqual(fade_exit, (100.0, "intraday_failed_runup"))
+        self.assertAlmostEqual(net_breakeven_fade_exit[0], 100.0 / 0.998)
+        self.assertEqual(net_breakeven_fade_exit[1], "intraday_failed_runup")
+
+    def test_entry_risk_envelope_preserves_all_sizing_caps_after_quote_moves(self):
+        envelope = resolve_daytrade_entry_risk_envelope(
+            current_equity=1_000_000,
+            buying_power=5_000_000,
+            entry_price=1_000.0,
+            stop_price=890.0,
+            dynamic_leverage=1.0,
+            max_positions=1,
+            turnover=1_000_000_000,
+            notional_pct=0.15,
+            risk_budget_pct=0.10,
+        )
+
+        self.assertEqual(envelope["status"], "approved")
+        self.assertEqual(envelope["raw_shares"], 1_000)
+        self.assertEqual(envelope["shares"], 700)
+        self.assertEqual(envelope["max_entry_price"], 1_032.0)
+        risk_at_ceiling = (
+            envelope["max_entry_price"] - 890.0
+        ) * envelope["shares"]
+        self.assertLessEqual(risk_at_ceiling, 100_000)
+        self.assertLessEqual(
+            envelope["max_entry_price"] * envelope["shares"],
+            5_000_000 * 0.15,
+        )
+
+    def test_entry_risk_envelope_blocks_zero_wallet_power_and_missing_liquidity(self):
+        base = {
+            "current_equity": 1_000_000,
+            "entry_price": 1_000.0,
+            "stop_price": 900.0,
+            "dynamic_leverage": 1.0,
+            "max_positions": 1,
+            "notional_pct": 0.15,
+        }
+        zero_power = resolve_daytrade_entry_risk_envelope(
+            **base,
+            buying_power=0.0,
+            turnover=1_000_000_000,
+        )
+        missing_liquidity = resolve_daytrade_entry_risk_envelope(
+            **base,
+            buying_power=5_000_000,
+            turnover=None,
+        )
+
+        self.assertEqual(zero_power["status"], "blocked")
+        self.assertEqual(zero_power["reason"], "nonpositive_required_input")
+        self.assertEqual(missing_liquidity["status"], "blocked")
+        self.assertEqual(missing_liquidity["reason"], "invalid_required_input")
+
     def test_lot_size_uses_dynamic_leverage(self):
         self.assertEqual(
             calculate_lot_size(
@@ -5578,8 +5690,19 @@ class TestLogic(unittest.TestCase):
             prev_prev_close=103.5,
             prev_sma_trend=95.0,
         )
+        rejected_negative_rs = evaluate_daytrade_strong_oversold_open_setup(
+            open_p=100.0,
+            prev_close=103.0,
+            breadth_val=0.62,
+            prev_atr=2.0,
+            prev_rsi2=1.5,
+            rs_alpha=-0.1,
+            prev_prev_close=103.5,
+            prev_sma_trend=95.0,
+        )
         self.assertIsNotNone(accepted)
         self.assertIsNone(rejected)
+        self.assertIsNone(rejected_negative_rs)
         self.assertGreater(score_daytrade_strong_oversold_open_setup(accepted, rs_alpha=15.0), 5.0)
         self.assertTrue(
             is_daytrade_strong_oversold_tuesday_stretched_open_filtered(
@@ -5599,7 +5722,7 @@ class TestLogic(unittest.TestCase):
                 trade_weekday=0,
             )
         )
-    def test_daytrade_strong_oversold_pure_win_size_up(self):
+    def test_daytrade_strong_oversold_resolvers_do_not_amplify(self):
         wednesday_sizeup_candidate = {
             "breadth_val": 0.695789,
             "gap_pct": -0.014571,
@@ -5647,19 +5770,19 @@ class TestLogic(unittest.TestCase):
         }
         self.assertEqual(
             resolve_daytrade_strong_oversold_notional_pct(**wednesday_sizeup_candidate),
-            0.105,
+            0.04,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_notional_pct(**thursday_sizeup_candidate),
-            0.105,
+            0.04,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_notional_pct(**hot_market_sizeup_candidate),
-            0.105,
+            0.04,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_notional_pct(**stable_market_sizeup_candidate),
-            0.105,
+            0.04,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_notional_pct(**holdout_near_miss_candidate),
@@ -5671,19 +5794,19 @@ class TestLogic(unittest.TestCase):
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_equity_notional_pct(**wednesday_sizeup_candidate),
-            4.0,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_equity_notional_pct(**thursday_sizeup_candidate),
-            4.0,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_equity_notional_pct(**hot_market_sizeup_candidate),
-            4.0,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_equity_notional_pct(**stable_market_sizeup_candidate),
-            4.0,
+            1.0,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_equity_notional_pct(**holdout_near_miss_candidate),
@@ -5695,19 +5818,19 @@ class TestLogic(unittest.TestCase):
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_risk_budget_pct(**wednesday_sizeup_candidate),
-            0.125,
+            0.10,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_risk_budget_pct(**thursday_sizeup_candidate),
-            0.125,
+            0.10,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_risk_budget_pct(**hot_market_sizeup_candidate),
-            0.125,
+            0.10,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_risk_budget_pct(**stable_market_sizeup_candidate),
-            0.125,
+            0.10,
         )
         self.assertEqual(
             resolve_daytrade_strong_oversold_risk_budget_pct(**holdout_near_miss_candidate),
@@ -5893,7 +6016,7 @@ class TestLogic(unittest.TestCase):
         )
         self.assertEqual(selected[0]["code"], "2500")
         self.assertEqual(selected[0]["setup_type"], "catchup_rs")
-    def test_daytrade_candidate_selection_can_recover_catchup_gapdown_low_breadth(self):
+    def test_daytrade_candidate_selection_does_not_size_up_catchup_gapdown_for_board_lot(self):
         fallback = [
             self._board_lot_candidate("2000", 6.0, "fallback", open_price=50000.0, gap_pct=0.009),
         ]
@@ -5916,8 +6039,9 @@ class TestLogic(unittest.TestCase):
             base_leverage=1.25,
             max_count=1,
         )
-        self.assertEqual(selected[0]["code"], "2600")
-        self.assertEqual(selected[0]["setup_type"], "catchup_gapdown")
+        self.assertEqual(selected[0]["code"], "2000")
+        self.assertAlmostEqual(catchup[0]["equity_notional_pct"], 0.50)
+        self.assertEqual(selected[0]["setup_type"], "fallback")
     def test_daytrade_candidate_selection_filters_tuesday_weak_market_high_open_fallback(self):
         fallback = [
             {"code": "2384", "score": 4.0, "setup_type": "fallback", "prev_return": 0.03, "open_vs_sma_atr": 5.2},

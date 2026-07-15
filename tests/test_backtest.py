@@ -171,6 +171,70 @@ def test_daytrade_executes_one_trade_with_close_exit():
     assert final_assets > 10_000_000
 
 
+def test_daytrade_evaluates_latest_day_without_a_next_session():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    last_day_index = 102
+    latest_dates = dates[: last_day_index + 1]
+    latest_bundle = {
+        key: (
+            value[: last_day_index + 1]
+            if isinstance(value, np.ndarray) and value.ndim >= 1 and value.shape[0] == len(dates)
+            else value
+        )
+        for key, value in bundle_np.items()
+    }
+
+    _assets, trade_count, _monthly, _results, trade_log = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=latest_bundle,
+        timeline=latest_dates,
+        breadth_ratio=np.ones(len(latest_dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        return_trade_log=True,
+    )
+
+    assert trade_count == 1
+    assert trade_log[0]["day_key"] == str(latest_dates[-1].date())
+
+
+def test_daytrade_observation_universe_is_a_fail_closed_daily_constraint():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    trade_day = str(dates[102].date())
+
+    blocked = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        observation_universe_indices_by_day={},
+    )
+    allowed = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        observation_universe_indices_by_day={trade_day: (0,)},
+    )
+    attempted_expansion = run_backtest_v16_production(
+        univ_indices=np.arange(1),
+        bundle_np=bundle_np,
+        timeline=dates,
+        breadth_ratio=np.ones(len(dates)) * 0.8,
+        initial_cash=10_000_000,
+        max_pos=1,
+        observation_universe_indices_by_day={trade_day: (1,)},
+    )
+
+    assert blocked[1] == 0
+    assert allowed[1] == 1
+    assert attempted_expansion[1] == 0
+
+
 def test_daytrade_intraday_stop_caps_loss():
     final_assets, trade_count, monthly, results = _run_single_trade_backtest("stop")
 
@@ -199,9 +263,9 @@ def test_daytrade_intraday_failed_runup_exits_near_break_even():
     assert trade_count == 1, f"Expected 1 trade, got {trade_count}"
     assert len(results) == 1
     assert trade_log[0]["exit_reason"] == "intraday_failed_runup"
-    assert trade_log[0]["modeled_exit_price"] == trade_log[0]["entry_price"]
-    assert trade_log[0]["exit_price"] <= trade_log[0]["entry_price"]
-    assert results[0] <= 0
+    assert trade_log[0]["modeled_exit_price"] > trade_log[0]["entry_price"]
+    assert trade_log[0]["exit_price"] == trade_log[0]["entry_price"]
+    assert results[0] == 0
 
 
 def test_daytrade_explicit_cost_reduces_equity():
@@ -396,6 +460,43 @@ def test_daytrade_open_entry_does_not_use_same_day_breadth():
     assert trade_count == 0
     assert len(results) == 0
     assert final_assets == 10_000_000
+
+
+def test_daytrade_selector_cannot_see_same_day_outcomes():
+    dates, bundle_np = _build_daytrade_bundle(exit_mode="close")
+    selector_calls = []
+
+    def _select_without_outcomes(primary, strong, fallback, catchup, inverse, bull, **_kwargs):
+        groups = (primary, strong, fallback, catchup, inverse, bull)
+        candidates = [candidate for group in groups for candidate in group]
+        assert candidates
+        for candidate in candidates:
+            assert "close" not in candidate
+            assert "high" not in candidate
+            assert "low" not in candidate
+        selector_calls.append(True)
+        return primary[:1] or strong[:1] or fallback[:1] or catchup[:1] or inverse[:1] or bull[:1]
+
+    with patch("backtest.select_daytrade_candidates", side_effect=_select_without_outcomes):
+        _, trade_count, _, _, _, trade_log, candidate_log = run_backtest_v16_production(
+            univ_indices=np.arange(1),
+            bundle_np=bundle_np,
+            timeline=dates,
+            breadth_ratio=np.ones(len(dates)) * 0.8,
+            initial_cash=10_000_000,
+            max_pos=1,
+            return_daily_stats=True,
+            return_trade_log=True,
+            return_candidate_log=True,
+        )
+
+    assert selector_calls
+    assert trade_count == 1
+    assert trade_log[0]["exit_reason"] == "close_exit"
+    opened = next(row for row in candidate_log["candidates"] if row["opened"])
+    assert opened["close"] == bundle_np["Close"][102, 0]
+    assert opened["high"] == bundle_np["High"][102, 0]
+    assert opened["low"] == bundle_np["Low"][102, 0]
 
 
 def test_daytrade_allows_low_breadth_tuesday_catchup_rs_probe():

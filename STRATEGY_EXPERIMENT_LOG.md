@@ -18323,3 +18323,674 @@
 - 再試行するとしたら:
   - 同じ日足閾値を再探索しない。まずorder history / execution ID / wallet deltaを `decision_snapshot_id` へ連結し、`selected -> veto/reject -> fill -> stop/exit -> remaining=0` の完全性を機械検証する。
   - 2026-07-13以降のactual snapshotとlinked exitが蓄積した後、同一code/configのproduction replayでのみ本番差分を再評価する。
+
+### 2026-07-13: Adopted - Latest Refresh, Post-Warmup Metrics, Nonnegative-RS Strong-Oversold, and Snapshot-Linked Lifecycle Audit
+
+- 作業テーマ:
+  - 最新化後のtrain未達週・損失集中の再分析
+  - 過去日足への細かい当て込みではなく、相対強度を使ったshared safety ruleで最悪損失を下げること
+  - 日足OHLC / SIMを本番同等証拠にせず、actual production snapshotから注文lifecycleまでfail closedで連結すること
+- 最新データ:
+  - `python scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` を実行した
+  - 2026-07-13は市場開始前でJ-Quants rowがまだ0件だったため、確定最新日は `2026-07-10` のまま
+  - holdoutは contaminated / veto 用の `2026-01-13..2026-07-10`、train評価はpost-warmupの `2022-03-01..2026-01-09`
+- 原因分析:
+  - train 201週のうち未達は116週。最大損失を100%消しても+1%へ反転するのは1週だけで、損切り微調整だけでは週次・月次目標を埋められなかった
+  - 未達週の主な損失は `strong_oversold stop -2,246,000円` と `primary stop -1,918,700円`。最悪日は2025-12-17の `strong_oversold / 5631.T / RS alpha -7.16 / -2,093,000円`
+  - 一方、selected strong_oversoldは大きな利益源も持つためsetup全削除は不適切。RS alphaの自然な境界0で、市場に対しても弱い個別銘柄の逆張りだけを除外する仮説に絞った
+  - candidate diagnosticsではtrain 946日 / 28,832候補 / 375 baseline trades。unselected / blocked候補は全setupで平均損失で、追加entryによる稼働率改善には根拠がなかった
+  - warmup前の2021-06..2022-02が月次+20%分母へ混入していたため、週次・月次・稼働率を `WARMUP_START=2022-03-01` 以降だけで集計するよう修正した。損益自体は変更していない
+- shared strategy change:
+  - `DAYTRADE_STRONG_OVERSOLD_MIN_RS_ALPHA = -999.0 -> 0.0`
+  - fallback / catchupと同じく、相対強度が負の銘柄をmean-reversion対象にせず、個別悪材料のfalling knifeを避ける
+  - 曜日、銘柄、月、損失日の専用例外は追加していない
+- train-only結果:
+  - baseline: `RETURN +6993.10% / 375 trades / WIN 66.13% / PF 12.58 / WEEKS >= +1% 85/201 / POSITIVE 138/201 / MONTHS >= +20% 12/46 / WORST DAY -2,093,000円`
+  - 採用案: `RETURN +7408.68% / 373 trades / WIN 66.76% / PF 29.26 / WEEKS >= +1% 86/201 / POSITIVE 139/201 / MONTHS >= +20% 12/46 / WORST DAY -338,000円`
+  - 2025-12-17はRS負の5631.TではなくRS +23.01の次順位4519.Tを選び、`+741,071円`。週次利益guardが12/18・12/19の後続entryを停止した
+  - negative full calendar monthsは `3 -> 2`。2025-12は `-4.09% -> +1.67%`。月+20%件数は増えず、目標の全月20%には未達
+- contaminated holdout veto / standalone:
+  - holdout: `RETURN +58.71% / 43 trades / WIN 69.77% / PF 11.68 / WEEKS >= +1% 13/26 / POSITIVE 20/26 / MONTHS >= +20% 1/5 / WORST DAY -1,394,400円`
+  - baseline holdout `+59.81% / PF 11.60 / WORST DAY -1,327,200円` に対し、returnとabsolute worstは資産増加に伴いわずかに悪化したが、PFと週・月本数は維持しvetoには該当しない
+  - 100万円 standalone `2026-06-11..2026-07-10`: `RETURN +19.70% / 3 trades / PF 94.83 / WEEKS >= +1% 1/4 / POSITIVE 2/4 / WORST DAY -2,100円` で不変
+- rolling / walk-forward reference-only:
+  - `6m holdout / 6m step / min train 18m` の5窓は全てプラス
+  - average `+107.41%`、median `+50.05%`、range `+5.88%..+353.11%`、PF median `3.53`、positive weeks `91/128`
+- production parity / lifecycle:
+  - scoped order-journal contextを追加し、entry、protective stop、cancel、exitへ `decision_snapshot_id` とlifecycle stageを継承するようにした
+  - zero fill / unresolved / terminal rejectionもdecision logへ必ず記録するようにした
+  - `jp_production_replay.py` はcandidate / selected digestだけでなく、linked decision、entry fill、stop acceptance、exit fill、残数量0のactual exitをsnapshot単位で要求し、不足時は `STATUS: LIFECYCLE_INCOMPLETE` で非zero終了する
+  - `--allow-incomplete-lifecycle` はsignal-only診断用で、本番同等証拠には使わない
+  - actual `KABUCOM_TEST` / `KABUCOM_LIVE` snapshotは双方0件、linked actual exitも0件。したがって「本番同等未検証」「本番収益性未検証」は継続
+  - 保護逆指値の市場約定をposition消失からactual exit/PnLへ自動reconcileする経路、net口座コスト、AI raw evidenceは未解消
+- テスト:
+  - focused: `224 passed`
+  - full: `python -m pytest tests -q -p no:cacheprovider` -> `428 passed, 38 subtests passed`
+  - `KABUCOM_TEST` / `KABUCOM_LIVE` production replayはいずれも `SNAPSHOTS: 0 / STATUS: INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - strong_oversoldのnonnegative RS floor、post-warmup集計、本番lifecycle連結を採用
+  - RS floorは1日の損失日専用例外ではなく、逆張り対象から市場相対弱者を外す説明可能なshared rule。train return、PF、週次本数、worst dayを同時改善し、contaminated holdout vetoとstandaloneも壊さなかった
+  - 月20%は `12/46` で未達。日足OHLCしかない現状で、未選択候補を追加して全月20%へ合わせるのはカーブフィットになるため行わない
+- 再試行するとしたら:
+  - RS閾値を `-5 / +5 / +10` などへ細かく追わない。0は相対強度の自然な境界として固定する
+  - actual point-in-time snapshotとlinked lifecycleを蓄積し、同じcode/configでproduction replayできるようになった場合
+  - または全観測universeの寄前気配・分足・板・約定をpoint-in-timeで履歴化でき、trainだけで新しいexecution edgeを設計できる場合
+
+### 2026-07-13: Adopted - Protective-Stop Fill Reconciliation and Atomic CSV Evidence Migration
+
+- 試したこと:
+  - broker positionからmanaged positionが消えた場合、linked protective-stop orderのactual detailsを照合し、終端 `FILLED`、expected全量、remaining 0、実約定価格、ExecutionIDが全て揃ったときだけactual exitと実現損益へ確定するreconciliation経路を追加した。
+  - 証拠が1つでも欠ける場合は、日足OHLCやstop価格で補完せず、`protective_stop_reconcile_unresolved` のghost positionを保持して後続判断をfail closedにした。
+  - 同じ `decision_snapshot_id / exit_order_id / remaining_shares=0` のexitが既にある場合は再照合・損益二重計上を行わないようにした。
+  - exit logへ `exit_order_id / exit_execution_ids` を追加した際、既存CSV headerのまま新しい列を追記して列ずれする問題を、既存列と新規列のunionへ原子的に移行してから追記する共通I/O修正で解消した。
+  - Windowsのredirect出力がCP932になる場合、kabu launcherの絵文字で起動前に停止する問題を確認し、`setup_logging()` をlauncherより前へ移してUnicode-safe loggingを最初に有効化した。
+- 結果:
+  - actual stop fill、ExecutionID欠損時のghost保持、再起動時の冪等性、CSV旧行・新行・subset行のschema移行を回帰テストで確認した。
+  - `python -m pytest tests -q -p no:cacheprovider`: `433 passed, 38 subtests passed`。
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` は、採用済みbaselineと完全一致した。train `RETURN +7408.68% / 373 trades / PF 29.26 / WEEKS >= +1% 86/201 / POSITIVE 139/201 / MONTHS >= +20% 12/46 / WORST DAY -338,000円`、standalone `RETURN +19.70% / 3 trades / PF 94.83 / WORST DAY -2,100円`。
+  - runtime config hashは `sha256:9e14cab31e9167e98b149e142ebe14c9bf324536d88906eda6f591057e110301`。
+  - 2026-07-13 09:30..09:40にactual `KABUCOM_TEST` captureを実行したが、kabuステーションは起動済みでもログイン/API認証が10分以内に完了せず、snapshotは0件のまま。strict replayは `STATUS: INSUFFICIENT_SNAPSHOTS` でfail closedになった。
+  - `PYTHONIOENCODING / PYTHONUTF8` を外したWindows redirect起動を5秒間実行し、UnicodeEncodeErrorなしでlauncherのAPI認証待ちまで進むことを確認した。
+- 判断:
+  - 採用。strategy alphaや日足成績を都合よく変える変更ではなく、実際のstop約定を注文・ExecutionID・snapshotへ連結し、不明状態を利益側へ補完しない根本修正である。
+  - actual `KABUCOM_TEST / KABUCOM_LIVE` snapshotとlinked exitが得られるまでは、コード上の完備性だけで「本番同等検証済み」「本番収益性検証済み」とはしない。
+- 再試行するとしたら:
+  - actual KABUCOM_TESTのAPI認証が完了した状態でsnapshotを取得し、同じcommit/configのstrict production replayを実行する。
+  - actual LIVE executionが蓄積後、gross損益を税・手数料・信用費用の口座証跡へ連結し、net損益を別集計する。
+### 2026-07-14: Adopted - Frozen Holdout Governance, Robust Exposure Ceiling, Execution-Aware Fade Exit, and Latest-Day Replay
+
+- 作業テーマ:
+  - 最新データを確定最新日まで更新し、trainの未達週・負け日・ノートレード日を再分析する
+  - 過去の狭い曜日 / breadth / market / gap boxへ追加で当て込まず、局所的なsize-up依存を除去する
+  - 日足OHLCを本番同等証拠にせず、production snapshot / lifecycleをstrict replayする
+- 最新化と期間固定:
+  - `python scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` でJ-Quants cacheを更新し、確定最新日は `2026-07-13`
+  - 最新日から機械的に6ヶ月を引くとholdout開始が `2026-01-14` へ動き、以前holdoutだった `2026-01-13` がtrainへ戻る問題を検出した
+  - `FROZEN_HOLDOUT_START = 2026-01-13` を標準backtest、refresh validation、trade/candidate diagnostics、walk-forwardへ共通適用し、一度holdoutにした日をtrainへ戻さない
+  - cacheがfrozen boundaryより後から始まる場合は、利用可能な全期間をholdoutとしてfail closedにする
+  - train評価は `2022-03-01..2026-01-09`、holdoutはcontaminated / veto用の `2026-01-13..2026-07-13`
+- 診断の根本修正:
+  - trade/candidate analyzerの画面集計はtrain-onlyだったが、CSV出力にはfull replayを保存してholdoutを混入していた
+  - CSVもtrain frameだけを書き出すよう修正し、`main(argv=None)` と回帰テストを追加した
+  - `jp_walkforward.py` が標準backtestのprepared production universeではなく全 `.T` universeを独自生成していたため、その結果を破棄して標準universeへ統一した
+  - walk-forward replay自体もfrozen holdoutより前で切り、reference-only窓へ現行holdoutを再利用しない
+  - `run_backtest_v16_production()` が翌営業日を必要としないデイトレでもcache最終日を `last_day_without_next_session` として無条件skipしていたため、このlegacy条件を除去した。2026-07-13を含む最終営業日も当日open→当日exitで評価する
+- train原因分析:
+  - 201週中の未達は115週前後で、最大損失を全額消しても+1%へ反転するのは1-2週だけ。stop微調整だけでは週次・月次目標を埋められない
+  - 未選択候補はsetup全体で期待値が負。現行候補に広くentryを足して稼働率を上げる根拠はなかった
+  - primaryはscore `<4 / 4-6` も複数年合計では正だったため、low-score no-tradeは利益源も落とすとして不採用
+  - primary score `>=6` は各観測年で正、score `>=8` は38件 / 勝率94.7%だった。ただしこの結果を上限超過のsize-upには使わず、通常上限内の連続de-riskに限定した
+  - `market_ratio >=1.15`、high breadth、score `<=6` の単純除外も複数年の正の期待値を削るため不採用
+- curve-fit依存監査:
+  - shared sizingに、trainのpure-win pocketを根拠にequity cap `3.0..10.5`、risk budget `0.15..0.375`、size multiplier `1.3..2.5`を付ける狭い分岐が多数残っていた
+  - 2026-07-10のzero-base sizing監査は個別de-riskやselected flowまで既定値へ戻して `PF 1.96 / 554 trades` まで崩した案だった。今回はそれを繰り返さず、既存の縮小・no-tradeを保持したまま、上方向の増幅だけをsetup共通上限で禁止した
+  - `primary / fallback / strong_oversold / catchup_gapdown / catchup_rs` は、それぞれの通常notional / equity / riskを超えず、size multiplierは1.0以下とした
+  - primaryはscoreを使い、通常上限の50%から100%へ連続的にde-riskする。曜日、銘柄、月、特定損失日を使わない
+  - 100万円で通常上限では100株に届かないcatchupを、board-lot成立だけを目的にsize-upしない
+- execution-aware exit:
+  - primaryが一度上昇後に反落した場合、固定sell slippage後の手取りが建値となるquoteを共有triggerとしてbacktest/liveの両方へ接続した
+  - stop/targetを先に判定し、session highがtriggerへ到達しcurrent priceが反落した場合だけ発動するため、日足OHLCの不明な順序や有利な価格で補完しない
+  - trainでは2025-12-24の `-93,500円` が手取り建値exitの `0円` となり、小幅failed-runup損失も縮小した
+- train-only段階比較:
+  - 旧局所size-up baseline: `RETURN +7408.68% / PF 29.26 / 373 trades / WEEKS >= +1% 86/201 / POSITIVE 139/201 / MONTHS >= +20% 12/46 / WORST -338,000円`
+  - setup共通上限のみ: `RETURN +2204.65% / PF 24.02 / 339 trades / WEEKS >= +1% 83/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / WORST -142,800円`
+  - 低score連続de-risk: `RETURN +1875.65% / PF 28.57 / 334 trades / WEEKS >= +1% 84/201 / POSITIVE 144/201 / WORST -122,400円`
+  - execution-aware exitと最終日評価を含む採用候補: `RETURN +1996.83% / PF 35.90 / 335 trades / WIN 70.75% / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / WORST -122,400円`
+  - 利益額と月20%件数は低下したが、旧利益の多くが局所増幅依存だったため、堅牢性を優先して低い値を新baselineとする
+- rolling / walk-forward reference-only:
+  - frozen train内のrolling 6ヶ月 / 1ヶ月step / 6窓は `POSITIVE WINDOWS 6/6`
+  - `AVG HOLDOUT RETURN +107.49% / MEDIAN +125.54% / RANGE +42.48%..+142.77% / AVG PF 263.21`
+  - `WEEKS >= +1% 93/154 / POSITIVE WEEKS 136/154`
+  - 窓は重複し、現行ロジック自体も全trainを見ているため、これはreference-onlyの破綻監視であって未観測証明ではない
+- contaminated holdout veto / 100万円 standalone:
+  - full: `RETURN +3786.74% / 378 trades / WIN 70.37% / PF 22.05 / WEEKS >= +1% 99/228 / POSITIVE 166/228 / MONTHS >= +20% 4/52 / WORST -525,000円`
+  - holdout `2026-01-13..2026-07-13`: `RETURN +85.36% / 43 trades / WIN 67.44% / PF 15.59 / WEEKS >= +1% 14/27 / POSITIVE 20/27 / MONTHS >= +20% 1/5 / WORST -525,000円`
+  - standalone `2026-06-15..2026-07-13`: `1,000,000円 -> 1,023,957円 / RETURN +2.40% / 4 trades / PF 12.41 / WEEKS >= +1% 1/5 / POSITIVE 2/5 / WORST -2,100円`
+  - standaloneは赤字ではないが、旧 `+19.70%` の多くも局所size-up依存だった。直近だけを黒字化する再調整は行わない
+- テスト:
+  - exposure上限、candidate identity、execution-aware exit、cache最終日、frozen holdout、train-only CSV、walk-forward universeを回帰対象へ追加
+  - `python -m pytest tests -q -p no:cacheprovider` -> `441 passed, 38 subtests passed`
+  - `KABUCOM_TEST / KABUCOM_LIVE` strict replayは確認時点で双方 `SNAPSHOTS 0 / STATUS INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - frozen holdout、train-only診断CSV、production universe統一、cache最終日評価は検証ガバナンス / 実行差分の根本修正として採用
+  - setup共通exposure ceiling、primaryの上限内連続de-risk、execution-aware failed-runup exitを共有本番戦略として採用
+  - hot-market / low-scoreの単純no-trade、未選択候補の追加entry、局所size-upの復活は不採用
+  - 月20%は `3/46`、月3/4稼働は `1/46` で明確に未達。「毎日勝つ」保証もできない。日足OHLCだけで全月20%へ合わせる追加分岐はカーブフィットになるため行わない
+  - actual production snapshotとlinked actual exitが0件の間は「本番同等未検証」「本番収益性未検証」を継続する
+- 再試行するとしたら:
+  - 分足、板、bid/ask数量、注文送信、部分約定、取消、actual exit、口座コストをpoint-in-timeで蓄積し、同じcode/configでtrain replayできる場合
+  - 次のclean holdoutは今回のロジック凍結後から新規に積み上げ、現行contaminated holdoutを閾値設計へ戻さない
+  - 局所size-upを少しずつ復活させず、外部データで独立したexecution edgeが得られた場合だけゼロベース再設計する
+- production snapshot再試行:
+  - 2026-07-14 09:42..09:52に `TRADE_MODE=KABUCOM_TEST / ENABLE_LIVE_ORDER=false` でactual snapshot取得を再試行した
+  - kabuステーションは起動済みだったが、ログイン/API認証が10分以内に確認できず、プロセスは発注せず自動終了した
+  - snapshot directoryは未生成、instance lockは残存せず、`KABUCOM_TEST / KABUCOM_LIVE` strict replayはいずれも `SNAPSHOTS 0 / STATUS INSUFFICIENT_SNAPSHOTS`
+  - したがって今回も「本番同等未検証」「本番収益性未検証」であり、日足OHLCを代替証拠にはしない
+
+### 2026-07-14: Adopted - Board Batch / Previous-Close Temporal Evidence and Approval Fingerprints
+
+- 作業テーマ:
+  - 月20%未達が損失、候補不足、資本配分のどこから生じるかを、frozen holdoutより前のtrainだけで再分解する
+  - daily OHLCを本番同等証拠にせず、Board batchと前日終値のpoint-in-time証拠をproduction snapshotへ追加する
+- train原因分析:
+  - full calendar month 46ヶ月の中央値は `7 trades / 7 active days / return +3.70%`
+  - 同じposition sizeのまま全損失日を0円にしても、月20%到達は現行と同じ `3/46`。損切り改善だけでは目標へ届かない
+  - 未達116週の全損失を消して+1%へ反転するのも1週だけで、主因は損失集中より利益機会不足
+  - blocked / not-selected候補はsetup・score帯・複数年で平均損失。rank1 blockedも `capped_lot_below_100: 361件 / avg -1,984円/100株`、`selected_leverage_zero: 130件 / avg -1,192円/100株`
+  - したがって低品質entry追加、inverse ETF fallback、局所size-up復活は再試行しない
+- 1% pre-trade stop-risk cap再確認:
+  - 2026-07-11の旧baseline検証後、setup共通exposure ceilingとexecution-aware exitが入ったため、再試行条件が変わったものとして自然境界1%だけをtrain-onlyで再確認した
+  - `RETURN +103.73% / 327 trades / WIN 64.83% / PF 4.08 / WEEKS >= +1% 35/201 / POSITIVE WEEKS 123/201 / MONTHS >= +20% 0/46 / WORST DAY -19,500円`
+  - 損失上限の考え方は妥当でも、100万円・100株単位ではboard lot不成立と機会損失が大きく、月20%と利益最大化を壊すため再び不採用
+  - 単元未満株または実分足・板からexpected shortfallを下げる独立edgeが得られるまで再試行しない
+- production temporal evidence:
+  - 公式仕様の情報API上限10件/秒を踏まえ、最大50銘柄の逐次Board batchについて開始・終了時刻と30秒SLOをschema v2 snapshot identityへ保存する
+  - `PreviousCloseTime` をBoard parserからsnapshotへ伝播し、各銘柄で `PreviousCloseTime == feature_asof` を必須にした
+  - batch時刻欠損・逆転・別日・30秒超過・capture先行、JST以外、前日終値日付不一致は新規entryをfail closedにする
+  - candidate engine、production replay、quote parser、order journalもlive承認manifestのcode fingerprintへ追加した
+  - runtime hashは `sha256:302a23152292c795056d812a7197503678e716033de799a8c72652c7143102eb`
+- テスト:
+  - focused: `190 passed, 38 subtests passed`
+  - full: `python -m pytest tests -q -p no:cacheprovider` -> `443 passed, 38 subtests passed`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / STATUS INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - strategy alphaと日足baselineは変更しない。Board temporal evidenceと承認fingerprint拡張は、本番との差を利益方向へ丸めない根本修正として採用
+  - actual snapshotが0件なので、schema v2のコード回帰が通っても「本番同等未検証」「本番収益性未検証」は継続する
+  - 月20%は `3/46` のままで、現データから追加entryや閾値調整を行う根拠はない
+- 再試行するとしたら:
+  - API認証済みのactual KABUCOM_TEST snapshotをschema v2で取得し、同じruntime hashでcandidate / selected digestとlinked lifecycleをstrict replayできる場合
+  - 非simulation KABUCOM_LIVEのactual exitと税・手数料・信用費用をsnapshot IDへ連結できる場合
+
+### 2026-07-14: Adopted - Fail-Closed News / AI Operational Evidence
+
+- 作業テーマ:
+  - 日足OHLCの閾値探索ではなく、本番最終注文判断のexact replayを妨げるnews / AI operational vetoの証拠欠落を解消する
+  - 不明な外部状態を「機会損失回避」の名目で自動承認せず、損失側へfail closedにする
+- 根本原因:
+  - RSS取得例外を「ニュースなし」と同じ文字列へ変換していたため、通信・HTTP・parse失敗でもentryを通していた
+  - Gemini / Groq未設定、両provider失敗、timeout、不正形式応答をすべてauto-passしていた
+  - decision logには短いreasonだけが残り、news本文、model、prompt、raw responseを同じ `decision_snapshot_id` から検証できなかった
+- 採用変更:
+  - RSS結果を `ok / no_news / error` に分離し、HTTP失敗とparse失敗を明示的なerror evidenceにする。error時はその候補以降のentryを停止する
+  - AI応答の1行目が明示的な `NO` の場合だけ承認し、`YES` はveto、未設定・例外・timeout・不正形式はすべてvetoにする
+  - operational review行へRSS query、news本文/hash、AI provider/model、prompt/raw responseと各SHA256、errorを保存する
+  - strict production replayはevidence schema、hash、news状態とAI outcome、pass/vetoの整合を検証し、欠落・改ざんを `LIFECYCLE_INCOMPLETE` にする
+  - `core/ai_filter.py` をlive approval manifestのcode fingerprintへ追加し、`GEMINI_MODEL / GROQ_MODEL` もruntime承認snapshotへ含める
+- reference-only baseline:
+  - strategy alphaは変更していない。validate-onlyで最新日 `2026-07-13`、frozen holdout `2026-01-13` を再確認
+  - train: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE WEEKS 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - standalone `2026-06-15..2026-07-13`: `1,000,000円 -> 1,023,957円 / RETURN +2.40% / 4 trades / PF 12.41 / WEEKS >= +1% 1/5 / POSITIVE WEEKS 2/5 / WORST -2,100円`
+- テスト:
+  - focused: `85 passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `452 passed, 38 subtests passed`
+  - runtime hash: `sha256:61a10a691932760c193c2e281de3e9d064c946068269e3851a8101ba449d380f`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / STATUS INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - 採用。本番外部状態の不確実性を利益方向へ補完しない根本修正で、日足成績を上げるためのbacktest専用分岐ではない
+  - 月20%は `3/46` のまま。本変更を日足alpha改善の根拠には使わない
+  - actual schema v2 snapshotが0件のため、コード回帰が通っても「本番同等未検証」「本番収益性未検証」は継続する
+- 再試行するとしたら:
+  - API認証済みactual TEST/LIVE snapshotでoperational review evidenceを取得し、同じruntime hashでcandidate / selected digest、AI veto、order lifecycleをstrict replayできる場合
+  - 非simulation LIVEのactual exitとnet口座コストを同じsnapshot IDへ連結できる場合
+
+### 2026-07-14: Adopted - Actual Execution Cost Evidence and Fail-Closed Net PnL
+
+- 作業テーマ:
+  - 日足alphaの追加当て込みではなく、本番損益が費用前grossでしか証明できない残差を解消する
+  - 手数料・税・信用費用が欠ける状態を0円とみなさず、actual net損益をfail closedで検証する
+- 根本原因:
+  - orders APIの約定明細には `Commission / CommissionTax`、positions APIには `Expenses / Commission / CommissionTax` があるが、broker変換時にすべて破棄していた
+  - exit logとproduction replayは `(sell - buy) * shares` をgross / observed PnLとして集計し、actual costの有無・完全性・算術整合を検証していなかった
+  - 部分決済のentry費用と最終的な信用費用は単純按分してもactual値にならないため、部分決済をnet実績として確定できなかった
+- 採用変更:
+  - fillごとの `TransactTime / Commission / CommissionTax` を `ExecutionFill` へ保持し、複数回の追従発注をorder ID単位で重複なく合算する
+  - broker positionの `Expenses / Commission / CommissionTax` をlocal strategy metadataと一緒に保持し、欠損と実値0円を区別する
+  - exit logへgross、entry commission/tax、position expenses、exit commission/tax、execution total cost、execution-net、譲渡益税、final-net、各evidence schema/reasonを分離保存する
+  - 完全決済、entry数量一致、全5執行費用、execution cost complete、gross - cost = execution-netで `observed_execution_net_pnl` を確定する。`CommissionTax` は譲渡益税とみなさず、別の譲渡益税証跡も揃う場合だけ最終 `observed_net_pnl` を確定する
+  - 部分決済、項目欠損、負値、source不一致、算術不一致ではexecution-netを未検証とし、譲渡益税欠損時はfinal-netを `None` とする。LIVE strict replayは双方をfail closedで要求し、TESTはexecution-cost / lifecycle証拠に限定する
+  - protective-stop disappearance reconciliation、通常signal exit、14:30 flattenのすべてで同じcost evidenceをsnapshot-linked exitへ伝播する
+- reference-only baseline:
+  - strategy alphaは変更していない。最新日 `2026-07-13`、frozen holdout `2026-01-13`、train `RETURN +1996.83% / 335 trades / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE WEEKS 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円` は据え置き
+  - standalone `2026-06-15..2026-07-13`: `RETURN +2.40% / 4 trades / PF 12.41 / WEEKS >= +1% 1/5 / POSITIVE WEEKS 2/5 / WORST -2,100円` も据え置き
+- テスト:
+  - 約定時刻・手数料・手数料税のfill保持、追従注文合算、position費用、完全決済execution-net、譲渡益税証跡付きfinal-net、部分決済net拒否、費用改ざん・算術不一致を回帰対象へ追加
+  - focused: `191 passed, 38 subtests passed`
+  - full: `python -m pytest -q` -> `456 passed, 38 subtests passed`
+  - runtime hash: `sha256:214d96e471bf720481a03b8b95d3206155b9d322c107fdd15e55646ac0d27d08`
+  - `KABUCOM_TEST / KABUCOM_LIVE` strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / LINKED_EXECUTION_NET_ACTUAL_EXITS 0 / LINKED_NET_ACTUAL_EXITS 0 / OBSERVED_EXECUTION_NET_PNL None / OBSERVED_NET_PNL None / STATUS INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - 採用。actual APIが返す費用を証拠経路へ通し、不明な費用を利益方向へ0円補完しない本番差分の根本修正である
+  - 日足alphaとbaselineは変更しない。月20%は `3/46`、毎日勝つ保証も未達であり、現行日足データへ追加条件を当て込まない
+  - actual TEST/LIVE snapshotとlinked actual exitが0件のため、コード回帰が通っても「本番同等未検証」「本番収益性未検証」は継続する
+- 再試行するとしたら:
+  - API認証済みactual KABUCOM_TESTで同一runtime hashのsnapshot、entry、stop、exit、残数量0、費用証跡をstrict replayできる場合
+  - 非simulation KABUCOM_LIVEの完全決済が蓄積し、`OBSERVED_NET_PNL` と口座明細をsnapshot ID / order / execution IDで追加照合できる場合
+
+### 2026-07-14: Adopted - Latest-Day Refresh, Execution-Net Intraday Capital, and Journal Isolation
+
+- 作業テーマ:
+  - J-Quants確定最新日まで更新し、frozen train / contaminated holdout / 100万円standaloneを再確認する
+  - 日足alphaへ条件を追加せず、actual execution costが日中risk capitalと後続entry sizingへ反映されるかを本番経路で監査する
+  - pytestがactual order journalを汚さず、本番証拠と回帰証拠を分離できているか確認する
+- 最新化:
+  - `python scripts/jp_refresh_validate.py --holdout-months 6 --standalone-latest-months 1` で2026-07-06..2026-07-14の7営業日、31,042行、4,430銘柄をincremental更新し、確定最新日は `2026-07-14`
+  - 最初の更新runはcache保存と全summary出力後に実行ラッパーのtimeoutで終了コード124になったため、`--validate-only` を十分なtimeoutで再実行し、終了コード0と完全再現を確認した
+  - frozen境界は `2026-01-13` のまま固定し、2026-07-14をtrainへ入れずcontaminated / veto holdoutへ追加した
+- reference-only結果:
+  - full `2022-03-01..2026-07-14`: `FINAL 39,014,693円 / RETURN +3801.47% / 379 trades / WIN 70.45% / PF 22.13 / WEEKS >= +1% 99/228 / POSITIVE 167/228 / MONTHS >= +20% 4/52 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -525,000円`
+  - train `2022-03-01..2026-01-09`: `FINAL 20,968,302円 / RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`。境界固定のため不変
+  - contaminated holdout `2026-01-13..2026-07-14`: `RETURN +86.07% / 44 trades / WIN 68.18% / PF 15.71 / WEEKS >= +1% 14/27 / POSITIVE 21/27 / MONTHS >= +20% 1/5 / WORST -525,000円`
+  - standalone `2026-06-15..2026-07-14`: `1,000,000円 -> 1,026,188円 / RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+  - 新規の2026-07-14は `+2,231円 / 1 trade`。このholdout結果を見てalphaや閾値を再調整していない
+- 根本原因:
+  - live `realized_pnl_today` は `(fill - buy) * shares` のgrossを加算し、手数料・手数料税・建玉費用が欠けたまま後続entryのequity / sizingを過大評価していた
+  - `realized_pnl_today` にJST取引日がなく、再起動後に前営業日の損益を翌日のrisk capitalへ持ち越す可能性があった
+  - 単純に日次resetすると逆に前日までの損益が `configured_risk_capital` へ残らず、weekly / monthly guardが当日損益しか見ないため、累積損失制御が無効になる差分があった
+  - signal exit後も同一loopの `current_total` は決済前の値で、後続scanがstale equityを使い得た
+  - `tests/test_kabucom_broker.py` の一部がdefault `data/kabucom_test/order_journal.jsonl` へsynthetic eventを書き、本番証拠とテスト証拠を混在させていた
+- 採用変更:
+  - 完全決済かつentry / position / exitのactual cost evidenceが揃う場合だけ `observed_execution_net_pnl` をactual realized PnLへ加算する
+  - risk capitalにはactual final-net証拠があればそれを使い、無い正のexecution-netは既存 `TAX_RATE` reserve後、損失は全額を反映する。open profitにも同じreserveを置き、税不明の利益をそのまま複利化しない
+  - 証拠が完全な前日のrisk deltaだけを `configured_risk_capital` へ繰り越し、JST日次値をresetする。累積資本の証拠不完全は翌日も自動解除せず、資本0以下を100万円へ復活させない
+  - 部分決済、費用欠損、非有限値、取引日不明のlegacy PnLはgrossや0円費用で補完せず、evidence reasonを永続化して日付変更後も新規entryをfail closedにする
+  - signal exit後にequity、weekly state、monthly riskを再計算してからentry authorization / sizingを行う。最終税引後netのproduction replay要件は従来どおり別証拠として維持する
+  - broker testの `append_order_journal` をtestごとの一時ディレクトリへ隔離した
+- テストと証拠:
+  - 今回のtargeted: `tests/test_auto_trade.py = 67 passed`、`tests/test_kabucom_broker.py = 114 passed, 38 subtests passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `461 passed, 38 subtests passed`
+  - 既定 `data/kabucom_test/order_journal.jsonl` を全6,891行再監査した結果、銘柄付き6,051行はすべて単体テスト用 `1234`、銘柄なし840行もすべて疑似注文ID `ORDER-1` で、production snapshot ID / trade modeは全行欠落していた。actual証拠との混在は認められず、全体が過去のテスト生成物だった
+  - 原本2,930,677 bytesを `data/kabucom_test/quarantine/order_journal.unit_test_synthetic.20260611_20260714.f47f5587.jsonl` へ可逆隔離した。SHA-256 `F47F5587A77D55D3DDFFCDBA0F6972A028EFE6742CF8FF2C87F0AF8037700C14` は移動前後一致
+  - 隔離前は `journal_unresolved:1647 / accepted_order_missing_at_broker:1596 / unconfirmed_stop_replay:627` でstartup recoveryがmanual reviewを要求していた。隔離後は既定journal 0件、同じ空ポジション・空注文・wallet完全条件で `needs_manual_review=False / blocking_reasons=()` へ正常化した
+  - 隔離後のfull testでも `461 passed, 38 subtests passed`。既定journalは実行前後とも存在せず、broker testの一時journal隔離が再汚染を防ぐことを確認した
+  - `git diff --check` は改行変換warningのみで成功
+  - runtime hash: `sha256:22769fb4be890c81ed22b7e35b4765cfa553b2eb39d1a7499b1f1838df495a91`
+  - 2026-07-14 23:32の読み取り専用確認では `AUTHENTICATED_API_READY=False`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`
+- 判断:
+  - 採用。strategy alphaや日足損益を上げる変更ではなく、費用前利益・前日損益・stale equityで本番riskを利益方向へ過大評価する差分と、テストによる証拠汚染を解消する根本修正である
+  - trainの月20%は `3/46`、月3/4稼働は `1/46` のままで、目標未達。「毎日勝つ」保証もできない。2026-07-14のholdout利益を理由に日足条件を追加しない
+  - actual production snapshotとlinked lifecycleが0件なので、「本番同等未検証」「本番収益性未検証」は継続する
+- 再試行するとしたら:
+  - 次の営業日9:30以降に、API認証済みactual KABUCOM_TESTで同一runtime hashのschema v2 snapshotを取得し、entry / stop / exit / remaining=0 / execution costをstrict replayできる場合
+  - 非simulation KABUCOM_LIVEのactual exitと口座税証拠が蓄積し、最終 `observed_net_pnl` までsnapshot / order / execution IDで照合できる場合
+
+### 2026-07-15: Adopted - API Readiness Root-Cause Diagnostics and Approval Coverage
+
+- 作業テーマ:
+  - 寄り前からactual `KABUCOM_TEST` captureを再試行し、過去2回の「ログイン/API認証待ち」失敗をポート・token・snapshotの段階へ分解する
+  - API起動と営業日判定を担うコードがlive承認hashで保護されているか監査する
+- actual capture監査:
+  - 2026-07-15 08:56に `TRADE_MODE=KABUCOM_TEST / ENABLE_LIVE_ORDER=false` で `auto_trade.py` を起動した
+  - kabuステーションは起動・ログインに成功し、画面タイトルも「kabuステーション」へ遷移したが、09:08まで18080 / 18081のどちらにもTCP listenerが作られなかった
+  - したがって根因はログインやAPIパスワード不一致より前の `api_port_not_listening`。公式手順の「APIを利用する」設定、APIパスワード設定、kabuステーション再起動が未完了である
+  - captureプロセスは10分待機後に非zero終了し、production snapshot / order journal / actual exitを生成していない
+  - authoritative `contracts/jpx_trading_calendar.json` も未生成のためLIVE write gateは継続してfail closed。`jpholiday` fallbackをauthoritative evidenceには使わない
+- 採用変更:
+  - launcherのAPI待機timeout後に、`api_port_not_listening / api_password_missing / api_token_authentication_failed` を区別する
+  - port未起動では、kabuステーション右上 `</>` のAPIシステム設定で「APIを利用する」とAPIパスワードを設定し、再起動する必要があることを明示する
+  - `core/jpx_calendar.py` と `core/kabu_launcher.py` をlive approval manifestのcode fingerprintへ追加し、API起動・営業日判定コードの変更も承認hashを変えるようにした
+- reference-only再確認:
+  - 2026-07-15寄り後だが当日足は未確定のため更新へ混ぜず、`--validate-only` で確定最新日 `2026-07-14` を再現した
+  - train `2022-03-01..2026-01-09`: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - standalone `2026-06-15..2026-07-14`: `1,000,000円 -> 1,026,188円 / RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused launcher / manifest: `11 passed, 2 subtests passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `464 passed, 38 subtests passed`
+  - full test前後で既定actual journalは存在せず、再汚染なし
+  - runtime hash: `sha256:01ccb4d608cb47764abada9e192ee469f4f027c2bfa744ff0e60c4e2b9c373c1`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`、終了コード2
+- 判断:
+  - 採用。APIを開けていない状態をtoken不一致と混同しない根本診断であり、同じ外部失敗を繰り返す時間を減らす。承認fingerprint拡張は本番コード差分を利益方向へ見逃さないための修正である
+  - strategy alphaとdaily OHLC baselineは変更しない。train月20%は `3/46`、毎日勝つ保証も未達であり、actual evidenceがないまま閾値を追加しない
+  - actual snapshotとlinked lifecycleが0件なので、「本番同等未検証」「本番収益性未検証」は継続する
+- 再試行するとしたら:
+  - 公式APIシステム設定を有効化し、kabuステーション再起動後に18081 listenerとtoken認証を確認できる場合
+  - 同じruntime hashでactual TEST snapshot / candidate digest / selected digest / order lifecycle / execution costをstrict replayできる場合
+
+### 2026-07-15: Adopted - Same-Day Outcome Isolation and Authoritative JPX Calendar Contract
+
+- 作業テーマ:
+  - API利用可否はユーザー確認待ちとし、接続を伴わない本番差分を監査する
+  - 日足OHLCの当日結果が将来のselector / leverage / sizing変更へ漏れない境界を固定する
+  - 未配置だったJPX営業日契約を、`jpholiday`推定ではなくJPX公式sourceから生成する
+- 根本原因:
+  - candidate engine入力型から当日OHLCは除外済みだったが、生成後のcandidate dictへ当日 `close / high / low` をselector呼出前に付与していた。現行selectorは未参照でも、将来変更でlookaheadを導入できる構造だった
+  - `contracts/jpx_trading_calendar.json` がなく、LIVE strict calendar gateは常にclosedだった
+  - calendar loaderは明示URLとhashの存在だけを見ており、任意domainや非SHA-256文字列をauthoritative sourceとして渡せた。またcalendar artifact自体がlive承認hashへ束縛されていなかった
+- 採用変更:
+  - 当日 `close / high / low` はcandidate dictへ一切付与せず、selectorと全leverage判断後に作るexecution-only mapからcandidate log / OHLC exitだけが参照する
+  - `scripts/update_jpx_trading_calendar.py` を追加し、[JPX公式の営業時間・休業日一覧](https://www.jpx.co.jp/corporate/about-jpx/calendar/index.html)の年別表を取得して全暦日を明示分類する。要求年欠落、年15件未満、cross-year、空responseはfail closedにする
+  - LIVE strict modeでは公式JPX HTTPS URLと `sha256:` + 64桁hexだけを許可する
+  - `contracts/jpx_trading_calendar.json` 自体をlive approval manifestのfingerprintへ追加し、calendar更新後に旧承認hashを再利用できないようにする
+- calendar結果:
+  - coverage `2026-01-01..2027-12-31`、営業日486日、休場日244日、half-day 0日
+  - JPX source HTML hash `sha256:d6106b352ebdbecd922291c17933df6c10278634a4e69812a4746e37bf35559e`
+  - calendar artifact SHA-256 `042BF270AC963357A3A668C3D9D0B595081CDA86CC8DD759B12B8EB57ED19FD3`
+  - strict確認は2026-07-15を営業日、2026-07-20と2027-12-31を休場日として判定した
+- reference-only再確認:
+  - outcome隔離前後でbaselineは完全不変
+  - train `2022-03-01..2026-01-09`: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - calendar parser / strict gate / manifest focused: `125 passed, 41 subtests passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `468 passed, 41 subtests passed`
+  - full test前後で既定actual order journalは存在せず、再汚染なし
+  - runtime hash: `sha256:34ba3539e3063dbe61a2ff9267e12cea15f1373b3071a456ab1076ade509c6d5`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`、終了コード2
+- 判断:
+  - 採用。成績を上げるbacktest専用分岐ではなく、future outcomeの構造的隔離とauthoritative営業日証拠の生成・承認束縛を行う本番安全修正である
+  - calendar gate単体は解消したが、actual TEST証跡、API、CI attestation、operator ACK、risk reviewなど他条件が未完了なのでLIVE writeは閉じたまま
+  - train月20%は `3/46`、月3/4稼働は `1/46` のまま。未選択候補が負期待値である既存分析を覆す新データはなく、日足条件の追加当て込みは行わない
+- 再試行するとしたら:
+  - API利用可能の連絡後、同じcode/runtimeでactual KABUCOM_TEST snapshotとlinked lifecycleを取得できる場合
+  - JPX公式ページに翌年表が追加・変更された場合、同じgeneratorでcoverageを更新し、新しいcalendar fingerprintを承認する
+
+### 2026-07-15: Adopted - Shared Production Observation Replay; Alpha Still Rejected
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちのため再接続せず、API非依存で残っている最大の本番差分を検証する
+  - 全Primeを毎日参照するdaily OHLC baselineと、本番で前日固定する49銘柄の観測母集団を同じbacktest経路で比較可能にする
+- 根本原因:
+  - 本番の49銘柄選定は `auto_trade.py` にしかなく、標準 `jp_backtest.py` は現在のPrime全銘柄を毎日参照していた
+  - 2026-07-11にliquidity-only 50銘柄案をtrainで不採用にしていたが、現行コード・現行cacheで同じ制約を定常再検証する経路がなく、全銘柄baselineの高収益を本番可能成績と誤認できる状態だった
+  - 観測policyの実装ファイルがlive承認hashの直接対象ではなかった
+- 採用変更:
+  - `core/daytrade_observation_universe.py` に、前日確定値、Prime、除外リスト、bull/inverse ETF予約、shared minimum turnover、100株の流動性headroomだけを使う固定49銘柄policyを共通化した
+  - `auto_trade.py` は同じ共通policyを使用し、`backtest.py` は日ごとの観測indexを基礎universeの縮小制約として受け取る。日付欠損はno-trade、基礎universe外への拡張は拒否する
+  - `jp_backtest.py --production-observation-replay` を追加した。49は探索値ではなく本番API登録上限から固定し、同日close/high/low、過去損益、曜日、当日gapでshortlistを調整しない
+  - 共通観測policyをlive approval manifestのcode fingerprintへ追加した
+- production-observation-constrained daily OHLC結果:
+  - 評価期間 `2022-03-01` 以降の1,070営業日はすべて49銘柄ちょうどで、日次欠損・上限逸脱なし
+  - full `2022-03-01..2026-07-14`: `RETURN -38.11% / 309 trades / WIN 34.30% / PF 0.77 / WEEKS >= +1% 40/228 / POSITIVE 61/228 / MONTHS >= +20% 0/52 / MONTHS >= 3/4 ACTIVE 0/52 / WORST -51,000円`
+  - train `2022-03-01..2026-01-09`: `RETURN -43.84% / 288 trades / WIN 32.99% / PF 0.72 / WEEKS >= +1% 35/201 / POSITIVE 52/201 / MONTHS >= +20% 0/46 / MONTHS >= 3/4 ACTIVE 0/46 / WORST -51,000円`
+  - contaminated holdout `2026-01-13..2026-07-14`: `RETURN +10.20% / 21 trades / WIN 52.38% / PF 2.08 / WEEKS >= +1% 5/27 / POSITIVE 9/27 / MONTHS >= +20% 0/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST -18,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +0.14% / 1 trade / WIN 100.00% / PF inf / WEEKS >= +1% 0/5 / POSITIVE 1/5 / WORST 0円`
+  - 標準全Prime baselineは変更なし。上記holdoutはcontaminatedなので、良い見た目を採用理由に使わない
+- テストと証拠:
+  - focused observation / backtest / harness / manifest: `114 passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `473 passed, 41 subtests passed`
+  - full test前後で既定actual order journalは存在せず、再汚染なし
+  - `git diff --check` は改行変換warningのみで成功
+  - runtime hash: `sha256:8a946ace9fab7d59a31b10aa3b59f505dc931d07515843f11347bdb2b509bc81`
+- 判断:
+  - 共通policyと制約付きdiagnosticは採用する。backtestを勝たせる分岐ではなく、全Prime参照という楽観差を可視化し、将来のpolicy変更を承認hashへ束縛する本番安全修正である
+  - strategy alphaとしては不採用のまま。trainは赤字、月20% `0/46`、月3/4稼働 `0/46` で、本番49銘柄制約下の収益性を支持しない。「毎日勝つ」保証もできない
+  - 2026-07-11の分析どおり、同じ49/50銘柄内でgap / score / 曜日quotaを追加するのはカーブフィットになるため再探索しない。LIVE writeは閉じたまま、本番同等未検証・本番収益性未検証を継続する
+- 再試行するとしたら:
+  - 全銘柄の寄付または寄前気配をpoint-in-timeで取得し、同じ履歴をtrain replayできる外部feedを導入した場合
+  - 49銘柄を超えるregistry入替を、API failure、special quote、時刻、解除・登録結果までsnapshotへ履歴化し、同じoperational pathをreplayできる場合
+  - ユーザーからAPI利用可能の連絡後、同じruntime hashでactual KABUCOM_TEST snapshotとlinked lifecycleを取得できる場合
+
+### 2026-07-15: Adopted - Fixed 196 Rotating Discovery Diagnostic and Registry Fail-Closed Contract; Live Activation Pending
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちとして再接続せず、固定49銘柄の観測制約をAPI非依存で改善する
+  - 2026-07-11の50銘柄shortlist不採用時に再試行条件とした「49銘柄を超えるregistry入替をhistory / replay可能にする経路」を実装する
+  - holdoutを閾値設計へ使わず、trainで全Prime / 固定49 / 巡回196の構造差を分解する
+- 事前固定した運用仮説:
+  - [公式APIリファレンス](https://kabucom.github.io/kabusapi/reference/index.html)の登録総数50銘柄制約から、指数 `1321` を常時保護し、1バッチ49銘柄とした
+  - 情報系API 10回/秒と既存30秒snapshot SLOから、4バッチ・196銘柄を成績確認前に固定した。196やバッチ数を利益に合わせて変えていない
+  - shortlistは前日確定値だけを使い、shared candidate engineを前日終値比 `-2% / 0% / +2%` の3つの固定仮想寄付で評価する。安定シナリオ数、最大score、前日流動性の順に並べ、同日open / high / low / close / 損益を使わない
+- 採用変更:
+  - `core/daytrade_observation_universe.py` に固定196銘柄の日次policyを追加し、`jp_backtest.py --rotating-discovery-replay` と `analyze_backtest_trade_log.py --rotating-discovery-replay` から同じpolicyを使う
+  - 固定196policyを1営業日分の `select_daytrade_rotating_discovery_codes()` へ分離し、history replayとlive準備adapterの唯一の順位判断源にした
+  - `trade_date <= feature_asof`、正規化後のticker重複、feature vector不整合、`1321` / breadth / market trend証拠欠落は空集合へfail closedにする
+  - live準備adapterは前日までのDataFrameから共有selector入力を作るだけで、独自のscore・ranking・sizing判断を持たない。actual API未検証のため現行loopからはまだ呼ばない
+  - `backtest.py` の既存日次観測制約をそのまま使い、日付欠損はno-trade、基礎universe外への拡張は拒否する
+  - `core/daytrade_opening_discovery.py` に、初期registry清掃、`1321` 保護、4回の `register -> Board -> unregister`、全件Board完全性、30秒上限、最終registry復元を1つの結果へ束縛するcollectorを追加した
+  - registry / Board例外、部分登録、要求銘柄不一致、板欠損、解除失敗、30秒超過はすべてfail closed。例外後も全バッチ解除を試み、`1321` 以外が残る場合は成功を返さない
+  - `KabucomBroker.register_symbols / unregister_symbols` はHTTP 200だけで成功扱いせず、公式 `RegistList` で要求銘柄の完全登録 / 完全解除を検証する。登録総数50超はAPI送信前に拒否する
+  - discovery collectorをlive approval manifestのfingerprintへ含めた
+- 固定196 rotating-discovery daily OHLC結果:
+  - 1日selector分離前後でfull / train / holdout / standaloneの全指標は完全一致
+  - 評価期間1,070営業日のうち、`1321` のSMA200が未成立な `2022-03-01..2022-03-30` の21営業日は観測0へfail closed、残り1,049営業日は196銘柄。該当21日は分離前も取引0で損益差なし
+  - full `2022-03-01..2026-07-14`: `RETURN +2428.31% / 405 trades / WIN 64.44% / PF 8.45 / WEEKS >= +1% 93/228 / POSITIVE 155/228 / MONTHS >= +20% 4/52 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -370,600円`
+  - train `2022-03-01..2026-01-09`: `RETURN +1217.72% / 360 trades / WIN 63.89% / PF 6.20 / WEEKS >= +1% 80/201 / POSITIVE 134/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -370,600円`
+  - contaminated holdout `2026-01-13..2026-07-14`: `RETURN +91.87% / 45 trades / WIN 68.89% / PF 14.23 / WEEKS >= +1% 13/27 / POSITIVE 21/27 / MONTHS >= +20% 1/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST -325,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+  - holdoutはcontaminated / veto用であり、下記の追加案作成・順位付けには使っていない
+- train差分分析:
+  - 全Prime 335件と巡回196件の共通取引は287件
+  - 巡回側は全Primeの48件・合計 `+506,460円` を取り逃し、代わりに再順位付けした73件が合計 `-980,823円`。以後の共通287件も資本経路差で全Primeより約630万円縮小した
+  - 巡回側の `primary` は238件・合計約 `+10,660,914円` と正だが、`inverse + inverse_pullback` は27件・合計約 `-582,258円`
+  - 最大損失は `2024-10-15 5803.T catchup_rs` の `-370,600円`。ただし既にsetup共通exposure capと1% pre-trade risk cap不採用を検証済みで、単一日の再発防止条件や近傍risk thresholdは追加しない
+- 追加仮説と不採用結果:
+  - 3点scenarioがgap符号境界を落としている仮説に対し、共有gap上限±3%を等間隔5点で覆う1案だけをtrain確認した。`RETURN +1150.69% / 355 trades / PF 5.55 / WEEKS >= +1% 80/201 / WORST -370,600円` で3点案より悪化したため不採用
+  - 合成gap順位が過剰という仮説に対し、前日流動性上位196だけの1案をtrain確認した。`RETURN +109.06% / 341 trades / PF 1.43 / WEEKS >= +1% 53/201 / WORST -149,600円`。損失は浅くなるが利益、PF、週達成を壊すため不採用
+  - 5点案は3点へ戻し、流動性だけの一時分岐も残していない
+- テストと証拠:
+  - final focused one-day selector / live adapter / harness / manifest: `94 passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `501 passed, 41 subtests passed`
+  - full test前後で既定actual order journalは存在せず、隔離済みsynthetic原本も維持
+  - `git diff --check` は改行変換warningのみで成功
+  - runtime hash: `sha256:84a323bae5981061a00057f9ceb024d4b2c915fde5dceef967040d84291d7dac`
+- 判断:
+  - 固定196policy、reference-only replay、train-only診断、API-independent fail-closed collector、registryレスポンス完全性検証は採用する
+  - strategy alphaの本番有効化は保留する。固定49の `-43.84% / PF 0.72` は大幅改善したが、全Prime trainの `+1996.83% / PF 35.90 / WORST -122,400円` に届かず、月20%も `3/46`、月3/4稼働も `1/46` で未達
+  - collectorは `auto_trade.py` のlive経路へまだ接続しない。actual `KABUCOM_TEST` でregistry / Board / candidate digest / lifecycleを検証できず、現在のAPI停止状態で有効化するのは本番同等条件を満たさない
+  - 「毎日勝つ」保証はできず、本番同等未検証・本番収益性未検証を継続する
+- 再試行するとしたら:
+  - ユーザーからAPI利用可能の連絡後、同じcode/runtimeで4バッチの登録結果、Board時刻、完全解除、candidate / selected digest、注文lifecycleをactual KABUCOM_TEST snapshotへ保存してstrict replayできる場合
+  - 196銘柄を超える外部寄前feedを導入する場合は、point-in-time履歴と失敗状態も保存し、train replay可能にする場合だけ
+  - 同じ3/5点scenarioや流動性順位、catchup個別日、近傍risk thresholdは再探索しない
+
+
+### 2026-07-15: Adopted - Rotating Discovery Snapshot Schema v3 and Protected Market Evidence; Live Activation Pending
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちとして再接続せず、巡回196をactual production snapshotへ接続する前の証拠欠損をAPI非依存で解消する
+  - collectorの成功だけで本番同等扱いせず、`1321`、4バッチ、registry復元を同じsnapshot identityでstrict replayできるようにする
+- 根本原因:
+  - 巡回collectorは196銘柄のBoardを取得していたが、candidate判断に必須の市場指数 `1321` は保護登録するだけでBoardを取得しておらず、market inputのactual観測証拠が欠けていた
+  - production snapshot schema v2は単一board batchの開始・終了だけを持ち、4回の登録・Board・解除、batch順序、最終registry復元をreplay時に検証できなかった
+  - snapshot validatorは要求銘柄の欠損は拒否したが、未要求銘柄や重複symbol inputを拒否せず、入力母集団が拡張される余地があった
+- 採用変更:
+  - `collect_daytrade_opening_discovery()` は初期registry清掃と `1321` 保護登録後、最初に `1321` Boardを取得する。欠損・例外・要求不一致なら4バッチへ進まずfail closedにする
+  - collector結果へ `protected_board` 証拠を追加し、quote payloadを重複保存せず、要求・観測・失敗、各時刻、4バッチ、最終registry、rejectionをsnapshot用にserializeする
+  - production snapshotをschema v3へ更新し、`production_fixed_49_v1` と `rotating_discovery_196_v1` のobservation policyをidentityへ固定した
+  - 巡回policyでは、196銘柄が重複なし、`1321 + 4×49` が全件観測済み、各register / unregister成功、時系列非重複、全体30秒以内、最終registryが `1321` だけ、collector rejectionなしをstrict replayの必須条件にした
+  - 要求外symbol input、要求code重複、symbol input重複に加え、nested evidenceの型破損やnaive / mixed timezoneも例外終了させず全policyでno-entryにした
+  - `compute_rotating_daytrade_production_snapshot()` を追加し、collector結果からrequested codes、`1321`、Board、失敗理由、全体時刻、policy、schema v3 evidenceを一意に `compute_observed_daytrade_production_snapshot()` へ転送する。現行live loopは固定49のままとし、actual TEST未検証の巡回196を有効化していない
+- reference-only期間と成績:
+  - 2026-07-15当日足は未確定のためcacheへ混ぜず、確定最新日は `2026-07-14`、frozen holdoutは `2026-01-13..2026-07-14`、trainは `2022-03-01..2026-01-09` のまま
+  - strategy alpha、ranking、sizing、entry / exitは変更していないためdaily OHLC baselineは不変
+  - 全Prime trainは `RETURN +1996.83% / PF 35.90 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - 巡回196 trainは `RETURN +1217.72% / PF 6.20 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -370,600円`
+  - standalone `2026-06-15..2026-07-14` は `RETURN +2.62% / 5 trades / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused discovery / production replay / live adapter: `104 passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `512 passed, 41 subtests passed`
+  - full test前後で既定actual order journalは存在せず、隔離済みsynthetic原本を維持
+  - `git diff --check` は改行変換warningのみで成功
+  - runtime hash: `sha256:32de82223cc624a581d7477c6ff1725f48487f26b3faf7ba1ed4b54476bbc08b`
+  - TEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`、終了コード2
+- 判断:
+  - `1321` actual Board取得、schema v3証拠、strict validation、未要求/重複input拒否は、本番差分を利益側へ補完しない根本安全修正として採用する
+  - strategy alphaの本番有効化は引き続き保留する。train月20%は全Prime / 巡回196とも `3/46` で未達、「毎日勝つ」保証はできない
+  - actual snapshotとlinked lifecycleが0件なので、「本番同等未検証」「本番収益性未検証」を継続する
+- 再試行するとしたら:
+  - ユーザーからAPI利用可能の連絡後、同じcode/runtimeでschema v3の `1321 + 4×49` actual KABUCOM_TEST snapshotを取得し、candidate / selected digestとregistry / order lifecycleをstrict replayできる場合
+  - actual TESTで30秒SLOや情報API rate limitに違反した場合は利益方向に時間幅を緩めず、batch数・取得経路・no-trade方針をtrainへ戻って再設計する
+
+### 2026-07-15: Adopted - Fresh Pre-Sizing Entry Quote and Strict Lifecycle Evidence
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちのため再接続せず、観測snapshotから実発注までに残る価格鮮度差を監査する
+  - news / AI待機後の古いBoardで数量を決める経路をなくし、発注直前価格をactual lifecycle証拠へ連結する
+- 根本原因:
+  - 従来は候補snapshot作成時のBoardを最大300秒まで許容し、その現在値をnews / AI審査後もsizingへ使っていた
+  - brokerの追従注文は発注時にBoardを再取得する一方、数量はその前に古い現在値で決まり得たため、急騰時にnotionalを過大化する時間差があった
+  - strict production replayはcandidate、news / AI、order / fill / exitを検証していたが、sizing直前quoteの時刻・価格・受信時刻を要求していなかった
+- 採用変更:
+  - liveのlong候補はnews / AI審査後、sizing前に候補全体を1回のBoard batchとして再取得する
+  - batchは5秒以内、最良売気配の価格時刻はbatch完了から30秒以内、JST同日、受信時刻はbatch開始・完了内、現在値と最良売気配は正値を必須にした
+  - 1銘柄でもrequest不一致、取得失敗、欠損、stale、時刻逆転、価格不正なら候補全体を停止する。次順位候補への差替えは行わない
+  - freshな最良売気配をsizing価格へ使い、schema version、code、batch時刻、価格時刻source、age、受信時刻、current / best-sell / qty、拒否理由をdecision logへ保存する
+  - strict replayは `entry_quote_refresh_passed / blocked_entry_quote_refresh` をterminal lifecycleへ加え、sizing・entry・size floorの前にcode一致するquote証拠を要求する
+  - replay時にJST、5秒 / 30秒定数、timestamp算術、batch span、transport age、price age、正値価格、pass / block statusとreasonを再計算し、欠落・改ざんを `LIFECYCLE_INCOMPLETE` にする
+- reference-only baseline:
+  - cache確定最新日は `2026-07-14`、frozen holdout開始は `2026-01-13`。2026-07-15当日足は未確定なので追加していない
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` で日足経路不変を再確認
+  - full: `RETURN +3801.47% / 379 trades / PF 22.13 / WEEKS >= +1% 99/228 / POSITIVE 167/228 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -525,000円`
+  - train: `RETURN +1996.83% / 335 trades / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - contaminated holdout: `RETURN +86.07% / 44 trades / PF 15.71 / WEEKS >= +1% 14/27 / POSITIVE 21/27 / WORST -525,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused: `python -m pytest tests/test_auto_trade.py tests/test_daytrade_production_replay.py -q` -> `101 passed`
+  - full: `python -m pytest -q` -> `519 passed, 41 subtests passed`
+  - runtime hash: `sha256:cc31ed64dcbf09ca857ac649570f921a9f21c83df7c73418e20fe36d2e9cca86`
+  - 既定 `data/kabucom_test/order_journal.jsonl` は未生成、隔離済みsynthetic原本は `2,930,677 bytes` のまま保持
+  - 保存済み証拠だけのTEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`。API接続は試していない
+- 判断:
+  - 採用。日足alphaやbacktest成績を上げる変更ではなく、時間経過した価格で過大数量を決める本番差分と、その証拠欠落を利益方向へ補完しない根本安全修正である
+  - train月20%は `3/46`、月3/4稼働は `1/46` のまま未達で、「毎日勝つ」保証はできない。これを埋めるための日足条件追加は行わない
+  - actual TEST / LIVE snapshotとlinked lifecycleが0件なので、「本番同等未検証」「本番収益性未検証」を継続する
+- 再試行するとしたら:
+  - ユーザーからAPI利用可能の連絡後、同一code/runtimeで発注直前quote evidence、entry、protective stop、exit、残数量0をactual KABUCOM_TEST strict replayできる場合
+  - actual環境で5秒batchを満たせない場合は上限を利益方向に緩めず、審査候補数・取得経路・no-trade方針を設計し直す
+
+### 2026-07-15: Adopted - Wallet-Zero Fail-Closed Entry Risk Envelope and Chase Price Ceiling
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちのため再接続せず、API非依存で発注直前sizingから追従・強制約定までの損失集中リスクを監査する
+  - 発注直前quoteをfresh化した後も、実余力と追従中の価格変化でpre-trade risk capを超えない本番共通経路にする
+- 根本原因:
+  - LIVEの信用余力は正値の場合だけ理論余力をcapしていたため、wallet APIが正常に0円を返した場合は理論余力が残り、新規注文を試行できた
+  - 数量はfresh最良売気配で決めていたが、追従・強制指値が後から上昇しても、leverage、買付余力、前日turnover流動性、stop risk、notionalを再び超えない価格上限が注文経路に無かった
+  - strict replayは発注直前quoteを検証していたが、sizing入力・株数・許容最高価格の再計算と、実注文価格がその上限内かを連結検証していなかった
+  - stopのsendorder受理イベントや `confirmed=True` だけでstrict lifecycleを通せ、成功時にはorders API応答の実注文ID・銘柄・state・side・routeがjournalへ残らず、欠損項目を期待値で補って確認扱いにする経路もあった
+  - actual exitは費用とgross/netの差引だけを検証し、entry / exitのorder journalはExecutionIDを持つ一方で、全追従注文を合算した実約定qty・加重平均価格・残数をopened / exit rowと独立照合していなかった。保護逆指値の市場約定reconcileイベントにはsideも欠けていた
+- 採用変更:
+  - LIVEの信用余力は0円も有効な実測値として扱い、理論余力との `min` を必ず適用する。欠損・非数も既存どおり0円へfail closedにする
+  - 共有 `resolve_daytrade_entry_risk_envelope()` はfresh sizing価格でboard lotを決め、同じ株数がallocation leverage、95% buying power、前日turnover流動性、stop risk budget、0.1% risk floor、buying-power notional、任意のequity notionalをすべて守る最高entry価格をJPX tickで不利側へ丸める
+  - 非正値の資産・余力・価格・stop・leverage・max positions・turnover、不正なnotional/equity cap、100株未満、上限がsizing価格未満の場合はentryを停止する
+  - LIVE decision logへ資産、理論余力、wallet余力、適用余力、leverage、quote/sizing/stop、turnover、raw/final shares、最高entry価格、各capをschema v1で保存する
+  - 新規longの追従注文は正の最高entry価格と100株単位を必須にし、各通常指値と最終強制指値が上限を超える場合はAPI送信前に終端拒否する。部分約定後なら既約定分を保持し、残数量だけを拒否して保護逆指値へ進める
+  - strict replayはfresh最良売気配とrisk quoteの一致、wallet cap、共有ロジックの再計算、raw/final shares、価格上限、order journalのsizing価格・株数・上限、PLANNED/ACCEPTED買いqty・価格、opened_liveの実約定株数・平均価格がrisk envelope内であることを要求する
+  - 保護逆指値はsendorder受理後、orders API実応答の注文ID・銘柄・active state・整合状態・qty・未約定数・side・取引所・信用区分・trigger条件・返済HoldIDを正規化保存し、全項目一致時だけarmedにする。欠損実値を期待値で補わず、strict replayはboolean単独や実値改ざんを拒否し、確認qtyとentry risk距離も再計算する
+  - 追従注文完了時に全注文を合算したschema v1のFILLED summaryを1件だけ残し、全追従注文ID、requested / filled / remaining qty、加重平均価格、全ExecutionID、terminal stateを記録する。保護逆指値の市場約定reconcileにも同じschemaとsideを付ける。strict replayは全注文IDにACCEPTEDがあること、entryのopened qty/価格、exitのactual qty/価格/残数をsummaryへ完全一致させ、`gross = (observed_price - buy_price) × filled_shares` とExecutionID集合も再計算する
+- reference-only baseline:
+  - cache確定最新日は `2026-07-14`、frozen holdoutは `2026-01-13..2026-07-14`、train評価は `2022-03-01..2026-01-09` のまま。2026-07-15当日足は未確定なので更新していない
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` は終了コード0。戦略alpha、ranking、日足約定モデルを変えていないため前回と全指標一致
+  - full: `RETURN +3801.47% / 379 trades / WIN 70.45% / PF 22.13 / WEEKS >= +1% 99/228 / POSITIVE 167/228 / MONTHS >= +20% 4/52 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -525,000円`
+  - train: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - contaminated holdout: `RETURN +86.07% / 44 trades / WIN 68.18% / PF 15.71 / WEEKS >= +1% 14/27 / POSITIVE 21/27 / MONTHS >= +20% 1/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST -525,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused logic / live adapter / broker / strict replay: `python -m pytest tests/test_logic.py tests/test_auto_trade.py tests/test_kabucom_broker.py tests/test_daytrade_production_replay.py -q` -> `389 passed, 41 subtests passed`
+  - full: `python -m pytest -q` -> `532 passed, 41 subtests passed`
+  - runtime hash: `sha256:6c3636620d72be119f2e96af8c8abd6c565a13ba0d9a1b00b7c05b9f441cbf79`
+  - 既定 `data/kabucom_test/order_journal.jsonl` は未生成、隔離済みsynthetic原本は `2,930,677 bytes` のまま保持
+  - 保存済み証拠だけのTEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`。API接続は試していない
+- 判断:
+  - 採用。backtest成績を上げる分岐ではなく、実余力0円と追従中の価格上昇でpre-trade risk制約をすり抜ける本番差分を、共有ロジックとreplay可能な証拠で根本的に閉じる安全修正である
+  - train月20%は `3/46`、月3/4稼働は `1/46` のまま未達。「毎日勝つ」保証はできず、月20%を埋める目的で日足条件や上限を緩めない
+  - actual TEST / LIVE snapshotとlinked lifecycleが0件なので、「本番同等未検証」「本番収益性未検証」を継続する
+- 再試行するとしたら:
+  - ユーザーからAPI利用可能の連絡後、同一code/runtimeでwallet余力、fresh quote、entry risk envelope、PLANNED/ACCEPTED/FILLED、protective stop、exit、残数量0をactual KABUCOM_TEST strict replayできる場合
+  - actual環境で価格上限拒否が頻発しても、上限を利益方向に緩めず、拒否時の市場regime・spread・latency証拠をtrainへ持ち帰ってshared execution設計を再評価する
+
+### 2026-07-15: Adopted - Verified Broker Clock, Restored Live Month Rollover, and Snapshot Schema v4
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちのため接続せず、本番時刻、日次・週次・月次risk state、production snapshotのAPI非依存コード監査を行う
+  - 日足alphaを増やさず、バックテストでは月ごとに更新される月初資産がLIVEでも同じ意味で更新されることと、時刻fallbackを成功証拠へ昇格させないことを優先する
+- 根本原因:
+  - `KabucomBroker.get_server_time()` はwallet応答のHTTP `Date` headerが欠落・不正、tokenが欠落、HTTPが失敗した場合もローカルJSTを返していたが、呼び出し側はその出所を判別できず `clock_healthy=True` として新規entryとstate更新へ進み得た
+  - 2026-05-22の探索ログではserver timeベースの月次ロールオーバーを採用済みとしていたが、現行コードとテストに対応するhelperが無く、LIVEは起動時の月初資産を保持したまま月をまたぎ得た。日足backtestは月ごとにanchorを更新するため、本番risk制約との非対称があった
+  - production snapshotは観測・候補・執行証拠を厳格化していた一方、判断に使った基準時刻のsource、受信時刻、fallback、driftをidentityへ含めず、ローカル時計由来のsnapshotをstrict replayで拒否できなかった
+- 採用変更:
+  - brokerは認証済み `wallet/cash` のHTTP 200応答に含まれるtimezone-aware `Date` headerだけをverified clockにする。schema version、verified、source、reason、server time、received time、fallback time、driftを毎回記録する
+  - token欠落、応答欠落、非200、header欠落・naive・parse失敗、例外ではローカルJSTを監視・安全決済用に返すが、evidenceは明示的にunverifiedとする
+  - 非simulationのruntimeはevidence schema、source / reason、時刻一致、timezone、drift算術と絶対値30秒以内を再検証する。不一致では新規entry、日次・週次・月次state更新、production snapshotをfail closedにし、既存建玉の監視・安全決済は継続する
+  - `ensure_daytrade_month_state()` を復元し、verified JSTで月が変わった場合だけ `current_month` と `month_start_equity` を同時に更新する。同月または非正値資産では既存anchorを保持する
+  - production snapshotをschema v4へ上げ、simulationは明示したsimulation clock、TEST / LIVEはverified wallet Date clockを必須にした。server / received / fallback / captured時刻、30秒上限、drift算術、trade dateをsnapshot identityとstrict replayへ固定する
+- reference-only baseline:
+  - 確定cache最新日は `2026-07-14`。2026-07-15当日足は未確定のため更新せず、frozen holdoutは `2026-01-13..2026-07-14`、train評価は `2022-03-01..2026-01-09` のまま
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` は終了コード0。alpha、ranking、sizing、日足約定モデルを変更していないため全指標は前回と一致
+  - full: `RETURN +3801.47% / 379 trades / WIN 70.45% / PF 22.13 / WEEKS >= +1% 99/228 / POSITIVE 167/228 / MONTHS >= +20% 4/52 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -525,000円`
+  - train: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - contaminated holdout: `RETURN +86.07% / 44 trades / WIN 68.18% / PF 15.71 / WEEKS >= +1% 14/27 / POSITIVE 21/27 / MONTHS >= +20% 1/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST -525,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused broker / runtime clock / month rollover / strict snapshot: `250 passed, 41 subtests passed`
+  - `python -m py_compile auto_trade.py core\kabucom_broker.py core\daytrade_production_replay.py` は成功
+  - full: `python -m pytest -q` -> `541 passed, 41 subtests passed`
+  - runtime hash: `sha256:0101c560d16956193cb40a4b1c21bf95dd2887be57c8d1dba8d74e4bf67e897d`
+  - 保存済み証拠だけのTEST / LIVE strict replayは双方 `SNAPSHOTS 0 / LINKED_ACTUAL_EXITS 0 / STATUS INSUFFICIENT_SNAPSHOTS`。API接続は試していない
+  - 既定 `data/kabucom_test/order_journal.jsonl` は未生成、隔離済みsynthetic原本は `2,930,677 bytes` のまま保持
+- 判断:
+  - 採用。backtest収益を上げる変更ではなく、ローカル時計fallbackをverified扱いする経路と、月をまたいでも月初資産を更新しない本番risk差分を根本的に閉じる安全修正である
+  - trainの未達116/201週は損失除去だけでは1週しか反転せず、未選択・blocked候補の広い追加もtrain全体で負の期待値だった。月20%は `3/46`、月3/4稼働は `1/46` のままであり、これを埋めるために日足の細分条件やrisk上限緩和は追加しない
+  - 「毎日勝つ」ことは保証できず、actual TEST / LIVE snapshotとlinked actual exitが0件なので、「本番同等未検証」「本番収益性未検証」を継続する
+  - 現時点でAPI非依存かつtrain-only根拠のある追加alpha案は尽きた。以後の有効な改善材料はactual intraday clock / Board / order lifecycle、またはpoint-in-timeで履歴化できる追加市場データであり、同じ日足閾値近傍は再探索しない
+- 再試行するとしたら:
+  - ユーザーからAPI利用可能の連絡後、同一code/runtimeでverified wallet Date、月次rollover、schema v4 candidate / selected digest、注文・部分約定・取消・保護逆指値・exit・残数量0をactual KABUCOM_TEST snapshotへ連結してstrict replayできる場合
+  - actual環境でbroker clockが30秒を超えてずれる場合は上限を利益方向に緩めず、端末時刻同期、HTTP中継、受信遅延の根本原因を先に解消する
+
+### 2026-07-15: Adopted - Removed Dead Historical Size-Up Pockets After Train-Only Structural Ablation
+
+- 作業テーマ:
+  - kabuステーションAPIはユーザー確認待ちのため接続せず、確定cache `2026-07-14` とfrozen holdout `2026-01-13` を維持して、train `2022-03-01..2026-01-09` だけで曜日依存と局所size-upの一般化可能性を監査する
+  - 未達週を埋める新しいalphaが残るかを先に粗い構造で調べ、過去の局所boxを増やさず、共通risk上限で無効になった分岐だけを削除する
+- train-only原因分析:
+  - `resolve_daytrade_weekday()` を全setupで無効化した構造ablationは `RETURN -94.77% / 439 trades / WIN 32.35% / PF 0.60 / WEEKS >= +1% 63/201 / POSITIVE 73/201 / MONTHS >= +20% 0/46 / WORST -107,900円`。現行利益は曜日別の細分filterへ強く依存し、曜日を共有regimeへ置き換えるだけでは崩壊した
+  - 曜日なし候補30,483件を、breadth、market ratio、score、gap、前日return、RSI、open-vs-SMA、RSの事前固定した粗いbinで `2022..2024` design / `2025..2026-01` validationへ分けた。design `n>=30 / 18ヶ月 / PF>=1.2`、validation `n>=10 / 6ヶ月 / PF>=1.1`、十分な年次sampleで赤字なしを同時に満たすbinは0件だった
+  - setup別の曜日なしtop-daily候補も、primary `PF 0.80 / 0.72`、catchup `0.47 / 0.35`、fallback `0.34 / 0.43`、strong_oversold `0.48 / 0.34` とdesign / validationの双方で負だった
+  - setup×weekdayにも十分なsampleを持つ再現可能なedgeは無かった。primary木曜は全体で正でも2023年・2024年が赤字、strong_oversold木曜は6件だけで2025年sampleが無く、共有戦略の根拠にしなかった
+  - holdoutは上記設計、bin選択、採否へ使わず、標準候補の最終veto集計だけに限定した
+- 採用変更:
+  - setup共通の通常exposure cap後には到達不能だった8個のupward-only resolverを、setup defaultを返す共有APIへ簡素化した
+  - 対象はprimary / catchup / strong_oversoldのsize multiplier、fallback / catchup / strong_oversoldのnotional、strong_oversoldのequity notional / risk budget。過去の曜日・狭いbreadth / gap / score boxによる増幅を削除した
+  - 参照されなくなったprimary 1個、strong_oversold 5個のhistorical size-up helperも削除した。縮小、no-trade、setup共通cap、primary scoreの連続de-riskは維持した
+  - `tests/test_logic.py` はresolverが局所入力でもdefaultを超えないことへ更新し、setup共通capの回帰と合わせて直接確認する
+- 同値性とreference-only baseline:
+  - 8 resolverをdefaultへ固定する事前ablationは、full / train / setup別 / 年別の主要指標が現行baselineと完全一致した
+  - 削除後の `python jp_backtest.py --holdout-months 6 --standalone-latest-months 1` も終了コード0で全主要指標が一致した
+  - full: `RETURN +3801.47% / 379 trades / WIN 70.45% / PF 22.13 / WEEKS >= +1% 99/228 / POSITIVE 167/228 / MONTHS >= +20% 4/52 / MONTHS >= 3/4 ACTIVE 1/52 / WORST -525,000円`
+  - train: `RETURN +1996.83% / 335 trades / WIN 70.75% / PF 35.90 / WEEKS >= +1% 85/201 / POSITIVE 146/201 / MONTHS >= +20% 3/46 / MONTHS >= 3/4 ACTIVE 1/46 / WORST -122,400円`
+  - contaminated holdout: `RETURN +86.07% / 44 trades / WIN 68.18% / PF 15.71 / WEEKS >= +1% 14/27 / POSITIVE 21/27 / MONTHS >= +20% 1/5 / MONTHS >= 3/4 ACTIVE 0/5 / WORST -525,000円`
+  - 100万円 standalone `2026-06-15..2026-07-14`: `RETURN +2.62% / 5 trades / WIN 60.00% / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST -2,100円`
+- テストと証拠:
+  - focused: `python -m pytest tests/test_logic.py -q` -> `148 passed`
+  - full: `python -B -m pytest tests -q -p no:cacheprovider` -> `541 passed, 41 subtests passed`
+  - runtime hash: `sha256:c510b6f0ccd30c1be0b8300d5ef9c151865c5019fad6643c8a78dc7266eecdd7`
+  - API接続は行っていない。保存済みactual TEST / LIVE snapshotとlinked actual exitは0件のため、「本番同等未検証」「本番収益性未検証」を継続する
+- 判断:
+  - 採用。収益を変えるalphaではなく、共通上限で既に無効な局所的カーブフィット分岐を削り、将来の上限変更で過去boxが意図せず復活する経路を閉じる構造改善である
+  - 曜日なし共有戦略、粗い単一因子、setup×weekdayはいずれもtrain内の時系列再現性を満たさず不採用。同じbin、同じ曜日近傍、同じ局所size-upは再探索しない
+  - train月20%は `3/46`、月3/4稼働は `1/46`、週+1%は `85/201` のまま未達で、「毎日勝つ」ことは保証できない。達成数を増やす目的で共通risk上限を緩めない
+  - 現在のdaily OHLCと既存point-in-time featureだけでは、API非依存かつ時系列再現性のある追加alpha案は残っていない
+- 再試行するとしたら:
+  - actual intraday Board / quote / order lifecycleが同一runtimeで蓄積され、未約定・部分約定・取消・protective stop・exitを含む本番差分をtrain可能な形で分析できる場合
+  - 追加の市場データを使う場合は、当時利用可能だった時刻付き履歴を保存し、既存holdoutを再び設計へ戻さず、新しいclean holdoutで一度だけveto確認できる場合
+
+### 2026-07-15: Rejected - Monthly 20% via Loss Elimination, Common Scaling, or Multi-Position Expansion
+
+- 作業テーマ:
+  - kabuステーションAPIへ接続せず、確定cache `2026-07-14`、train `2022-03-01..2026-01-09`、frozen holdout `2026-01-13` を維持する
+  - 月20%未達が損失、既存取引のsize、取引機会のどれに起因するかを、train 46完全月の必要条件から監査する
+- train月次実現可能性:
+  - 実績は `MONTHS >= +20% 3/46`、月利平均 `7.10%`、中央値 `3.70%`、最小 `-1.13%`、最大 `54.69%`
+  - 46か月の内訳は正44、負1、flat 1。月間取引数は平均 `7.22`、中央値 `7`、月間active rate中央値は `32.58%`
+  - 各月の負けtradeを事前に完全判別して損失を0円にする非現実的なoracle上限でも、月20%到達は同じ `3/46`。`43/46`か月はgross profit自体が月初資産の20%未満だった
+  - 低いoracle上限は `2022-03 0.00% / 0 trades`、`2023-12 0.13% / 2`、`2022-04 0.16% / 3`、`2024-09 0.44% / 4`、`2024-06 0.95% / 9`。損切り改善では埋められない取引機会不足である
+  - 正だが20%未満の月を既存損益の共通scaleだけで20%へ持ち上げる必要倍率は中央値 `5.56x`、最大 `570.90x`。負月とno-trade月は倍率では符号も機会数も変わらない
+  - trainの最悪日率は `2022-06-14 -18,000円 / 月中日初資産比 -1.554%`。日次損失を1%以内へ抑えるなら線形scale上限は `0.64x` であり、必要倍率と逆方向になる
+- 既存探索との照合:
+  - 単純な `MAX_POSITIONS=2/3/4` は複数回検証済み。直近検証では2本目278件が合計 `-45.47M円`、train `PF 1.63 / WORST DAY -6,433,398円` に悪化しており、同じ分散案は再実行しない
+  - no-candidate setup miss 56,891件、selected blocked、weekly lock解除も既にtrain期待値が負。今回のoracle結果と合わせ、既存gate緩和で月20%を作る根拠は無い
+  - 曜日なし候補、粗い単一因子、setup×weekdayも直前の時系列分割で再現可能なedgeが0件だったため、近傍条件を追加しない
+- 検証:
+  - `python scripts/jp_refresh_validate.py --validate-only --holdout-months 6 --standalone-latest-months 1` は終了コード0
+  - baselineは `TRAIN RETURN +1996.83% / 335 trades / PF 35.90 / WEEKS >= +1% 85/201 / MONTHS >= +20% 3/46 / WORST DAY -122,400円`
+  - standalone `2026-06-15..2026-07-14` は `RETURN +2.62% / 5 trades / PF 13.47 / WEEKS >= +1% 1/5 / POSITIVE 3/5 / WORST DAY -2,100円`
+  - この監査ではstrategy / test codeを変更していない。直前のfull testは `541 passed, 41 subtests passed`、runtime hashは `sha256:c510b6f0ccd30c1be0b8300d5ef9c151865c5019fad6643c8a78dc7266eecdd7` のまま
+  - actual TEST / LIVE snapshotとlinked actual exitは0件で、strict replayは双方 `INSUFFICIENT_SNAPSHOTS`。本番同等未検証・本番収益性未検証を継続する
+- 判断:
+  - 損失除去、既存取引の共通size増加、複数position、既存gate緩和はいずれも月20%全月化の解ではないため不採用
+  - 目標には低相関の独立したintraday edgeと、現在の約7件/月から大幅に多い高品質な取引機会が必要。現行daily OHLCと既存point-in-time featureには、そのedgeを設計・本番同等検証する情報が無い
+  - API非依存で繰り返せる根拠ある改善は尽きており、同じ曜日、bin、size、multi-position近傍は再探索しない
+- 再開条件:
+  - actual intraday Board / quote / spread / order lifecycleが同一runtimeで蓄積され、時刻順序を含むshared exit / partial de-riskまたは独立setupをtrain設計できること
+  - または新しいpoint-in-time市場データを追加し、既存holdoutを設計へ戻さず、新しいclean holdoutで一度だけveto確認できること

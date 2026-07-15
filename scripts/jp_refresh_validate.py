@@ -21,6 +21,7 @@ from core.config import (
 )
 from core.monthly_rotation_strategy import build_rotation_backtest_inputs_from_cache
 from jp_backtest import (
+    FROZEN_HOLDOUT_START,
     _print_window_summary,
     _resolve_holdout_start_date,
     _summarize_window,
@@ -200,7 +201,11 @@ def _build_full_validation_report(
     if full_summary is None:
         raise RuntimeError("No daily statistics were produced by the full backtest.")
 
-    holdout_start = _resolve_holdout_start_date(timeline, holdout_months)
+    holdout_start = _resolve_holdout_start_date(
+        timeline,
+        holdout_months,
+        earliest_holdout_start=FROZEN_HOLDOUT_START,
+    )
     train_summary = None
     holdout_summary = None
     if holdout_start is not None:
@@ -208,7 +213,8 @@ def _build_full_validation_report(
         print(
             f"HOLDOUT SPLIT: train={full_summary['start_date']} to {train_end}, "
             f"holdout={holdout_start} to {full_summary['end_date']} "
-            f"(trailing {int(holdout_months)} month span from latest data date {timeline[-1].date()})"
+            f"(minimum trailing {int(holdout_months)} month span; "
+            f"frozen boundary {FROZEN_HOLDOUT_START})"
         )
         train_summary = _summarize_window(
             daily_stats=daily_stats,
